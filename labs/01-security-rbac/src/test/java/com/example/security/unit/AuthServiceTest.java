@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -60,6 +61,11 @@ class AuthServiceTest {
         @Override
         public Optional<User> findByUsername(String username) {
             return Optional.ofNullable(users.get(username));
+        }
+
+        @Override
+        public List<User> findAll() {
+            return List.copyOf(users.values());
         }
 
         void save(User user) {
