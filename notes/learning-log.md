@@ -18,4 +18,5 @@
 - 已确认：本机存在 JDK 17；Docker CLI 与 Compose 已安装。
 - 待处理：Docker Desktop 启动后引擎尚未响应；后续需完成首次启动设置或系统重启。
 - Maven：全局版本为 3.8.1；项目阶段使用 Maven Wrapper 固定 3.9.x。
-
+- Docker：重启后已使用官方 `hello-world` 容器验证 Docker Engine 29.7.2。
+- Task 1：基线提交为 `bb54c17`，两个参考仓库均为干净的浅克隆。
