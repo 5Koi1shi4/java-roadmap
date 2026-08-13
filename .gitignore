@@ -1,3 +1,4 @@
+HEAD
 # Compiled class file
 *.class
 
@@ -22,3 +23,34 @@
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
 replay_pid*
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Java and Maven
+target/
+.mvn/timing.properties
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+application-local.yml
+application-local.yaml
+
+# Logs and temporary files
+*.log
+tmp/
+data/
+
+# Nested reference repositories
+references/*/
+!references/README.md
+
+# Independent portfolio repositories
+projects/campus-market/
+projects/smart-support/
+
+bb54c17 (docs: initialize java backend learning roadmap)
