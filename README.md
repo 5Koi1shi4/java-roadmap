@@ -15,7 +15,7 @@
 
 | 阶段 | 项目 | 状态 |
 |---|---|---|
-| 1 | JWT 与 RBAC 权限服务 | 进行中 |
+| 1 | JWT 与 RBAC 权限服务 | 已验收 |
 | 2 | Redis 缓存与一致性 | 未开始 |
 | 3 | 秒杀、库存与接口幂等 | 未开始 |
 | 4 | 订单状态机与可靠消息 | 未开始 |
@@ -30,9 +30,9 @@
 ## 当前周
 
 - 周次：第 1 周
-- 当前任务：JWT 与 RBAC 权限服务——认证规则单元测试
-- 已完成：JDK 17、Docker Engine、Docker Compose、Git、首批参考仓库浅克隆。
-- 下一验收点：`AuthServiceTest` 按预期失败，随后实现最小认证领域逻辑使其通过。
+- 已完成任务：JWT 与 RBAC 权限服务。
+- 验收证据：`labs/01-security-rbac` 的 `mvnw.cmd verify`；包含单元测试、MockMvc 授权测试与 Testcontainers MySQL 端到端认证流程。
+- 下一任务：Redis 缓存与一致性。
 
 ## 每周闭环
 

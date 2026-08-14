@@ -64,6 +64,13 @@ class AuthServiceTest {
         }
 
         @Override
+        public Optional<User> findById(long id) {
+            return users.values().stream()
+                    .filter(user -> user.id() == id)
+                    .findFirst();
+        }
+
+        @Override
         public List<User> findAll() {
             return List.copyOf(users.values());
         }

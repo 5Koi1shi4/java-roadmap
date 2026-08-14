@@ -2,6 +2,7 @@ package com.example.security.application;
 
 import com.example.security.domain.RefreshTokenSession;
 import com.example.security.domain.RefreshTokenSessionRepository;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -14,7 +15,7 @@ import java.util.Base64;
 import java.util.HexFormat;
 import java.util.Objects;
 
-public final class RefreshTokenService {
+public class RefreshTokenService {
 
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
@@ -43,6 +44,7 @@ public final class RefreshTokenService {
         return rawToken;
     }
 
+    @Transactional
     public RotatedRefreshToken rotate(String rawToken) {
         String tokenHash = sha256(rawToken);
         RefreshTokenSession current = sessions.findByHash(tokenHash)
@@ -51,7 +53,10 @@ public final class RefreshTokenService {
                         new IllegalArgumentException("refresh token is invalid, expired, or revoked")
                 ));
 
-        sessions.save(current.revoke());
+        if (!sessions.revokeIfUsable(tokenHash, clock.instant())) {
+            throw new InvalidTokenException(
+                    new IllegalArgumentException("refresh token is invalid, expired, or revoked"));
+        }
         return new RotatedRefreshToken(current.userId(), issue(current.userId()));
     }
 
