@@ -18,7 +18,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class RbacSchemaIT {
 
     @Container
-    private static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.4.6")
+    private static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.0.46")
             .withDatabaseName("security_lab")
             .withUsername("security")
             .withPassword("security");

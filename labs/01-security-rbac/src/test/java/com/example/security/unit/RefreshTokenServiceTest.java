@@ -96,5 +96,15 @@ class RefreshTokenServiceTest {
         public Optional<RefreshTokenSession> findByHash(String tokenHash) {
             return Optional.ofNullable(sessions.get(tokenHash));
         }
+
+        @Override
+        public boolean revokeIfUsable(String tokenHash, Instant now) {
+            RefreshTokenSession current = sessions.get(tokenHash);
+            if (current == null || !current.isUsableAt(now)) {
+                return false;
+            }
+            sessions.put(tokenHash, current.revoke());
+            return true;
+        }
     }
 }

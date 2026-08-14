@@ -26,6 +26,7 @@ public class SecurityConfig {
                         .accessDeniedHandler((request, response, exception) ->
                                 response.sendError(HttpServletResponse.SC_FORBIDDEN)))
                 .authorizeHttpRequests(authorize -> authorize
+                        .requestMatchers("/api/auth/**").permitAll()
                         .requestMatchers(org.springframework.http.HttpMethod.GET, "/api/admin/users")
                         .hasAuthority("system:user:read")
                         .requestMatchers(org.springframework.http.HttpMethod.POST, "/api/admin/users/*/roles/*")
