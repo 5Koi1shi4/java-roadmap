@@ -2,6 +2,8 @@
 
 这是一个 Spring Boot 3 / Java 17 学习实验：使用 MySQL 持久化用户、角色、权限和 refresh token；使用短期 JWT access token 访问受保护接口；使用可撤销、单次消费的 refresh token 续期。
 
+本次实验中遇到的环境、认证、并发与 Git 发布问题，见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
+
 ## 你将运行到的能力
 
 - `POST /api/auth/login`：BCrypt 校验用户名和密码，签发 access / refresh token。
