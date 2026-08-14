@@ -1,6 +1,6 @@
 # 实验一排障复盘：JWT 与 RBAC 权限服务
 
-本文记录本次实验从本地环境搭建、认证接口验证到 GitHub 发布时遇到的问题。每项按“现象—原因—解决—预防”整理。示例中的账号、密码、哈希、token 与密钥均为占位概念，不能替换为真实值后提交。
+本文记录本次实验从本地环境搭建、认证接口验证到 GitHub 发布时遇到的问题。每项按“现象—原因—解决—预防”整理。文档中的 `*` 表示账号、密码、哈希、token 或密钥等脱敏值；不能将真实值提交到仓库。
 
 ## 1. Docker Compose 无法映射 MySQL 端口
 
@@ -42,7 +42,7 @@ docker compose config
 **解决：** 使用容器自带客户端：
 
 ```powershell
-docker compose exec mysql mysql -u <应用用户> -p <数据库名>
+docker compose exec mysql mysql -u * -p *
 ```
 
 **预防：** 本实验的 README 优先给出容器内客户端命令，避免把本机安装 MySQL Client 当作前置条件。
@@ -89,7 +89,7 @@ $response = Invoke-RestMethod `
 
 **解决：**
 
-- `$response.accessToken` 用于 `Authorization: Bearer <token>` 访问受保护接口；
+- `$response.accessToken` 用于 `Authorization: Bearer *` 访问受保护接口；
 - `$response.refreshToken` 只用于 `/api/auth/refresh` 与 `/api/auth/logout`；
 - refresh 成功后保存 `$refreshed.refreshToken`，旧 refresh token 应立即失效；
 - logout 返回 204，随后 refresh 返回 401，即完成验证。

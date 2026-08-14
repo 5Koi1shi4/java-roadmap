@@ -4,6 +4,8 @@
 
 本次实验中遇到的环境、认证、并发与 Git 发布问题，见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
 
+文档中的 `*` 表示本地账号、密码、哈希、token 或密钥的脱敏值；请替换为本机值，但不要提交、截图或发送真实值。
+
 ## 你将运行到的能力
 
 - `POST /api/auth/login`：BCrypt 校验用户名和密码，签发 access / refresh token。
@@ -92,7 +94,7 @@ jshell --class-path $classpath
 ```java
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 var encoder = new BCryptPasswordEncoder();
-var password = "只在本机使用的密码";
+var password = "*";
 var hash = encoder.encode(password);
 encoder.matches(password, hash);
 hash
@@ -104,11 +106,11 @@ hash
 docker compose exec mysql mysql -u $env:MYSQL_USER -p $env:MYSQL_DATABASE
 ```
 
-将下面 SQL 中的 `PASTE_BCRYPT_HASH_HERE` 替换为刚生成的完整哈希，再执行。它会创建或更新 `admin`，并授予读取用户列表所需权限：
+将下面 SQL 中的 `*` 替换为刚生成的完整哈希，再执行。它会创建或更新 `admin`，并授予读取用户列表所需权限：
 
 ```sql
 INSERT INTO sys_user (username, password_hash, enabled)
-VALUES ('admin', 'PASTE_BCRYPT_HASH_HERE', TRUE)
+VALUES ('admin', '*', TRUE)
 ON DUPLICATE KEY UPDATE password_hash = VALUES(password_hash), enabled = VALUES(enabled);
 
 INSERT INTO sys_role (code, name)
