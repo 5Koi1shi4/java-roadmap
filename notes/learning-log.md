@@ -24,6 +24,7 @@
 ## 2026-08-14
 
 - 今日目标：完成实验一 JWT/RBAC 的 JDBC 持久化、认证 HTTP 接口、真实 MySQL 端到端验证，并能在本地手动复现完整认证闭环。
+- 脱敏约定：本文中 `*` 表示账号、密码、哈希、token 或密钥等本地敏感值，真实值不记录在仓库。
 
 - 完成内容：
   - 为 `UserRepository` 补充按 ID 查询；实现 `JdbcUserRepository`、`JdbcRbacRepository` 和 `JdbcRefreshTokenSessionRepository`，使用 `JdbcTemplate` 与参数化 SQL 访问 `sys_user`、RBAC 关联表和 `refresh_token`。
@@ -47,14 +48,14 @@
   - 宿主机 MySQL 占用 3306 时，Compose 映射 3306 会失败；本地容器改用 3307，并让应用数据源指向 `jdbc:mysql://localhost:3307/security_rbac`。
   - Compose 的 `.env` 变量优先级高于 `compose.yaml` 中的默认值；使用 `docker compose config` 检查最终生效端口、数据库名和应用用户，避免只修改默认值却仍映射到旧端口。
   - MySQL 官方镜像中的 `MYSQL_USER` 只能是普通应用用户，不能设为 `root`；健康检查应使用 root 密码，或明确指定实际被检查的用户。
-  - Windows 未将 `mysql.exe` 加入 PATH 时，使用 `docker compose exec mysql mysql -u <应用用户> -p <数据库名>` 进入容器自带客户端。
+  - Windows 未将 `mysql.exe` 加入 PATH 时，使用 `docker compose exec mysql mysql -u * -p *` 进入容器自带客户端。
   - 本地初始账号必须写入 `sys_user`，密码字段只能存 BCrypt 哈希；还需写入角色、权限、`sys_user_role` 与 `sys_role_permission` 才能访问管理员接口。
   - 使用 JShell 单独调用 Spring Security 的 BCrypt 类时，需要同时在 classpath 提供 `spring-security-crypto` 与 `spring-jcl`。先执行 `encoder.matches(password, hash)` 返回 true，再把完整哈希写入数据库；不要把尖括号、空格或占位符写入哈希字段。
   - PowerShell 中优先用 `ConvertTo-Json -Compress` 构造请求体；手工拼接 JSON 容易造成字段名缺少双引号，Spring 会抛出 `HttpMessageNotReadableException`，认证逻辑不会执行。
 
 - 认证链路复盘：
   - 登录请求进入 `AuthController`，`AuthService` 通过用户名查找用户并以 BCrypt 校验密码；成功后返回 access token 与 refresh token。
-  - 访问 `/api/admin/users` 时，客户端携带 `Authorization: Bearer <accessToken>`；`JwtAuthenticationFilter` 验证 JWT，读取 userId，通过 `RbacService` 查询权限码，创建 `Authentication` 放入 `SecurityContext`。
+  - 访问 `/api/admin/users` 时，客户端携带 `Authorization: Bearer *`；`JwtAuthenticationFilter` 验证 JWT，读取 userId，通过 `RbacService` 查询权限码，创建 `Authentication` 放入 `SecurityContext`。
   - `SecurityConfig` 再判断当前 `Authentication` 是否具有 `system:user:read`：通过则返回 200，已认证但无权限为 403，未认证或 token 无效为 401。
 
 - 技术选择及取舍：

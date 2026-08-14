@@ -1,10 +1,10 @@
-# Java Backend Interview Question Bank
+# Java 后端面试题库
 
-每个回答必须能回到本仓库的代码、SQL 或测试证据，而不是背诵概念。以下 10 题来自实验一：JWT 与 RBAC 权限服务。
+每个回答必须能回到本仓库的代码、SQL 或测试证据，而不是背诵概念。以下 10 题来自实验一：JWT 与 RBAC 权限服务。文中的 `*` 表示脱敏后的账号、密码、哈希、token 或密钥值。
 
 ## 1. 请从一次管理员请求说明认证如何进入 `SecurityContext`。
 
-**回答：** 客户端在 `Authorization: Bearer <accessToken>` 中提交 JWT。`JwtAuthenticationFilter` 先验证签名、过期时间和 `token_use=access`，再从 JWT subject 取出 `userId`。随后调用 `RbacService.authoritiesOf(userId)` 查询该用户当前的权限码，创建带 authorities 的 `Authentication` 并放进 `SecurityContext`。最后 `SecurityConfig` 对 `GET /api/admin/users` 执行 `hasAuthority("system:user:read")` 判断。
+**回答：** 客户端在 `Authorization: Bearer *` 中提交 JWT。`JwtAuthenticationFilter` 先验证签名、过期时间和 `token_use=access`，再从 JWT subject 取出 `userId`。随后调用 `RbacService.authoritiesOf(userId)` 查询该用户当前的权限码，创建带 authorities 的 `Authentication` 并放进 `SecurityContext`。最后 `SecurityConfig` 对 `GET /api/admin/users` 执行 `hasAuthority("system:user:read")` 判断。
 
 **代码证据：** `JwtAuthenticationFilter`、`RbacService`、`SecurityConfig`；`AdminAuthorizationIT` 覆盖 401、403、200 三个分支。
 
@@ -66,10 +66,10 @@
 
 ## 技术取舍速记
 
-| 选择 | 收益 | 代价 |
-| --- | --- | --- |
-| 短期 JWT access token | 资源访问不需要服务端 session 查询 | 注销后不能立刻撤销已签发 access token |
-| 数据库 refresh token | 可撤销、可轮换、可检测重复使用 | 刷新请求需要访问数据库 |
-| 条件更新消费 refresh token | 同一 token 并发时只会成功一次 | 依赖数据库事务与受影响行数判断 |
-| 每次请求查询权限 | 权限变化立即生效 | 增加一次 RBAC 查询 |
-| Flyway + Testcontainers | 迁移与真实 MySQL 行为可复现 | 本地完整端测依赖 Docker |
+| 选择                       | 收益                              | 代价                                  |
+| -------------------------- | --------------------------------- | ------------------------------------- |
+| 短期 JWT access token      | 资源访问不需要服务端 session 查询 | 注销后不能立刻撤销已签发 access token |
+| 数据库 refresh token       | 可撤销、可轮换、可检测重复使用    | 刷新请求需要访问数据库                |
+| 条件更新消费 refresh token | 同一 token 并发时只会成功一次     | 依赖数据库事务与受影响行数判断        |
+| 每次请求查询权限           | 权限变化立即生效                  | 增加一次 RBAC 查询                    |
+| Flyway + Testcontainers    | 迁移与真实 MySQL 行为可复现       | 本地完整端测依赖 Docker               |
