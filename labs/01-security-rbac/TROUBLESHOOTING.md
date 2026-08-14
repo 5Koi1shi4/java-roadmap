@@ -2,9 +2,16 @@
 
 本文记录本次实验从本地环境搭建、认证接口验证到 GitHub 发布时遇到的问题。每项按“现象—原因—解决—预防”整理。文档中的 `*` 表示账号、密码、哈希、token 或密钥等脱敏值；不能将真实值提交到仓库。
 
+## 阅读提示
+
+- 反引号包围的内容是命令、文件名、环境变量、端口、错误文本或代码变量，例如 `docker compose config`、`.env`、`MYSQL_PORT`。
+- 将 Markdown 复制为纯文本时，反引号样式可能被去掉，命令与中文会显得粘连。应以原始 Markdown 或渲染预览为准。
+- 在 VS Code 中打开本文件后按 `Ctrl+Shift+V` 可查看完整预览；在 GitHub 仓库中打开本文件可直接阅读渲染版本。
+- 下文的“现象—原因—解决—预防”分别对应：看到什么、为什么发生、如何操作、以后如何避免。
+
 ## 1. Docker Compose 无法映射 MySQL 端口
 
-**现象：** `docker compose up -d` 报 `ports are not available`，提示宿主机 `3306` 已被占用。
+**现象：** 执行 `docker compose up -d` 时，Docker 报错 `ports are not available`。这表示宿主机端口 `3306` 已被其他程序占用。
 
 **原因：** 本机已有 MySQL 服务监听 3306。只修改 `compose.yaml` 中的默认端口并不一定生效，因为 `.env` 中的 `MYSQL_PORT` 会覆盖默认值。
 
