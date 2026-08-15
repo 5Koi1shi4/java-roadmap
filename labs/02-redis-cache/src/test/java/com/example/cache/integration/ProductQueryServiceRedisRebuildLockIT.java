@@ -112,6 +112,52 @@ class ProductQueryServiceRedisRebuildLockIT {
                         .isIn(ProductView.found(repository.product), "系统繁忙，请稍后重试"));
     }
 
+    @Test
+    void waitsForTheLockOwnerToPopulateTheCacheBeforeReturningToACompetingInstance() throws Exception {
+        Product product = new Product(7L, "Java 编程思想", 99_00L);
+        DelayedProductRepository delayedRepository = new DelayedProductRepository(product);
+        ProductCache sharedCache = new RedisProductCache(redisTemplate, new ObjectMapper());
+        ProductQueryService lockOwner = new ProductQueryService(
+                delayedRepository, sharedCache, new RedisRebuildLock(redisTemplate));
+        ProductQueryService competitor = new ProductQueryService(
+                delayedRepository, sharedCache, new RedisRebuildLock(redisTemplate));
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            var ownerCall = executor.submit(() -> lockOwner.getProduct(7L));
+            assertThat(delayedRepository.lookupStarted.await(5, TimeUnit.SECONDS)).isTrue();
+
+            long startedAt = System.nanoTime();
+            ProductView competitorResult = competitor.getProduct(7L);
+            long elapsedMillis = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+
+            assertThat(competitorResult).isEqualTo(ProductView.found(product));
+            assertThat(elapsedMillis).isLessThan(500L);
+            assertThat(ownerCall.get(5, TimeUnit.SECONDS)).isEqualTo(ProductView.found(product));
+        } finally {
+            executor.shutdownNow();
+        }
+
+        assertThat(delayedRepository.findCalls.get()).isEqualTo(1);
+    }
+
+    @Test
+    void preservesTheInterruptedStatusWhenLockAcquisitionIsWaiting() {
+        RedisRebuildLock firstClient = new RedisRebuildLock(redisTemplate);
+        RedisRebuildLock interruptedClient = new RedisRebuildLock(redisTemplate);
+        var ownerLock = firstClient.tryAcquire(7L).orElseThrow();
+        try {
+            Thread.currentThread().interrupt();
+
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> interruptedClient.tryAcquire(7L))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("interrupted while waiting for Redis rebuild lock");
+            assertThat(Thread.currentThread().isInterrupted()).isTrue();
+        } finally {
+            Thread.interrupted();
+            firstClient.release(ownerLock);
+        }
+    }
+
     private static final class CountingProductRepository implements ProductRepository {
         private final Product product;
         private final AtomicInteger findCalls = new AtomicInteger();
@@ -123,6 +169,34 @@ class ProductQueryServiceRedisRebuildLockIT {
         @Override
         public Optional<Product> findById(long id) {
             findCalls.incrementAndGet();
+            return Optional.of(product);
+        }
+
+        @Override
+        public void update(Product product) {
+            throw new UnsupportedOperationException("not needed by query test");
+        }
+    }
+
+    private static final class DelayedProductRepository implements ProductRepository {
+        private final Product product;
+        private final AtomicInteger findCalls = new AtomicInteger();
+        private final CountDownLatch lookupStarted = new CountDownLatch(1);
+
+        private DelayedProductRepository(Product product) {
+            this.product = product;
+        }
+
+        @Override
+        public Optional<Product> findById(long id) {
+            findCalls.incrementAndGet();
+            lookupStarted.countDown();
+            try {
+                Thread.sleep(100L);
+            } catch (InterruptedException exception) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("interrupted while simulating repository lookup", exception);
+            }
             return Optional.of(product);
         }
 
