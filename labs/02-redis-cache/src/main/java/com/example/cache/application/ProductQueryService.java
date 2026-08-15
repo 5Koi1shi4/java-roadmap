@@ -15,7 +15,7 @@ public final class ProductQueryService {
 
     private final ProductRepository repository;
     private final ProductCache cache;
-    private final ConcurrentHashMap<Long, ReentrantLock> rebuildLocks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Long, RebuildLock> rebuildLocks = new ConcurrentHashMap<>();
 
     public ProductQueryService(ProductRepository repository, ProductCache cache) {
         this.repository = repository;
@@ -32,27 +32,54 @@ public final class ProductQueryService {
             return cached;
         }
 
-        ReentrantLock rebuildLock = rebuildLocks.computeIfAbsent(id, ignored -> new ReentrantLock());
-        if (!tryAcquire(rebuildLock)) {
-            ProductView rebuilt = cachedProductView(id);
-            if (rebuilt != null) {
-                return rebuilt;
-            }
-            throw new IllegalStateException("系统繁忙，请稍后重试");
-        }
-
+        RebuildLock rebuildLock = retainRebuildLock(id);
         try {
-            ProductView rebuilt = cachedProductView(id);
-            if (rebuilt != null) {
-                return rebuilt;
+            boolean lockAcquired = tryAcquire(rebuildLock.lock);
+            if (!lockAcquired) {
+                ProductView rebuilt = cachedProductView(id);
+                if (rebuilt != null) {
+                    return rebuilt;
+                }
+                throw new IllegalStateException("系统繁忙，请稍后重试");
             }
 
-            return repository.findById(id)
-                    .map(this::cacheAndReturn)
-                    .orElseGet(() -> cacheNegativeAndReturnNotFound(id));
+            try {
+                ProductView rebuilt = cachedProductView(id);
+                if (rebuilt != null) {
+                    return rebuilt;
+                }
+
+                return repository.findById(id)
+                        .map(this::cacheAndReturn)
+                        .orElseGet(() -> cacheNegativeAndReturnNotFound(id));
+            } finally {
+                rebuildLock.lock.unlock();
+            }
         } finally {
-            rebuildLock.unlock();
+            releaseRebuildLock(id, rebuildLock);
         }
+    }
+
+    int activeRebuildLockCount() {
+        return rebuildLocks.size();
+    }
+
+    private RebuildLock retainRebuildLock(long id) {
+        return rebuildLocks.compute(id, (ignored, existing) -> {
+            RebuildLock rebuildLock = existing == null ? new RebuildLock() : existing;
+            rebuildLock.participants++;
+            return rebuildLock;
+        });
+    }
+
+    private void releaseRebuildLock(long id, RebuildLock rebuildLock) {
+        rebuildLocks.computeIfPresent(id, (ignored, existing) -> {
+            if (existing != rebuildLock) {
+                throw new IllegalStateException("rebuild lock lifecycle is inconsistent");
+            }
+            rebuildLock.participants--;
+            return rebuildLock.participants == 0 ? null : rebuildLock;
+        });
     }
 
     private boolean tryAcquire(ReentrantLock rebuildLock) {
@@ -83,5 +110,10 @@ public final class ProductQueryService {
     private ProductView cacheNegativeAndReturnNotFound(long id) {
         cache.putNegative(id);
         return ProductView.notFound();
+    }
+
+    private static final class RebuildLock {
+        private final ReentrantLock lock = new ReentrantLock();
+        private int participants;
     }
 }

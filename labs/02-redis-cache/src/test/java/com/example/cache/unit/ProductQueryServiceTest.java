@@ -1,6 +1,7 @@
 package com.example.cache.unit;
 
 import com.example.cache.application.ProductQueryService;
+import com.example.cache.application.ProductQueryServiceTestHooks;
 import com.example.cache.application.ProductView;
 import com.example.cache.domain.Product;
 import com.example.cache.domain.ProductCache;
@@ -125,7 +126,20 @@ class ProductQueryServiceTest {
             executor.shutdownNow();
         }
 
-        assertThat(concurrentRepository.findCalls.get()).isLessThanOrEqualTo(2);
+        assertThat(concurrentRepository.findCalls.get()).isEqualTo(1);
+        assertThat(ProductQueryServiceTestHooks.activeRebuildLockCount(concurrentService)).isZero();
+    }
+
+    @Test
+    void releasesRebuildLocksAfterDistinctCacheMissesFinish() {
+        for (long id = 1; id <= 100; id++) {
+            Product product = new Product(id, "Java 编程思想", 99_00L);
+            repository.products.put(id, product);
+
+            assertThat(service.getProduct(id)).isEqualTo(ProductView.found(product));
+        }
+
+        assertThat(ProductQueryServiceTestHooks.activeRebuildLockCount(service)).isZero();
     }
 
     @Test
@@ -288,4 +302,5 @@ class ProductQueryServiceTest {
             entries.remove(id);
         }
     }
+
 }
