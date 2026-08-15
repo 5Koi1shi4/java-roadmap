@@ -88,7 +88,7 @@ class ProductQueryServiceTest {
     }
 
     @Test
-    void rebuildsAnExpiredHotKeyWithAtMostTwoRepositoryLookups() throws Exception {
+    void rebuildsAnExpiredHotKeyWithExactlyOneRepositoryLookup() throws Exception {
         Product product = new Product(7L, "Java 编程思想", 99_00L);
         ConcurrentProductRepository concurrentRepository = new ConcurrentProductRepository(product);
         ProductQueryService concurrentService = new ProductQueryService(

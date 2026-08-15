@@ -15,11 +15,22 @@ public final class ProductQueryService {
 
     private final ProductRepository repository;
     private final ProductCache cache;
+    private final RebuildLockObserver rebuildLockObserver;
     private final ConcurrentHashMap<Long, RebuildLock> rebuildLocks = new ConcurrentHashMap<>();
 
     public ProductQueryService(ProductRepository repository, ProductCache cache) {
+        this(repository, cache, id -> {
+        });
+    }
+
+    ProductQueryService(
+            ProductRepository repository,
+            ProductCache cache,
+            RebuildLockObserver rebuildLockObserver
+    ) {
         this.repository = repository;
         this.cache = cache;
+        this.rebuildLockObserver = rebuildLockObserver;
     }
 
     public ProductView getProduct(long id) {
@@ -33,6 +44,7 @@ public final class ProductQueryService {
         }
 
         RebuildLock rebuildLock = retainRebuildLock(id);
+        rebuildLockObserver.afterRetain(id);
         try {
             boolean lockAcquired = tryAcquire(rebuildLock.lock);
             if (!lockAcquired) {
@@ -62,6 +74,11 @@ public final class ProductQueryService {
 
     int activeRebuildLockCount() {
         return rebuildLocks.size();
+    }
+
+    boolean hasQueuedRebuildLock(long id) {
+        RebuildLock rebuildLock = rebuildLocks.get(id);
+        return rebuildLock != null && rebuildLock.lock.hasQueuedThreads();
     }
 
     private RebuildLock retainRebuildLock(long id) {
@@ -115,5 +132,10 @@ public final class ProductQueryService {
     private static final class RebuildLock {
         private final ReentrantLock lock = new ReentrantLock();
         private int participants;
+    }
+
+    @FunctionalInterface
+    interface RebuildLockObserver {
+        void afterRetain(long id);
     }
 }
