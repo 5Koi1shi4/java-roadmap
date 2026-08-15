@@ -53,4 +53,7 @@ references/*/
 projects/campus-market/
 projects/smart-support/
 
+# Local linked worktrees
+.worktrees/
+
 bb54c17 (docs: initialize java backend learning roadmap)
