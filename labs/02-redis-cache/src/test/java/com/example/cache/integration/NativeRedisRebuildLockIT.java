@@ -62,6 +62,15 @@ class NativeRedisRebuildLockIT {
     }
 
     @Test
+    void preventsAnotherClientFromAcquiringBeforeTheLocksTtlExpires() {
+        var firstLock = firstClient.tryAcquire(46L).orElseThrow();
+
+        assertThat(secondClient.tryAcquire(46L)).isEmpty();
+        assertThat(redisTemplate.opsForValue().get("lock:product:rebuild:46"))
+                .isEqualTo(firstLock.token());
+    }
+
+    @Test
     void letsAnotherClientAcquireAfterTheLockExpires() throws InterruptedException {
         assertThat(firstClient.tryAcquire(43L)).isPresent();
 
