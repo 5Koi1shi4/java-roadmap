@@ -53,6 +53,11 @@ public final class RedisProductCache implements ProductCache {
         redisTemplate.opsForValue().set(key(id), NEGATIVE, NEGATIVE_TTL);
     }
 
+    @Override
+    public void evict(long id) {
+        redisTemplate.delete(key(id));
+    }
+
     private String key(long id) {
         return KEY_PREFIX + id;
     }

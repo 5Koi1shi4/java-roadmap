@@ -8,6 +8,8 @@ public interface ProductCache {
 
     void putNegative(long id);
 
+    void evict(long id);
+
     sealed interface CacheLookup permits CacheLookup.Miss, CacheLookup.ProductHit, CacheLookup.NegativeHit {
 
         record Miss() implements CacheLookup {

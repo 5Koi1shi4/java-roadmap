@@ -90,6 +90,11 @@ class ProductQueryServiceTest {
             return Optional.ofNullable(products.get(id));
         }
 
+        @Override
+        public void update(Product product) {
+            products.put(product.id(), product);
+        }
+
         void clear() {
             products.clear();
             findCalls = 0;
@@ -114,6 +119,11 @@ class ProductQueryServiceTest {
         @Override
         public void putNegative(long id) {
             entries.put(id, CacheLookup.negative());
+        }
+
+        @Override
+        public void evict(long id) {
+            entries.remove(id);
         }
 
         void clear() {
