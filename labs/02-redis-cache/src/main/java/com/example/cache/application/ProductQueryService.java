@@ -5,6 +5,7 @@ import com.example.cache.domain.ProductCache;
 import com.example.cache.domain.ProductCache.CacheLookup;
 import com.example.cache.domain.ProductRepository;
 
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
@@ -15,12 +16,17 @@ public final class ProductQueryService {
 
     private final ProductRepository repository;
     private final ProductCache cache;
-    private final RebuildLockObserver rebuildLockObserver;
-    private final ConcurrentHashMap<Long, RebuildLock> rebuildLocks = new ConcurrentHashMap<>();
+    private final RebuildLock rebuildLock;
 
     public ProductQueryService(ProductRepository repository, ProductCache cache) {
-        this(repository, cache, id -> {
-        });
+        this(repository, cache, new LocalRebuildLock(id -> {
+        }));
+    }
+
+    public ProductQueryService(ProductRepository repository, ProductCache cache, RebuildLock rebuildLock) {
+        this.repository = repository;
+        this.cache = cache;
+        this.rebuildLock = rebuildLock;
     }
 
     ProductQueryService(
@@ -28,9 +34,7 @@ public final class ProductQueryService {
             ProductCache cache,
             RebuildLockObserver rebuildLockObserver
     ) {
-        this.repository = repository;
-        this.cache = cache;
-        this.rebuildLockObserver = rebuildLockObserver;
+        this(repository, cache, new LocalRebuildLock(rebuildLockObserver));
     }
 
     public ProductView getProduct(long id) {
@@ -43,69 +47,38 @@ public final class ProductQueryService {
             return cached;
         }
 
-        RebuildLock rebuildLock = retainRebuildLock(id);
-        rebuildLockObserver.afterRetain(id);
+        Optional<? extends RebuildLock.LockHandle> acquiredLock = rebuildLock.tryAcquire(id);
+        if (acquiredLock.isEmpty()) {
+            ProductView rebuilt = cachedProductView(id);
+            if (rebuilt != null) {
+                return rebuilt;
+            }
+            throw new IllegalStateException("系统繁忙，请稍后重试");
+        }
+
         try {
-            boolean lockAcquired = tryAcquire(rebuildLock.lock);
-            if (!lockAcquired) {
-                ProductView rebuilt = cachedProductView(id);
-                if (rebuilt != null) {
-                    return rebuilt;
-                }
-                throw new IllegalStateException("系统繁忙，请稍后重试");
+            ProductView rebuilt = cachedProductView(id);
+            if (rebuilt != null) {
+                return rebuilt;
             }
 
-            try {
-                ProductView rebuilt = cachedProductView(id);
-                if (rebuilt != null) {
-                    return rebuilt;
-                }
-
-                return repository.findById(id)
-                        .map(this::cacheAndReturn)
-                        .orElseGet(() -> cacheNegativeAndReturnNotFound(id));
-            } finally {
-                rebuildLock.lock.unlock();
-            }
+            return repository.findById(id)
+                    .map(this::cacheAndReturn)
+                    .orElseGet(() -> cacheNegativeAndReturnNotFound(id));
         } finally {
-            releaseRebuildLock(id, rebuildLock);
+            rebuildLock.release(acquiredLock.orElseThrow());
         }
     }
 
     int activeRebuildLockCount() {
-        return rebuildLocks.size();
+        return rebuildLock instanceof LocalRebuildLock localRebuildLock
+                ? localRebuildLock.activeLockCount()
+                : 0;
     }
 
     boolean hasQueuedRebuildLock(long id) {
-        RebuildLock rebuildLock = rebuildLocks.get(id);
-        return rebuildLock != null && rebuildLock.lock.hasQueuedThreads();
-    }
-
-    private RebuildLock retainRebuildLock(long id) {
-        return rebuildLocks.compute(id, (ignored, existing) -> {
-            RebuildLock rebuildLock = existing == null ? new RebuildLock() : existing;
-            rebuildLock.participants++;
-            return rebuildLock;
-        });
-    }
-
-    private void releaseRebuildLock(long id, RebuildLock rebuildLock) {
-        rebuildLocks.computeIfPresent(id, (ignored, existing) -> {
-            if (existing != rebuildLock) {
-                throw new IllegalStateException("rebuild lock lifecycle is inconsistent");
-            }
-            rebuildLock.participants--;
-            return rebuildLock.participants == 0 ? null : rebuildLock;
-        });
-    }
-
-    private boolean tryAcquire(ReentrantLock rebuildLock) {
-        try {
-            return rebuildLock.tryLock(REBUILD_LOCK_WAIT_MILLIS, TimeUnit.MILLISECONDS);
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("系统繁忙，请稍后重试", exception);
-        }
+        return rebuildLock instanceof LocalRebuildLock localRebuildLock
+                && localRebuildLock.hasQueuedLock(id);
     }
 
     private ProductView cachedProductView(long id) {
@@ -129,9 +102,74 @@ public final class ProductQueryService {
         return ProductView.notFound();
     }
 
-    private static final class RebuildLock {
+    private static final class LocalRebuildLock implements RebuildLock {
+        private final RebuildLockObserver observer;
+        private final ConcurrentHashMap<Long, LocalLock> locks = new ConcurrentHashMap<>();
+
+        private LocalRebuildLock(RebuildLockObserver observer) {
+            this.observer = observer;
+        }
+
+        @Override
+        public Optional<LockHandle> tryAcquire(long productId) {
+            LocalLock localLock = retain(productId);
+            observer.afterRetain(productId);
+            try {
+                if (localLock.lock.tryLock(REBUILD_LOCK_WAIT_MILLIS, TimeUnit.MILLISECONDS)) {
+                    return Optional.of(new LocalLockHandle(productId, localLock));
+                }
+                releaseReference(productId, localLock);
+                return Optional.empty();
+            } catch (InterruptedException exception) {
+                releaseReference(productId, localLock);
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("系统繁忙，请稍后重试", exception);
+            }
+        }
+
+        @Override
+        public void release(LockHandle lock) {
+            if (!(lock instanceof LocalLockHandle localLockHandle)) {
+                throw new IllegalArgumentException("lock handle was not created by LocalRebuildLock");
+            }
+            localLockHandle.lock().lock.unlock();
+            releaseReference(localLockHandle.productId(), localLockHandle.lock());
+        }
+
+        private int activeLockCount() {
+            return locks.size();
+        }
+
+        private boolean hasQueuedLock(long productId) {
+            LocalLock localLock = locks.get(productId);
+            return localLock != null && localLock.lock.hasQueuedThreads();
+        }
+
+        private LocalLock retain(long productId) {
+            return locks.compute(productId, (ignored, existing) -> {
+                LocalLock localLock = existing == null ? new LocalLock() : existing;
+                localLock.participants++;
+                return localLock;
+            });
+        }
+
+        private void releaseReference(long productId, LocalLock localLock) {
+            locks.computeIfPresent(productId, (ignored, existing) -> {
+                if (existing != localLock) {
+                    throw new IllegalStateException("rebuild lock lifecycle is inconsistent");
+                }
+                localLock.participants--;
+                return localLock.participants == 0 ? null : localLock;
+            });
+        }
+    }
+
+    private static final class LocalLock {
         private final ReentrantLock lock = new ReentrantLock();
         private int participants;
+    }
+
+    private record LocalLockHandle(long productId, LocalLock lock) implements RebuildLock.LockHandle {
     }
 
     @FunctionalInterface
