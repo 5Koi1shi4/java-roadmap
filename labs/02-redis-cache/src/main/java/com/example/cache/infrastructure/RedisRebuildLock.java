@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.LongSupplier;
 
 public final class RedisRebuildLock implements RebuildLock {
 
@@ -21,9 +22,17 @@ public final class RedisRebuildLock implements RebuildLock {
             Long.class);
 
     private final StringRedisTemplate redisTemplate;
+    private final LongSupplier nanoTime;
+    private final Sleeper sleeper;
 
     public RedisRebuildLock(StringRedisTemplate redisTemplate) {
+        this(redisTemplate, System::nanoTime, Thread::sleep);
+    }
+
+    RedisRebuildLock(StringRedisTemplate redisTemplate, LongSupplier nanoTime, Sleeper sleeper) {
         this.redisTemplate = Objects.requireNonNull(redisTemplate);
+        this.nanoTime = Objects.requireNonNull(nanoTime);
+        this.sleeper = Objects.requireNonNull(sleeper);
     }
 
     @Override
@@ -32,13 +41,16 @@ public final class RedisRebuildLock implements RebuildLock {
             throw new IllegalStateException("interrupted while waiting for Redis rebuild lock");
         }
         String token = UUID.randomUUID().toString();
-        long deadline = System.nanoTime() + ACQUIRE_WAIT.toNanos();
+        long deadline = nanoTime.getAsLong() + ACQUIRE_WAIT.toNanos();
         while (true) {
+            if (nanoTime.getAsLong() >= deadline) {
+                return Optional.empty();
+            }
             Boolean acquired = redisTemplate.opsForValue().setIfAbsent(key(productId), token, LOCK_TTL);
             if (Boolean.TRUE.equals(acquired)) {
                 return Optional.of(new LockHandle(productId, token));
             }
-            if (System.nanoTime() >= deadline) {
+            if (nanoTime.getAsLong() >= deadline) {
                 return Optional.empty();
             }
             waitBeforeRetry(deadline);
@@ -59,12 +71,12 @@ public final class RedisRebuildLock implements RebuildLock {
     }
 
     private void waitBeforeRetry(long deadline) {
-        long remainingNanos = deadline - System.nanoTime();
+        long remainingNanos = deadline - nanoTime.getAsLong();
         long sleepMillis = Math.max(1L, Math.min(
                 ACQUIRE_RETRY_INTERVAL.toMillis(),
                 Duration.ofNanos(remainingNanos).toMillis()));
         try {
-            Thread.sleep(sleepMillis);
+            sleeper.sleep(sleepMillis);
         } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("interrupted while waiting for Redis rebuild lock", exception);
@@ -72,5 +84,10 @@ public final class RedisRebuildLock implements RebuildLock {
     }
 
     public record LockHandle(long productId, String token) implements RebuildLock.LockHandle {
+    }
+
+    @FunctionalInterface
+    interface Sleeper {
+        void sleep(long millis) throws InterruptedException;
     }
 }
