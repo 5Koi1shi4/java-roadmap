@@ -21,6 +21,7 @@
         <java.version>17</java.version>
         <maven.compiler.release>17</maven.compiler.release>
         <testcontainers.version>1.21.4</testcontainers.version>
+        <redisson.version>3.50.0</redisson.version>
     </properties>
 
     <dependencies>
@@ -35,6 +36,11 @@
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.redisson</groupId>
+            <artifactId>redisson</artifactId>
+            <version>${redisson.version}</version>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
