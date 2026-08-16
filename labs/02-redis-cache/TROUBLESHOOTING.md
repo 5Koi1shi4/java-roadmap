@@ -72,19 +72,19 @@ docker ps
 
 ## 5. Docker Compose 的 MySQL 端口冲突
 
-**现象：** `docker compose up -d` 报 `ports are not available`，本机 `3306` 或 `3307` 已被占用。
+**现象：** `docker compose up -d` 报 `ports are not available`，本机默认 MySQL 端口 `3308` 已被占用。
 
 **原因：** 本地 MySQL 或其他实验容器已绑定同一宿主机端口。
 
-**解决：** 先查看占用，再用本地临时环境变量映射空闲端口，例如 3308：
+**解决：** `3308` 是仓库默认值。先查看占用；仅当它冲突时，再显式设置一个空闲的 `MYSQL_PORT`，例如 3310：
 
 ```powershell
-netstat -ano | findstr :3306
-$env:MYSQL_PORT = '3308'
+netstat -ano | findstr :3308
+$env:MYSQL_PORT = '3310'
 docker compose up -d
 ```
 
-随后以同一个 `MYSQL_PORT` 启动应用。不要提交临时端口或本地 `.env`。
+随后以同一个 `MYSQL_PORT` 启动应用。不要提交本地覆盖或 `.env`。
 
 **预防：** 每次启动前执行 `docker compose config` 检查最终端口映射。
 

@@ -87,7 +87,7 @@ $env:JAVA_HOME = 'C:\Program Files\Java\jdk-17'
 .\mvnw.cmd spring-boot:run
 ```
 
-默认连接为 `localhost:3306/redis_cache`（用户取自 `.env` 的 `MYSQL_USERNAME`，默认 `cache`）与 `localhost:6379`。密码只从未提交的 `.env`/环境变量读取。可用以下端点检查运行态：
+默认连接为 `localhost:3308/redis_cache`（用户取自 `.env` 的 `MYSQL_USERNAME`，默认 `cache`）与 `localhost:6379`。密码只从未提交的 `.env`/环境变量读取。可用以下端点检查运行态：
 
 ```powershell
 Invoke-WebRequest http://localhost:8080/api/products/7
@@ -179,4 +179,4 @@ $env:JAVA_HOME = 'C:\Program Files\Java\jdk-17'
 
 Actuator 计数器在预热后、压测前分别为 `cache.hit=0`、`cache.miss=1`、`cache.repository_load=1`、`cache.lock_busy=0`、`cache.lock.wait COUNT=1`；压测后为 `574675`、`1`、`1`、`0`、`1`。因此压测期增量为 `cache.hit=574675`，其余上述 COUNT 均为 0，符合已预热热点 Key 全部从缓存返回、无额外 MySQL 回源或锁繁忙的预期。
 
-本机排障记录：裸命令 `k6 version` 因 PATH 未包含安装目录而失败，但 `C:\Program Files\k6\k6.exe` 可运行并报告 v2.2.0。README 默认 `docker compose up -d` 首次因宿主机 `3306` 已被占用而无法绑定；`3307` 也被现有容器占用。本次仅使用未提交的临时 Compose 覆盖将实验 MySQL 映射为 `3308:3306`，并以 `MYSQL_PORT=3308` 启动应用，仓库默认 Compose 与端口未修改。
+本机排障记录：裸命令 `k6 version` 因 PATH 未包含安装目录而失败，但 `C:\Program Files\k6\k6.exe` 可运行并报告 v2.2.0。MySQL 默认宿主机端口已固定为 `3308`，因此 README 的 `docker compose up -d` 和应用默认数据源会使用 `3308:3306`；仅当 `3308` 被占用时，才显式设置相同的 `MYSQL_PORT` 覆盖 Compose 与应用端口。
