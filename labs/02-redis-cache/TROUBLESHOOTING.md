@@ -86,7 +86,17 @@ docker compose up -d
 
 随后以同一个 `MYSQL_PORT` 启动应用。不要提交本地覆盖或 `.env`。
 
-**预防：** 每次启动前执行 `docker compose config` 检查最终端口映射。
+**预防：** 每次启动前只筛选 MySQL 的 `ports` 字段，避免诊断输出包含可复制的环境字段；不要运行或复制裸的完整 Compose 配置输出命令：
+
+```powershell
+docker compose config --format json |
+  ConvertFrom-Json |
+  Select-Object -ExpandProperty services |
+  Select-Object -ExpandProperty mysql |
+  Select-Object -ExpandProperty ports
+```
+
+默认结果应为 `3308:3306`；在同一会话设置 `$env:MYSQL_PORT = '3310'` 后重新运行上述安全命令，应为 `3310:3306`。该命令只显示端口映射，不显示密码、token 或其他环境值。
 
 ## 6. k6 已安装但 PowerShell 找不到命令
 

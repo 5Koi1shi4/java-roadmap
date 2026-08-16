@@ -94,6 +94,27 @@ Invoke-WebRequest http://localhost:8080/api/products/7
 Invoke-WebRequest http://localhost:8080/actuator/metrics/cache.hit
 ```
 
+### 安全确认 MySQL 宿主机端口
+
+端口冲突时，诊断命令只能显示 MySQL 的 `ports` 字段；不要运行或复制会输出完整 Compose 配置（其中可能包含环境字段）的命令。默认值和覆盖值分别应显示 `3308:3306` 与 `3310:3306`：
+
+```powershell
+docker compose config --format json |
+  ConvertFrom-Json |
+  Select-Object -ExpandProperty services |
+  Select-Object -ExpandProperty mysql |
+  Select-Object -ExpandProperty ports
+
+$env:MYSQL_PORT = '3310'
+docker compose config --format json |
+  ConvertFrom-Json |
+  Select-Object -ExpandProperty services |
+  Select-Object -ExpandProperty mysql |
+  Select-Object -ExpandProperty ports
+```
+
+只在当前 PowerShell 会话中设置覆盖值；应用也要使用同一 `MYSQL_PORT`，且不要提交 `.env`、密码或其他本地环境配置。
+
 停止并清理本实验容器及卷：`docker compose down -v`。
 
 ## 手动验证查询与指标
@@ -159,7 +180,7 @@ $env:JAVA_HOME = 'C:\Program Files\Java\jdk-17'
 .\mvnw.cmd verify
 ```
 
-2026-08-16 的最终复跑结果为 `BUILD SUCCESS`：Surefire 单元测试 23 个，`Failures: 0, Errors: 0, Skipped: 0`；Failsafe/Testcontainers 集成测试 19 个，`Failures: 0, Errors: 0, Skipped: 0`。集成测试启动 MySQL 8.4 与 Redis 7.4-alpine 容器，覆盖 Redis 序列化/TTL、提交后删除缓存、回滚保留数据库与缓存、原生 Redis 锁、Redisson 锁、跨实例热点重建和 Actuator 指标。
+2026-08-16 的最终复跑结果为 `BUILD SUCCESS`：Surefire 单元测试 24 个，`Failures: 0, Errors: 0, Skipped: 0`；Failsafe/Testcontainers 集成测试 22 个，`Failures: 0, Errors: 0, Skipped: 0`。集成测试启动 MySQL 8.4 与 Redis 7.4-alpine 容器，覆盖 Redis 序列化/TTL、提交后删除缓存、回滚保留数据库与缓存、原生 Redis 锁、Redisson 锁、跨实例热点重建、生产 `TransactionTemplate` 更新装配和 Actuator 指标。
 
 ## 2026-08-16 热点商品实测记录
 

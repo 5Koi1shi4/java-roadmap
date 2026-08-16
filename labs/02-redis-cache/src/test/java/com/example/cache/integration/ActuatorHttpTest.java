@@ -10,6 +10,7 @@ import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMock
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -35,6 +36,9 @@ class ActuatorHttpTest {
 
     @MockitoBean
     private StringRedisTemplate redisTemplate;
+
+    @MockitoBean
+    private PlatformTransactionManager transactionManager;
 
     @Test
     void exposesTheCacheHitCounterThroughActuatorHttp() throws Exception {
