@@ -73,6 +73,36 @@ Invoke-WebRequest http://localhost:8080/actuator/metrics/cache.hit
 
 停止并清理本实验容器及卷：`docker compose down -v`。
 
+## 热点商品 k6 压测与指标解读
+
+压测脚本位于 `k6/hot-product.js`，固定请求同一个热点商品（默认 `7`）。默认配置为 **50 个并发 VU、持续 60 秒**；通过条件为 HTTP 请求 P95 小于 **100ms**、失败率低于 **1%**、业务检查成功率高于 **99%**。这些阈值用于本机开发环境的回归比较，不应直接当作生产 SLA。
+
+先按上节用 JDK 17 启动 MySQL、Redis 和应用；确认商品可读后，在另一个 PowerShell 窗口记录压测前的计数器：
+
+```powershell
+Invoke-RestMethod http://localhost:8080/api/products/7
+
+$metricNames = 'cache.hit', 'cache.miss', 'cache.repository_load', 'cache.lock_busy', 'cache.lock.wait'
+foreach ($name in $metricNames) {
+  $metric = Invoke-RestMethod "http://localhost:8080/actuator/metrics/$name"
+  "{0}={1}" -f $name, $metric.measurements[0].value
+}
+```
+
+从本实验目录运行 k6；可以用环境变量改为其他本机地址或已存在的商品 ID：
+
+```powershell
+k6 version
+k6 run .\k6\hot-product.js
+# 例如：k6 run -e BASE_URL=http://localhost:8080 -e PRODUCT_ID=7 .\k6\hot-product.js
+```
+
+压测结束后，重复前述指标循环并与压测前的值作差。`cache.hit` 是首读命中和锁后二次读取命中次数；`cache.miss` 是首次缓存未命中次数；`cache.repository_load` 是实际回源 MySQL 的次数；`cache.lock_busy` 表示等待重建锁超时后仍未读到缓存、以“系统繁忙”受控失败的次数；`cache.lock.wait` 的 `COUNT` 是进入重建路径并尝试获取锁的次数，`TOTAL_TIME`/`MAX` 可用于观察锁等待开销。
+
+热点键已经预热时，60 秒内 `cache.hit` 的增量应接近成功请求数，`cache.repository_load` 增量应为 0，且 `cache.lock_busy` 应为 0。若先清空 Redis 或让键过期后再运行，第一次重建会带来 `cache.miss` 与通常一次 `cache.repository_load`；并发请求在重建期间可能增加 `cache.lock.wait`。若回源时间超过锁等待上限（200ms），`cache.lock_busy` 增加，同时 k6 的失败率或 P95 阈值可能失败，说明此配置下热点保护或下游容量不足。
+
+本机尚未安装 k6 时，可保留脚本并安装官方 k6 CLI 后重跑上述命令；`k6 version` 若提示命令不存在，即为压测执行被本机依赖阻塞，不能据此虚构压测结果。
+
 ## 验证
 
 需要 JDK 17、正在运行的 Docker Desktop，以及可拉取的 `mysql:8.4`、`redis:7.4-alpine` 镜像。在 PowerShell 中执行：
