@@ -4,6 +4,8 @@
 
 本次实验中的环境、Docker、Testcontainers、Maven 和 k6 问题，见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
 
+与 `macrozheng/mall` 的 Redis 通用服务及业务缓存服务的设计对照，见 [../../references/README.md](../../references/README.md)。
+
 文档中的密码、token、连接串仅可使用本地 `.env` 或环境变量提供；不要提交、截图或发送真实凭据。
 
 > 阅读提示：反引号包围的内容是命令、文件名、环境变量或指标名；建议在 VS Code 中打开本文件并按 `Ctrl+Shift+V` 查看 Markdown 预览，或直接在 GitHub 文件页面阅读渲染版本。
@@ -157,7 +159,7 @@ $env:JAVA_HOME = 'C:\Program Files\Java\jdk-17'
 .\mvnw.cmd verify
 ```
 
-2026-08-15 的复跑结果为 `BUILD SUCCESS`：Surefire 单元测试 14 个，`Failures: 0, Errors: 0, Skipped: 0`；Failsafe/Testcontainers 集成测试 5 个，`Failures: 0, Errors: 0, Skipped: 0`。集成测试启动 MySQL 8.4 与 Redis 7.4-alpine 容器，覆盖提交后删除缓存、回滚保留数据库与缓存、以及正/空值缓存删除。
+2026-08-16 的最终复跑结果为 `BUILD SUCCESS`：Surefire 单元测试 23 个，`Failures: 0, Errors: 0, Skipped: 0`；Failsafe/Testcontainers 集成测试 19 个，`Failures: 0, Errors: 0, Skipped: 0`。集成测试启动 MySQL 8.4 与 Redis 7.4-alpine 容器，覆盖 Redis 序列化/TTL、提交后删除缓存、回滚保留数据库与缓存、原生 Redis 锁、Redisson 锁、跨实例热点重建和 Actuator 指标。
 
 ## 2026-08-16 热点商品实测记录
 
