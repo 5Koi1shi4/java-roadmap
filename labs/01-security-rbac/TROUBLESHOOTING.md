@@ -19,12 +19,16 @@
 
 ```powershell
 netstat -ano | findstr :3306
-docker compose config
+docker compose config --format json |
+  ConvertFrom-Json |
+  Select-Object -ExpandProperty services |
+  Select-Object -ExpandProperty mysql |
+  Select-Object -ExpandProperty ports
 ```
 
 保留本机 MySQL，将实验容器映射为 3307；同时更新 `.env` 的 `MYSQL_PORT`，并让应用数据源连接 `localhost:3307`。
 
-**预防：** 每次修改 Compose 变量后使用 `docker compose config` 查看最终配置；不要只看 YAML 中的默认值。
+**预防：** 每次修改 Compose 变量后只投影 `services.mysql.ports` 查看最终端口；不要输出完整 Compose 配置或只看 YAML 中的默认值。
 
 ## 2. MySQL 容器创建失败或健康检查失败
 
