@@ -5,7 +5,11 @@ import com.example.cache.application.UpdateProductCommand;
 import com.example.cache.domain.Product;
 import com.example.cache.domain.ProductCache;
 import com.example.cache.domain.ProductRepository;
+import com.example.cache.infrastructure.SpringTransactionCallbacks;
 import org.junit.jupiter.api.Test;
+import org.springframework.transaction.support.AbstractPlatformTransactionManager;
+import org.springframework.transaction.support.DefaultTransactionStatus;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -15,6 +19,24 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ProductUpdateServiceTest {
+
+    @Test
+    void evictsCachedProductAfterTheProductionTransactionTemplateCommits() {
+        Product existing = new Product(7L, "Java 编程思想", 99_00L);
+        Product updated = new Product(7L, "Effective Java", 88_00L);
+        InMemoryProductRepository repository = new InMemoryProductRepository(existing);
+        InMemoryProductCache cache = new InMemoryProductCache(existing);
+        ProductUpdateService service = new ProductUpdateService(
+                repository,
+                cache,
+                new SpringTransactionCallbacks(),
+                new TransactionTemplate(new CommitOnlyTransactionManager()));
+
+        service.updateProduct(new UpdateProductCommand(7L, "Effective Java", 88_00L));
+
+        assertThat(repository.findById(7L)).contains(updated);
+        assertThat(cache.get(7L)).isEqualTo(ProductCache.CacheLookup.miss());
+    }
 
     @Test
     void retainsCachedProductUntilTheDatabaseTransactionCommits() {
@@ -188,6 +210,26 @@ class ProductUpdateServiceTest {
         }
 
         void rollback() {
+        }
+    }
+
+    private static final class CommitOnlyTransactionManager extends AbstractPlatformTransactionManager {
+
+        @Override
+        protected Object doGetTransaction() {
+            return new Object();
+        }
+
+        @Override
+        protected void doBegin(Object transaction, org.springframework.transaction.TransactionDefinition definition) {
+        }
+
+        @Override
+        protected void doCommit(DefaultTransactionStatus status) {
+        }
+
+        @Override
+        protected void doRollback(DefaultTransactionStatus status) {
         }
     }
 }

@@ -2,12 +2,14 @@ package com.example.cache;
 
 import com.example.cache.application.MicrometerCacheMetrics;
 import com.example.cache.application.ProductQueryService;
+import com.example.cache.application.ProductUpdateService;
 import com.example.cache.application.RebuildLock;
 import com.example.cache.domain.ProductCache;
 import com.example.cache.domain.ProductRepository;
 import com.example.cache.infrastructure.JdbcProductRepository;
 import com.example.cache.infrastructure.RedisProductCache;
 import com.example.cache.infrastructure.RedissonRebuildLock;
+import com.example.cache.infrastructure.SpringTransactionCallbacks;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.redisson.Redisson;
@@ -18,6 +20,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @Configuration
 public class CacheConfiguration {
@@ -30,6 +34,26 @@ public class CacheConfiguration {
     @Bean
     ProductCache productCache(StringRedisTemplate redisTemplate, ObjectMapper objectMapper) {
         return new RedisProductCache(redisTemplate, objectMapper);
+    }
+
+    @Bean
+    ProductUpdateService.TransactionCallbacks transactionCallbacks() {
+        return new SpringTransactionCallbacks();
+    }
+
+    @Bean
+    TransactionTemplate transactionTemplate(PlatformTransactionManager transactionManager) {
+        return new TransactionTemplate(transactionManager);
+    }
+
+    @Bean
+    ProductUpdateService productUpdateService(
+            ProductRepository repository,
+            ProductCache cache,
+            ProductUpdateService.TransactionCallbacks callbacks,
+            TransactionTemplate transactions
+    ) {
+        return new ProductUpdateService(repository, cache, callbacks, transactions);
     }
 
     @Bean(destroyMethod = "shutdown")
