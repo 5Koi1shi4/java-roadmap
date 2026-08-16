@@ -1,6 +1,27 @@
 # 实验二：Redis Cache Aside 与更新一致性
 
-本实验以商品详情为例实现 Cache Aside，并把“更新数据库后删除缓存”限定为**数据库事务提交后**才执行。缓存键为 `product:v1:{id}`；正缓存与空值缓存都通过同一个 `evict(id)` 失效。
+这是一个 Spring Boot 3 / Java 17 学习实验：以商品详情为例实现 Cache Aside、提交后缓存失效、热点 Key 重建保护和可观测性，并用 Testcontainers 与 k6 验证真实 Redis/MySQL 协作。
+
+本次实验中的环境、Docker、Testcontainers、Maven 和 k6 问题，见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
+
+文档中的密码、token、连接串仅可使用本地 `.env` 或环境变量提供；不要提交、截图或发送真实凭据。
+
+> 阅读提示：反引号包围的内容是命令、文件名、环境变量或指标名；建议在 VS Code 中打开本文件并按 `Ctrl+Shift+V` 查看 Markdown 预览，或直接在 GitHub 文件页面阅读渲染版本。
+
+## 你将运行到的能力
+
+- `GET /api/products/{id}`：按 Cache Aside 查询商品；命中空值缓存时返回 404，Redis 或 MySQL 故障不会伪装为“不存在”。
+- `ProductUpdateService.updateProduct(...)`：数据库事务提交后才删除 `product:v1:{id}`，回滚时保留旧缓存。
+- `RedissonRebuildLock`：热点 Key 未命中时最多等待 200ms；成功获得锁后再次检查缓存，避免多实例并发回源。
+- `/actuator/metrics/cache.*`：查看命中、未命中、回源、锁忙和锁等待指标。
+- `k6/hot-product.js`：对预热热点商品执行 50 VU、60 秒的 HTTP 压测。
+
+## 前置条件
+
+- JDK 17（不要使用 JDK 25）
+- Docker Desktop 已启动，且 `docker compose version` 可用
+- k6 v2.2.0（仅运行压测时需要；Windows 下可使用 `C:\Program Files\k6\k6.exe`）
+- Windows 使用 PowerShell；Linux/macOS 将 `mvnw.cmd` 换成 `./mvnw`
 
 ## 更新时序
 
@@ -72,6 +93,30 @@ Invoke-WebRequest http://localhost:8080/actuator/metrics/cache.hit
 ```
 
 停止并清理本实验容器及卷：`docker compose down -v`。
+
+## 手动验证查询与指标
+
+应用启动后，先读取一次存在的商品，再重复读取以形成缓存命中：
+
+```powershell
+Invoke-RestMethod http://localhost:8080/api/products/7
+Invoke-RestMethod http://localhost:8080/api/products/7
+```
+
+不存在的商品会返回 HTTP 404；PowerShell 将其表现为异常是预期结果。可查询指标确认第一次请求发生了 miss/回源，第二次请求发生了 hit：
+
+```powershell
+Invoke-RestMethod http://localhost:8080/actuator/metrics/cache.miss
+Invoke-RestMethod http://localhost:8080/actuator/metrics/cache.repository_load
+Invoke-RestMethod http://localhost:8080/actuator/metrics/cache.hit
+```
+
+| 方法 | 路径 | 成功响应 | 说明 |
+| --- | --- | --- | --- |
+| GET | `/api/products/{id}` | 200，商品 JSON | 首次未命中时回源并写入正缓存 |
+| GET | `/api/products/{id}` | 404 | 商品不存在时写入 30 秒空值缓存 |
+| GET | `/actuator/metrics/cache.hit` | 200，指标 JSON | 查看缓存命中次数 |
+| GET | `/actuator/metrics/cache.lock_busy` | 200，指标 JSON | 查看锁等待超时后仍未命中的受控失败次数 |
 
 ## 热点商品 k6 压测与指标解读
 
