@@ -57,21 +57,34 @@ class MicrometerCacheMetricsTest {
     }
 
     @Test
-    void recordsLockBusyAndWaitTimeWhenRebuildLockCannotBeAcquired() {
+    void recordsLockBusyOnlyWhenTheFinalCacheCheckStillMisses() {
         SimpleMeterRegistry registry = new SimpleMeterRegistry();
-        ProductQueryService service = new ProductQueryService(
+        Product product = new Product(7L, "Java 编程思想", 9_900L);
+        ProductQueryService cacheFilledService = new ProductQueryService(
+                new FixedRepository(Optional.empty()),
+                new SequentialCache(CacheLookup.miss(), CacheLookup.product(product)),
+                new BusyRebuildLock(),
+                new MicrometerCacheMetrics(registry)
+        );
+
+        assertThat(cacheFilledService.getProduct(7L)).isEqualTo(ProductView.found(product));
+        assertThat(registry.get("cache.lock_busy").counter().count()).isZero();
+
+        ProductQueryService cacheMissService = new ProductQueryService(
                 new FixedRepository(Optional.empty()),
                 new FixedCache(ProductCache.CacheLookup.miss()),
                 new BusyRebuildLock(),
                 new MicrometerCacheMetrics(registry)
         );
 
-        assertThatThrownBy(() -> service.getProduct(7L))
+        assertThatThrownBy(() -> cacheMissService.getProduct(8L))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessage("系统繁忙，请稍后重试");
 
         assertThat(registry.get("cache.lock_busy").counter().count()).isEqualTo(1);
-        assertThat(registry.get("cache.lock.wait").timer().count()).isEqualTo(1);
+        assertThat(registry.get("cache.lock.wait").timer().count()).isEqualTo(2);
+        assertThat(registry.get("cache.hit").counter().count()).isEqualTo(1);
+        assertThat(registry.get("cache.repository_load").counter().count()).isZero();
     }
 
     @Test

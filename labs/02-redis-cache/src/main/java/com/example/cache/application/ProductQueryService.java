@@ -72,11 +72,11 @@ public final class ProductQueryService {
             metrics.recordLockWait(Duration.ofNanos(System.nanoTime() - lockWaitStartedAt));
         }
         if (acquiredLock.isEmpty()) {
-            metrics.recordLockBusy();
             ProductView rebuilt = cachedProductView(id);
             if (rebuilt != null) {
                 return rebuilt;
             }
+            metrics.recordLockBusy();
             throw new IllegalStateException("系统繁忙，请稍后重试");
         }
 

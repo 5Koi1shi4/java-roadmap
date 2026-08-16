@@ -133,9 +133,19 @@ docker compose config --format json |
 
 **预防：** 为“sleep 恰好推进至 deadline”的边界写受控时钟单元测试；外部时间不用于计算等待预算。
 
+## 9. 生产更新必须走 TransactionTemplate 与 afterCommit
+
+**现象：** 仓储更新已执行，但事务随后回滚时缓存却被删除；或 Redis 删除失败后误以为数据库也会回滚。
+
+**原因：** 删缓存若不是登记在 Spring 事务同步的 `afterCommit` 阶段，就可能与数据库最终状态脱节。`afterCommit` 开始执行时数据库事务已经提交，因此之后的 Redis 异常无法再回滚该数据库事务。
+
+**解决：** 生产 `CacheConfiguration` 使用四参构造器创建 `ProductUpdateService`，注入 `TransactionTemplate` 与 `SpringTransactionCallbacks`。`updateProduct` 在模板事务中先更新仓储，再登记 `afterCommit` 删除；若随后标记 rollback-only，数据库保留旧值且缓存不删除。删除本身失败时，应记录指标/日志并通过幂等重试、Outbox 或定期校验补偿，不得宣称已提交的数据库会回滚。
+
+**预防：** `ProductionCacheWiringIT.rollbackAfterProductionUpdateRegistersAfterCommitRetainsDatabaseAndCache` 直接使用上下文中的生产 Bean 与 `TransactionTemplate`，在回调登记后设置 rollback-only；`ProductUpdateServiceTest.keepsUpdatedProductWhenCacheEvictionFailsAfterCommit` 证明删除失败不会回滚已提交的更新。
+
 ## 最终验收证据
 
-- JDK 17 + Docker Desktop 下，`mvnw.cmd verify` 覆盖 23 个单元测试与 19 个 Testcontainers 集成测试，均为 0 failures、0 errors；
+- JDK 17 + Docker Desktop 下，`mvnw.cmd verify` 覆盖 24 个单元测试与 22 个 Testcontainers 集成测试，均为 0 failures、0 errors、0 skipped；
 - 两个独立 Redisson 客户端、100 个并发请求同一失效热点 Key，仓储仅回源 1 次；
 - k6 v2.2.0 以 50 VU 持续 60 秒实测：574,675 请求、P95 7.18ms、失败率 0%、业务 checks 100%；
 - 缓存写入、提交后失效、缓存重建锁和 HTTP 指标的手动命令均记录在 [README.md](README.md)。

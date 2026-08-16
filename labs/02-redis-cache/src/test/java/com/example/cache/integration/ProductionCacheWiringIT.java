@@ -14,6 +14,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -21,7 +22,6 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @Testcontainers
 @SpringBootTest(classes = CacheApplication.class)
@@ -49,6 +49,9 @@ class ProductionCacheWiringIT {
 
     @Autowired
     private StringRedisTemplate redisTemplate;
+
+    @Autowired
+    private TransactionTemplate transactions;
 
     @DynamicPropertySource
     static void configureInfrastructure(DynamicPropertyRegistry registry) {
@@ -79,15 +82,17 @@ class ProductionCacheWiringIT {
     }
 
     @Test
-    void failedUpdateInsideTheProductionTransactionRetainsDatabaseAndCache() {
+    void rollbackAfterProductionUpdateRegistersAfterCommitRetainsDatabaseAndCache() {
         createProductTable();
         redisTemplate.opsForValue().set("product:v1:7", "{\"id\":7,\"name\":\"Java 编程思想\",\"priceInCents\":9900}");
-        jdbcTemplate.execute("CREATE TRIGGER reject_product_updates BEFORE UPDATE ON products "
-                + "FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'update rejected'");
 
-        assertThatThrownBy(() -> productUpdateService.updateProduct(
-                new UpdateProductCommand(7L, "Effective Java", 88_00L)))
-                .isInstanceOf(RuntimeException.class);
+        transactions.executeWithoutResult(status -> {
+            productUpdateService.updateProduct(new UpdateProductCommand(7L, "Effective Java", 88_00L));
+            assertThat(jdbcTemplate.queryForObject(
+                    "SELECT name FROM products WHERE id = ?", String.class, 7L)).isEqualTo("Effective Java");
+            assertThat(redisTemplate.hasKey("product:v1:7")).isTrue();
+            status.setRollbackOnly();
+        });
 
         assertThat(jdbcTemplate.queryForObject(
                 "SELECT name FROM products WHERE id = ?", String.class, 7L)).isEqualTo("Java 编程思想");
