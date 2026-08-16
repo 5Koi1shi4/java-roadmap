@@ -113,3 +113,23 @@ $env:JAVA_HOME = 'C:\Program Files\Java\jdk-17'
 ```
 
 2026-08-15 的复跑结果为 `BUILD SUCCESS`：Surefire 单元测试 14 个，`Failures: 0, Errors: 0, Skipped: 0`；Failsafe/Testcontainers 集成测试 5 个，`Failures: 0, Errors: 0, Skipped: 0`。集成测试启动 MySQL 8.4 与 Redis 7.4-alpine 容器，覆盖提交后删除缓存、回滚保留数据库与缓存、以及正/空值缓存删除。
+
+## 2026-08-16 热点商品实测记录
+
+在 Windows 本机、JDK 17.0.12、Docker Desktop 29.7.2、MySQL 8.4、Redis 7.4-alpine 和 k6 v2.2.0 下执行。先请求一次 `/api/products/7` 预热，再运行默认脚本（50 VU，60 秒）：
+
+```powershell
+& 'C:\Program Files\k6\k6.exe' version
+& 'C:\Program Files\k6\k6.exe' run .\k6\hot-product.js
+```
+
+| 口径 | 实测值 | 默认阈值 | 结果 |
+|---|---:|---:|---|
+| HTTP 请求 P95 | 7.18ms | < 100ms | 通过 |
+| 吞吐量 | 9,577.17 req/s（574,675 请求） | 仅记录 | — |
+| HTTP 失败率 | 0.00%（0 / 574,675） | < 1% | 通过 |
+| 业务 checks | 100.00%（1,149,350 / 1,149,350） | > 99% | 通过 |
+
+Actuator 计数器在预热后、压测前分别为 `cache.hit=0`、`cache.miss=1`、`cache.repository_load=1`、`cache.lock_busy=0`、`cache.lock.wait COUNT=1`；压测后为 `574675`、`1`、`1`、`0`、`1`。因此压测期增量为 `cache.hit=574675`，其余上述 COUNT 均为 0，符合已预热热点 Key 全部从缓存返回、无额外 MySQL 回源或锁繁忙的预期。
+
+本机排障记录：裸命令 `k6 version` 因 PATH 未包含安装目录而失败，但 `C:\Program Files\k6\k6.exe` 可运行并报告 v2.2.0。README 默认 `docker compose up -d` 首次因宿主机 `3306` 已被占用而无法绑定；`3307` 也被现有容器占用。本次仅使用未提交的临时 Compose 覆盖将实验 MySQL 映射为 `3308:3306`，并以 `MYSQL_PORT=3308` 启动应用，仓库默认 Compose 与端口未修改。
