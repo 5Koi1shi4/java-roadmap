@@ -7,7 +7,7 @@
       "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
       "id": 1,
-      "targets": [{"expr": "sum(rate(k6_http_reqs{testid=~\"$testid\"}[1m]))", "legendFormat": "requests/s", "refId": "A"}],
+      "targets": [{"expr": "sum(rate(k6_http_reqs_total{testid=~\"${testid:regex}\"}[1m]))", "legendFormat": "requests/s", "refId": "A"}],
       "title": "请求速率",
       "type": "timeseries"
     },
@@ -16,16 +16,16 @@
       "fieldConfig": {"defaults": {"unit": "percent"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
       "id": 2,
-      "targets": [{"expr": "100 * sum(rate(k6_http_req_failed{testid=~\"$testid\"}[1m])) / sum(rate(k6_http_reqs{testid=~\"$testid\"}[1m]))", "legendFormat": "failure rate", "refId": "A"}],
+      "targets": [{"expr": "100 * avg(k6_http_req_failed_rate{testid=~\"${testid:regex}\"})", "legendFormat": "failure rate", "refId": "A"}],
       "title": "失败率",
       "type": "timeseries"
     },
     {
       "datasource": "Prometheus",
-      "fieldConfig": {"defaults": {"unit": "ms"}, "overrides": []},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
       "id": 3,
-      "targets": [{"expr": "k6_http_req_duration{stat=\"p(95)\", testid=~\"$testid\"}", "legendFormat": "P95", "refId": "A"}],
+      "targets": [{"expr": "k6_http_req_duration_p95{testid=~\"${testid:regex}\"}", "legendFormat": "P95", "refId": "A"}],
       "title": "P95 延迟",
       "type": "timeseries"
     },
@@ -34,7 +34,7 @@
       "fieldConfig": {"defaults": {"min": 0}, "overrides": []},
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
       "id": 4,
-      "targets": [{"expr": "max(k6_vus{testid=~\"$testid\"})", "legendFormat": "allocated VUs", "refId": "A"}],
+      "targets": [{"expr": "max(k6_vus{testid=~\"${testid:regex}\"})", "legendFormat": "allocated VUs", "refId": "A"}],
       "title": "已分配 VU",
       "type": "timeseries"
     }
@@ -45,11 +45,12 @@
     "list": [
       {
         "datasource": "Prometheus",
+        "allValue": ".*",
         "includeAll": true,
         "label": "testid",
         "multi": true,
         "name": "testid",
-        "query": "label_values(k6_http_reqs, testid)",
+        "query": "label_values(k6_http_reqs_total, testid)",
         "refresh": 1,
         "type": "query"
       }
