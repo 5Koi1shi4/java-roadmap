@@ -2,10 +2,13 @@ package com.example.cache.application;
 
 import com.example.cache.domain.Product;
 import com.example.cache.domain.ProductCache;
+import com.example.cache.domain.ProductCache.CacheLookup;
 import com.example.cache.domain.ProductRepository;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -71,6 +74,39 @@ class MicrometerCacheMetricsTest {
         assertThat(registry.get("cache.lock.wait").timer().count()).isEqualTo(1);
     }
 
+    @Test
+    void recordsHitWhenTheSecondCacheCheckFindsAProduct() {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        Product product = new Product(7L, "Java 编程思想", 9_900L);
+        ProductQueryService service = new ProductQueryService(
+                new FixedRepository(Optional.empty()),
+                new SequentialCache(CacheLookup.miss(), CacheLookup.product(product)),
+                new MicrometerCacheMetrics(registry)
+        );
+
+        assertThat(service.getProduct(7L)).isEqualTo(ProductView.found(product));
+
+        assertThat(registry.get("cache.miss").counter().count()).isEqualTo(1);
+        assertThat(registry.get("cache.hit").counter().count()).isEqualTo(1);
+        assertThat(registry.get("cache.repository_load").counter().count()).isZero();
+    }
+
+    @Test
+    void recordsNegativeHitWhenTheSecondCacheCheckFindsANegativeEntry() {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        ProductQueryService service = new ProductQueryService(
+                new FixedRepository(Optional.empty()),
+                new SequentialCache(CacheLookup.miss(), CacheLookup.negative()),
+                new MicrometerCacheMetrics(registry)
+        );
+
+        assertThat(service.getProduct(8L)).isEqualTo(ProductView.notFound());
+
+        assertThat(registry.get("cache.miss").counter().count()).isEqualTo(1);
+        assertThat(registry.get("cache.negative_hit").counter().count()).isEqualTo(1);
+        assertThat(registry.get("cache.repository_load").counter().count()).isZero();
+    }
+
     private static final class FixedCache implements ProductCache {
         private final CacheLookup lookup;
 
@@ -81,6 +117,31 @@ class MicrometerCacheMetricsTest {
         @Override
         public CacheLookup get(long id) {
             return lookup;
+        }
+
+        @Override
+        public void put(Product product) {
+        }
+
+        @Override
+        public void putNegative(long id) {
+        }
+
+        @Override
+        public void evict(long id) {
+        }
+    }
+
+    private static final class SequentialCache implements ProductCache {
+        private final Deque<CacheLookup> lookups;
+
+        private SequentialCache(CacheLookup... lookups) {
+            this.lookups = new ArrayDeque<>(java.util.List.of(lookups));
+        }
+
+        @Override
+        public CacheLookup get(long id) {
+            return lookups.removeFirst();
         }
 
         @Override

@@ -109,9 +109,11 @@ public final class ProductQueryService {
     private ProductView cachedProductView(long id) {
         CacheLookup cached = cache.get(id);
         if (cached instanceof CacheLookup.ProductHit productHit) {
+            metrics.recordHit();
             return ProductView.found(productHit.product());
         }
         if (cached instanceof CacheLookup.NegativeHit) {
+            metrics.recordNegativeHit();
             return ProductView.notFound();
         }
         return null;

@@ -46,6 +46,33 @@
 
 缓存删除发生在 `afterCommit()`，因此 Redis 删除失败不能回滚已提交的数据库事务。`ProductUpdateServiceTest.keepsUpdatedProductWhenCacheEvictionFailsAfterCommit` 让 `ProductCache.evict` 抛出 `redis unavailable`，断言提交回调抛错后仓储中仍是更新后的 `Effective Java` 商品。这是“数据库已提交、缓存删除需走观测与重试”的单元测试证据，而不是分布式事务实现。
 
+## 本地运行
+
+先基于示例创建只保存在本地的 Docker 密码文件：
+
+```powershell
+Copy-Item .env.example .env
+# 编辑 .env，将两个 replace-with-a-... 值改成仅用于本机的不同密码。
+docker compose up -d
+docker compose ps
+```
+
+MySQL 与 Redis 健康后，JDK 17 下启动应用：
+
+```powershell
+$env:JAVA_HOME = 'C:\Program Files\Java\jdk-17'
+.\mvnw.cmd spring-boot:run
+```
+
+默认连接为 `localhost:3306/redis_cache`（用户取自 `.env` 的 `MYSQL_USERNAME`，默认 `cache`）与 `localhost:6379`。密码只从未提交的 `.env`/环境变量读取。可用以下端点检查运行态：
+
+```powershell
+Invoke-WebRequest http://localhost:8080/api/products/7
+Invoke-WebRequest http://localhost:8080/actuator/metrics/cache.hit
+```
+
+停止并清理本实验容器及卷：`docker compose down -v`。
+
 ## 验证
 
 需要 JDK 17、正在运行的 Docker Desktop，以及可拉取的 `mysql:8.4`、`redis:7.4-alpine` 镜像。在 PowerShell 中执行：
