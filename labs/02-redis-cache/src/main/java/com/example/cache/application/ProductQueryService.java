@@ -6,6 +6,7 @@ import com.example.cache.domain.ProductCache.CacheLookup;
 import com.example.cache.domain.ProductRepository;
 
 import java.util.Optional;
+import java.time.Duration;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
@@ -17,16 +18,32 @@ public final class ProductQueryService {
     private final ProductRepository repository;
     private final ProductCache cache;
     private final RebuildLock rebuildLock;
+    private final CacheMetrics metrics;
 
     public ProductQueryService(ProductRepository repository, ProductCache cache) {
         this(repository, cache, new LocalRebuildLock(id -> {
-        }));
+        }), CacheMetrics.NO_OP);
     }
 
     public ProductQueryService(ProductRepository repository, ProductCache cache, RebuildLock rebuildLock) {
+        this(repository, cache, rebuildLock, CacheMetrics.NO_OP);
+    }
+
+    public ProductQueryService(ProductRepository repository, ProductCache cache, CacheMetrics metrics) {
+        this(repository, cache, new LocalRebuildLock(id -> {
+        }), metrics);
+    }
+
+    public ProductQueryService(
+            ProductRepository repository,
+            ProductCache cache,
+            RebuildLock rebuildLock,
+            CacheMetrics metrics
+    ) {
         this.repository = repository;
         this.cache = cache;
         this.rebuildLock = rebuildLock;
+        this.metrics = metrics;
     }
 
     ProductQueryService(
@@ -42,13 +59,20 @@ public final class ProductQueryService {
             throw new IllegalArgumentException("product id must be positive");
         }
 
-        ProductView cached = cachedProductView(id);
+        ProductView cached = initialCachedProductView(id);
         if (cached != null) {
             return cached;
         }
 
-        Optional<? extends RebuildLock.LockHandle> acquiredLock = rebuildLock.tryAcquire(id);
+        long lockWaitStartedAt = System.nanoTime();
+        Optional<? extends RebuildLock.LockHandle> acquiredLock;
+        try {
+            acquiredLock = rebuildLock.tryAcquire(id);
+        } finally {
+            metrics.recordLockWait(Duration.ofNanos(System.nanoTime() - lockWaitStartedAt));
+        }
         if (acquiredLock.isEmpty()) {
+            metrics.recordLockBusy();
             ProductView rebuilt = cachedProductView(id);
             if (rebuilt != null) {
                 return rebuilt;
@@ -62,6 +86,7 @@ public final class ProductQueryService {
                 return rebuilt;
             }
 
+            metrics.recordRepositoryLoad();
             return repository.findById(id)
                     .map(this::cacheAndReturn)
                     .orElseGet(() -> cacheNegativeAndReturnNotFound(id));
@@ -89,6 +114,20 @@ public final class ProductQueryService {
         if (cached instanceof CacheLookup.NegativeHit) {
             return ProductView.notFound();
         }
+        return null;
+    }
+
+    private ProductView initialCachedProductView(long id) {
+        CacheLookup cached = cache.get(id);
+        if (cached instanceof CacheLookup.ProductHit productHit) {
+            metrics.recordHit();
+            return ProductView.found(productHit.product());
+        }
+        if (cached instanceof CacheLookup.NegativeHit) {
+            metrics.recordNegativeHit();
+            return ProductView.notFound();
+        }
+        metrics.recordMiss();
         return null;
     }
 
