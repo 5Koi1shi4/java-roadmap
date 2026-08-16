@@ -4,7 +4,7 @@
 
 ## 阅读提示
 
-- 反引号包围的内容是命令、文件名、环境变量、端口、错误文本或代码变量，例如 `docker compose config`、`.env`、`MYSQL_PORT`。
+- 反引号包围的内容是命令、文件名、环境变量、端口、错误文本或代码变量，例如 `docker compose config --format json | ConvertFrom-Json | Select-Object -ExpandProperty services | Select-Object -ExpandProperty mysql | Select-Object -ExpandProperty ports`、`.env`、`MYSQL_PORT`。
 - 将 Markdown 复制为纯文本时，反引号样式可能被去掉，命令与中文会显得粘连。应以原始 Markdown 或渲染预览为准。
 - 在 VS Code 中打开本文件后按 `Ctrl+Shift+V` 可查看完整预览；在 GitHub 仓库中打开本文件可直接阅读渲染版本。
 - 下文的“现象—原因—解决—预防”分别对应：看到什么、为什么发生、如何操作、以后如何避免。
