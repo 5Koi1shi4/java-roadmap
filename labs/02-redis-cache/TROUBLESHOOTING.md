@@ -186,6 +186,14 @@ $env:K6_PROMETHEUS_RW_TREND_STATS = 'p(95),p(99),min,max'
 
 之后用 README 的 Prometheus 查询确认 `testid` 标签。若 `k6_http_reqs_total` 已有结果但 P95 为空，先检查趋势统计设置；若所有指标为空，检查 receiver 与写入 URL，而不是先修改 Grafana 面板。
 
+在浏览器打开 `http://127.0.0.1:9090` 后，先执行最小查询确认写入：
+
+```promql
+k6_http_reqs_total{testid="hot-product-001"}
+```
+
+有结果后再按同一 `testid` 查询请求速率、失败率、P95 与 VU；完整 PromQL 示例见 [README.md](README.md#在-prometheus-浏览器中查询压测过程)。
+
 ## 13. 需要保留或恢复监控数据
 
 **现象：** 需要临时停止监控，或重启后希望继续查看历史压测批次。

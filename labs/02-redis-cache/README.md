@@ -209,6 +209,29 @@ foreach ($testid in 'hot-product-001', 'hot-product-002') {
 }
 ```
 
+### 在 Prometheus 浏览器中查询压测过程
+
+打开 [Prometheus](http://127.0.0.1:9090)，在查询框输入 PromQL 后点击 **Execute**。将下例中的 `hot-product-001` 替换为本轮 k6 命令传入的 `testid`：
+
+```promql
+# 本轮压测是否已写入数据
+k6_http_reqs_total{testid="hot-product-001"}
+
+# 最近 1 分钟的请求速率（requests/s）
+sum(rate(k6_http_reqs_total{testid="hot-product-001"}[1m]))
+
+# 失败率（百分比）
+100 * avg(k6_http_req_failed_rate{testid="hot-product-001"})
+
+# P95 请求耗时
+k6_http_req_duration_p95{testid="hot-product-001"}
+
+# 本轮分配的最大虚拟用户数
+max(k6_vus_max{testid="hot-product-001"})
+```
+
+若第一条查询为空，先确认 Prometheus 已启动、k6 使用了 `experimental-prometheus-rw` 输出，并检查 `K6_PROMETHEUS_RW_SERVER_URL` 是否为 `http://localhost:9090/api/v1/write`。浏览器中的原始查询结果与 Grafana [k6 概览](http://localhost:3000/d/k6-overview/k6) 选择相同 `testid` 后展示的面板数据对应。
+
 日常只停止监控、保留 Prometheus 与 Grafana 卷时，运行：
 
 ```powershell
