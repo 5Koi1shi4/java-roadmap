@@ -253,3 +253,5 @@ $env:JAVA_HOME = 'C:\Program Files\Java\jdk-17'
 Actuator 计数器在预热后、压测前分别为 `cache.hit=0`、`cache.miss=1`、`cache.repository_load=1`、`cache.lock_busy=0`、`cache.lock.wait COUNT=1`；压测后为 `574675`、`1`、`1`、`0`、`1`。因此压测期增量为 `cache.hit=574675`，其余上述 COUNT 均为 0，符合已预热热点 Key 全部从缓存返回、无额外 MySQL 回源或锁繁忙的预期。
 
 本机排障记录：裸命令 `k6 version` 因 PATH 未包含安装目录而失败，但 `C:\Program Files\k6\k6.exe` 可运行并报告 v2.2.0。MySQL 默认宿主机端口已固定为 `3308`，因此 README 的 `docker compose up -d` 和应用默认数据源会使用 `3308:3306`；仅当 `3308` 被占用时，才显式设置相同的 `MYSQL_PORT` 覆盖 Compose 与应用端口。
+
+Prometheus Remote Write 与 Grafana 的实测验收也在本机完成：`hot-product-001` 和 `hot-product-002` 两个 `testid` 均可独立查询和筛选，Grafana 数据源查询也分别返回数据；`k6_http_reqs_total` 最终分别为 405,299 与 318,399，两批失败率均为 0，P95 分别为 0.0127205s 与 0.0147477s，`k6_vus_max` 均为 50。重启 Prometheus 与 Grafana 后，两个批次的时序数据、已 provisioning 的数据源和 `k6 概览` 仪表盘仍存在；JDK 17 的 `mvnw.cmd verify` 继续通过 24 个单元测试和 22 个集成测试。此记录不包含任何 Grafana 凭据。
