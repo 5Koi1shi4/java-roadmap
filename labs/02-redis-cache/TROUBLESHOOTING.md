@@ -203,9 +203,33 @@ docker compose -f compose.yaml -f compose.monitoring.yaml up -d prometheus grafa
 
 **预防：** 需要跨环境留档时，在删除卷前使用组织批准的备份方式导出；不要依赖可删除的本地命名卷作为唯一副本。
 
+## 14. 产品接口的中文在 PowerShell 中显示为乱码
+
+**现象：** `GET /api/products/7` 返回的商品名称在 PowerShell 中显示为 `ç¼...` 等乱码，而浏览器或其他客户端可能正常。
+
+**原因：** JSON 原始字节是 UTF-8，但响应头未明确声明字符集时，旧版 Windows PowerShell 可能按单字节编码解码；另外，终端代码页不是 UTF-8 时也会导致中文输出异常。
+
+**解决：** 应用已在 `application.yml` 中通过 `server.servlet.encoding.charset: UTF-8` 和 `server.servlet.encoding.force-response: true` 强制响应使用 UTF-8。重启应用后检查：
+
+```powershell
+(Invoke-WebRequest http://localhost:8080/api/products/7).Headers['Content-Type']
+```
+
+结果应包含 `application/json;charset=UTF-8`。若 PowerShell 仍无法正确显示中文，将以下配置加入 `$PROFILE`，然后重开终端或执行 `. $PROFILE`：
+
+```powershell
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[Console]::InputEncoding = $utf8NoBom
+[Console]::OutputEncoding = $utf8NoBom
+$OutputEncoding = $utf8NoBom
+chcp.com 65001 > $null
+```
+
+**预防：** `ActuatorE2EIT.returnsProductJsonWithAnExplicitUtf8ResponseEncoding` 使用真实 HTTP、MySQL 与 Redis Testcontainers 断言 `Content-Type` 包含 UTF-8，且响应字节可正确解码“Java 编程思想”。
+
 ## 最终验收证据
 
-- JDK 17 + Docker Desktop 下，`mvnw.cmd verify` 覆盖 24 个单元测试与 22 个 Testcontainers 集成测试，均为 0 failures、0 errors、0 skipped；
+- JDK 17 + Docker Desktop 下，`mvnw.cmd verify` 覆盖 24 个单元测试与 23 个 Testcontainers 集成测试，均为 0 failures、0 errors、0 skipped；
 - 两个独立 Redisson 客户端、100 个并发请求同一失效热点 Key，仓储仅回源 1 次；
 - k6 v2.2.0 以 50 VU 持续 60 秒实测：574,675 请求、P95 7.18ms、失败率 0%、业务 checks 100%；
 - 缓存写入、提交后失效、缓存重建锁和 HTTP 指标的手动命令均记录在 [README.md](README.md)。
