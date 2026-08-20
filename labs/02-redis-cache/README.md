@@ -111,7 +111,7 @@ docker compose config --format json |
 
 只在当前 PowerShell 会话中设置覆盖值；应用也要使用同一 `MYSQL_PORT`，且不要提交 `.env`、密码或其他本地环境配置。
 
-停止并清理本实验容器及卷：`docker compose down -v`。
+停止并清理本实验容器及卷：`docker compose down -v`。这会删除同一 Compose 项目的 MySQL 和 Redis 数据卷；它不是“只清空缓存”或“只清空监控数据”的命令。
 
 ## 手动验证查询与指标
 
@@ -166,6 +166,62 @@ k6 run .\k6\hot-product.js
 热点键已经预热时，60 秒内 `cache.hit` 的增量应接近成功请求数，`cache.repository_load` 增量应为 0，且 `cache.lock_busy` 应为 0。若先清空 Redis 或让键过期后再运行，第一次重建会带来 `cache.miss` 与通常一次 `cache.repository_load`；并发请求在重建期间可能增加 `cache.lock.wait`。若回源时间超过锁等待上限（200ms），`cache.lock_busy` 增加，同时 k6 的失败率或 P95 阈值可能失败，说明此配置下热点保护或下游容量不足。
 
 本机尚未安装 k6 时，可保留脚本并安装官方 k6 CLI 后重跑上述命令；`k6 version` 若提示命令不存在，即为压测执行被本机依赖阻塞，不能据此虚构压测结果。
+
+### 可视化：内置 Web Dashboard 或持久化 Prometheus/Grafana
+
+一次压测后只想查看报告时，使用 k6 内置 Web Dashboard，不必部署监控服务；需要跨多轮压测保留指标、按批次比较时，使用本实验的 Prometheus Remote Write 与 Grafana。内置 Dashboard 的数据随 k6 进程结束而结束，不能替代后者的持久化存储。
+
+```powershell
+$env:K6_WEB_DASHBOARD = 'true'
+$env:K6_WEB_DASHBOARD_OPEN = 'true'
+& 'C:\Program Files\k6\k6.exe' run .\k6\hot-product.js
+Remove-Item Env:K6_WEB_DASHBOARD, Env:K6_WEB_DASHBOARD_OPEN
+```
+
+持久化方案先在未提交的 `.env` 中设置本机 `GRAFANA_ADMIN_PASSWORD`，再在 `labs/02-redis-cache` 目录启动基础服务与监控服务，并用 JDK 17 启动应用：
+
+```powershell
+docker compose -f compose.yaml -f compose.monitoring.yaml up -d
+docker compose -f compose.yaml -f compose.monitoring.yaml ps
+$env:JAVA_HOME = 'C:\Program Files\Java\jdk-17'
+$env:Path = "$env:JAVA_HOME\bin;$env:Path"
+.\mvnw.cmd spring-boot:run
+```
+
+另开一个 PowerShell，确认 `GET /api/products/7` 为 200 后，为每轮添加唯一 `testid` 并写入 Prometheus：
+
+```powershell
+Invoke-WebRequest http://localhost:8080/api/products/7
+$env:K6_PROMETHEUS_RW_SERVER_URL = 'http://localhost:9090/api/v1/write'
+$env:K6_PROMETHEUS_RW_TREND_STATS = 'p(95),p(99),min,max'
+& 'C:\Program Files\k6\k6.exe' run -o experimental-prometheus-rw --tag testid=hot-product-001 .\k6\hot-product.js
+& 'C:\Program Files\k6\k6.exe' run -o experimental-prometheus-rw --tag testid=hot-product-002 .\k6\hot-product.js
+```
+
+`experimental-prometheus-rw` 是 k6 的实验性输出；升级 k6 前应固定版本并重新核对指标名、趋势统计和 Grafana 查询，不能把当前序列命名视为永久 API。趋势设置必须包含 `p(95)`，否则 P95 面板没有对应序列。
+
+先向 Prometheus 确认每批都有 `k6_http_reqs_total`，再在 Grafana 的 [k6 概览](http://localhost:3000/d/k6-overview/k6) 分别选择 `testid=hot-product-001` 与 `testid=hot-product-002`，检查请求速率、失败率、P95 和 VU：
+
+```powershell
+foreach ($testid in 'hot-product-001', 'hot-product-002') {
+  $query = [uri]::EscapeDataString("k6_http_reqs_total{testid=`"$testid`"}")
+  Invoke-RestMethod "http://localhost:9090/api/v1/query?query=$query"
+}
+```
+
+日常只停止监控、保留 Prometheus 与 Grafana 卷时，运行：
+
+```powershell
+docker compose -f compose.yaml -f compose.monitoring.yaml stop prometheus grafana
+```
+
+同一组 `up -d` 命令可恢复服务。只有明确清空**整个**实验环境（包括 MySQL、Redis、Prometheus 和 Grafana 的所有数据卷）时才运行：
+
+```powershell
+docker compose -f compose.yaml -f compose.monitoring.yaml down -v
+```
+
+该命令会删除同一 Compose 项目的 MySQL/Redis 卷和监控卷，不能将它描述为只清空监控数据。
 
 ## 验证
 

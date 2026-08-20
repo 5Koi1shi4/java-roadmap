@@ -143,6 +143,66 @@ docker compose config --format json |
 
 **预防：** `ProductionCacheWiringIT.rollbackAfterProductionUpdateRegistersAfterCommitRetainsDatabaseAndCache` 直接使用上下文中的生产 Bean 与 `TransactionTemplate`，在回调登记后设置 rollback-only；`ProductUpdateServiceTest.keepsUpdatedProductWhenCacheEvictionFailsAfterCommit` 证明删除失败不会回滚已提交的更新。
 
+## 10. Prometheus 或 Grafana 端口冲突
+
+**现象：** 启动监控叠加服务时报 `bind: address already in use`，或访问 `http://localhost:9090`、`http://localhost:3000` 的不是本实验服务。
+
+**原因：** 其他本机服务已绑定 Prometheus 的 9090 或 Grafana 的 3000；这两个端口由 `compose.monitoring.yaml` 固定发布。
+
+**解决：** 先确认占用进程，再停止本实验中不需要的同名服务或选择不冲突的本机环境；不要为了排查而输出完整 Compose 配置：
+
+```powershell
+netstat -ano | findstr :9090
+netstat -ano | findstr :3000
+docker compose -f compose.yaml -f compose.monitoring.yaml ps prometheus grafana
+```
+
+**预防：** 每次压测前访问 `http://localhost:9090/-/ready` 与 `http://localhost:3000/api/health`，两者都应返回 200。
+
+## 11. Grafana 管理员密码未设置
+
+**现象：** Compose 提示 `GRAFANA_ADMIN_PASSWORD is missing a value`。
+
+**原因：** 监控叠加服务刻意不提供默认管理员密码，要求从未提交的 `.env` 注入。
+
+**解决：** 由操作者在本机 `.env` 设置独立的 `GRAFANA_ADMIN_PASSWORD` 后重新运行启动命令；不要把值粘到终端记录、文档或 Git。已有 `grafana-data` 卷时，首次初始化后的管理员密码不会被新环境变量重置，应使用原密码或按 Grafana 的受控恢复流程处理。
+
+**预防：** `.env.example` 只保留占位符，真实 `.env` 始终忽略且不提交。
+
+## 12. k6 Remote Write receiver 未开启或指标为空
+
+**现象：** k6 报 Remote Write 请求失败，或 Prometheus 查询 `k6_http_reqs_total{testid="..."}` 结果为空。
+
+**原因：** Prometheus 没有以 `--web.enable-remote-write-receiver` 启动、`K6_PROMETHEUS_RW_SERVER_URL` 不是 `http://localhost:9090/api/v1/write`、压测尚未结束，或者 k6 未设置趋势统计而 P95 序列不存在。
+
+**解决：** 从本实验目录启动 `prometheus`，确认 ready，再使用绝对路径执行 k6；为每次运行加唯一 `testid`，并保留 `p(95)`：
+
+```powershell
+Invoke-WebRequest http://localhost:9090/-/ready
+$env:K6_PROMETHEUS_RW_SERVER_URL = 'http://localhost:9090/api/v1/write'
+$env:K6_PROMETHEUS_RW_TREND_STATS = 'p(95),p(99),min,max'
+& 'C:\Program Files\k6\k6.exe' run -o experimental-prometheus-rw --tag testid=hot-product-001 .\k6\hot-product.js
+```
+
+之后用 README 的 Prometheus 查询确认 `testid` 标签。若 `k6_http_reqs_total` 已有结果但 P95 为空，先检查趋势统计设置；若所有指标为空，检查 receiver 与写入 URL，而不是先修改 Grafana 面板。
+
+## 13. 需要保留或恢复监控数据
+
+**现象：** 需要临时停止监控，或重启后希望继续查看历史压测批次。
+
+**原因：** Prometheus 与 Grafana 使用命名卷；`stop` 保留卷，`down -v` 删除同一 Compose 项目的全部卷。
+
+**解决：** 日常暂停并恢复监控使用：
+
+```powershell
+docker compose -f compose.yaml -f compose.monitoring.yaml stop prometheus grafana
+docker compose -f compose.yaml -f compose.monitoring.yaml up -d prometheus grafana
+```
+
+只有明确放弃整个实验的数据时才运行 `docker compose -f compose.yaml -f compose.monitoring.yaml down -v`。它同时删除 MySQL、Redis、Prometheus 和 Grafana 的数据卷，不能当作“清空监控数据”的安全替代。
+
+**预防：** 需要跨环境留档时，在删除卷前使用组织批准的备份方式导出；不要依赖可删除的本地命名卷作为唯一副本。
+
 ## 最终验收证据
 
 - JDK 17 + Docker Desktop 下，`mvnw.cmd verify` 覆盖 24 个单元测试与 22 个 Testcontainers 集成测试，均为 0 failures、0 errors、0 skipped；
