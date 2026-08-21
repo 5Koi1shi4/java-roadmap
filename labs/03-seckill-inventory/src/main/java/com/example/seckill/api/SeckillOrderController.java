@@ -1,9 +1,12 @@
 package com.example.seckill.api;
 
 import com.example.seckill.application.SeckillOrderService;
-import com.example.seckill.application.CreateOrderCommand;
 import com.example.seckill.application.IdempotentOrderResult;
-import jakarta.validation.Valid;
+import com.example.seckill.application.CreateOrderCommand;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -20,15 +23,17 @@ public class SeckillOrderController {
     private static final int MAX_IDEMPOTENCY_KEY_LENGTH = 128;
 
     private final SeckillOrderService service;
+    private final ObjectMapper objectMapper;
 
-    public SeckillOrderController(SeckillOrderService service) {
+    public SeckillOrderController(SeckillOrderService service, ObjectMapper objectMapper) {
         this.service = service;
+        this.objectMapper = objectMapper.copy().enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
     }
 
     @PostMapping
     public ResponseEntity<?> placeOrder(
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
-            @Valid @RequestBody CreateSeckillOrderRequest request) {
+            @RequestBody JsonNode requestBody) {
         if (idempotencyKey == null || idempotencyKey.isBlank()) {
             return error(HttpStatus.BAD_REQUEST, "IDEMPOTENCY_KEY_REQUIRED", "Idempotency-Key 请求头不能为空");
         }
@@ -36,7 +41,23 @@ public class SeckillOrderController {
             return error(HttpStatus.BAD_REQUEST, "IDEMPOTENCY_KEY_INVALID", "Idempotency-Key 请求头长度不能超过 128 个字符");
         }
 
-        CreateOrderCommand command = new CreateOrderCommand(request.userId(), request.productId());
+        CreateSeckillOrderRequest request;
+        try {
+            request = objectMapper.treeToValue(requestBody, CreateSeckillOrderRequest.class);
+        } catch (JsonProcessingException exception) {
+            return error(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "请求参数校验失败");
+        }
+        if (request.userId() == null || request.userId() <= 0
+                || request.productId() == null || request.productId() <= 0) {
+            return error(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "请求参数校验失败");
+        }
+        String normalizedRequestBody;
+        try {
+            normalizedRequestBody = objectMapper.writeValueAsString(requestBody);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("无法规范化请求 JSON", exception);
+        }
+        CreateOrderCommand command = new CreateOrderCommand(request.userId(), request.productId(), normalizedRequestBody);
         IdempotentOrderResult result = service.placeOrder(idempotencyKey, command);
         return ResponseEntity.status(result.httpStatus())
                 .contentType(JSON_UTF8)

@@ -6,6 +6,7 @@ import com.example.seckill.application.ProductNotFoundException;
 import com.example.seckill.application.SoldOutException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
@@ -36,6 +37,11 @@ public class ApiExceptionHandler {
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ApiError> validation(MethodArgumentNotValidException exception) {
         return error(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "请求参数校验失败");
+    }
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<ApiError> malformedJson(HttpMessageNotReadableException exception) {
+        return error(HttpStatus.BAD_REQUEST, "MALFORMED_JSON", "请求 JSON 格式错误");
     }
 
     private ResponseEntity<ApiError> error(HttpStatus status, String code, String message) {

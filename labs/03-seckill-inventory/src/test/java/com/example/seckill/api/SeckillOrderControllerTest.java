@@ -16,6 +16,7 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
@@ -156,5 +157,56 @@ class SeckillOrderControllerTest {
                 .andExpect(content().contentTypeCompatibleWith(MediaType.parseMediaType("application/json;charset=UTF-8")))
                 .andExpect(jsonPath("$.code").value("IDEMPOTENCY_KEY_REUSED"))
                 .andExpect(jsonPath("$.message").value("幂等键已被不同请求复用"));
+    }
+
+    @Test
+    void passesCompleteCanonicalRequestBodyToIdempotentService() throws Exception {
+        when(service.placeOrder(eq("full-body-key"), any(CreateOrderCommand.class)))
+                .thenReturn(new IdempotentOrderResult(201, "{\"id\":11}"));
+
+        mockMvc.perform(post("/api/seckill/orders")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header("Idempotency-Key", "full-body-key")
+                        .content("{\"note\":\"中文\",\"productId\":1,\"userId\":7}"))
+                .andExpect(status().isCreated());
+
+        var command = org.mockito.ArgumentCaptor.forClass(CreateOrderCommand.class);
+        verify(service).placeOrder(eq("full-body-key"), command.capture());
+        org.assertj.core.api.Assertions.assertThat(command.getValue().normalizedRequestBody())
+                .isEqualTo("{\"note\":\"中文\",\"productId\":1,\"userId\":7}");
+
+        mockMvc.perform(post("/api/seckill/orders")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header("Idempotency-Key", "full-body-key")
+                        .content("{\"userId\":7,\"productId\":1,\"note\":\"另一请求\"}"))
+                .andExpect(status().isCreated());
+        org.mockito.ArgumentCaptor<CreateOrderCommand> commands = org.mockito.ArgumentCaptor.forClass(CreateOrderCommand.class);
+        verify(service, org.mockito.Mockito.times(2)).placeOrder(eq("full-body-key"), commands.capture());
+        org.assertj.core.api.Assertions.assertThat(commands.getAllValues().get(1).normalizedRequestBody())
+                .isNotEqualTo(commands.getAllValues().get(0).normalizedRequestBody());
+    }
+
+    @Test
+    void returnsUtf8JsonErrorForMalformedJson() throws Exception {
+        mockMvc.perform(post("/api/seckill/orders")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header("Idempotency-Key", "malformed-key")
+                        .content("{\"userId\":7,"))
+                .andExpect(status().isBadRequest())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.parseMediaType("application/json;charset=UTF-8")))
+                .andExpect(jsonPath("$.code").value("MALFORMED_JSON"))
+                .andExpect(jsonPath("$.message").value("请求 JSON 格式错误"));
+    }
+
+    @Test
+    void acceptsIdempotencyKeyAtMaximumLength() throws Exception {
+        when(service.placeOrder(any(String.class), any(CreateOrderCommand.class)))
+                .thenReturn(new IdempotentOrderResult(201, "{\"id\":11}"));
+
+        mockMvc.perform(post("/api/seckill/orders")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header("Idempotency-Key", "x".repeat(128))
+                        .content("{\"userId\":7,\"productId\":1}"))
+                .andExpect(status().isCreated());
     }
 }
