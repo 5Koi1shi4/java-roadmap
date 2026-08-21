@@ -34,7 +34,9 @@ class SeckillSchemaIT {
                 "SELECT COUNT(*) FROM seckill_product WHERE id = 1", Integer.class)).isEqualTo(1);
         assertThat(jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM information_schema.statistics " +
-                        "WHERE table_schema = DATABASE() AND table_name = 'seckill_order' " +
+                "WHERE table_schema = DATABASE() AND table_name = 'seckill_order' " +
                         "AND index_name = 'uk_seckill_order_user_product'", Integer.class)).isEqualTo(2);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT stock FROM seckill_product WHERE id = 1", Integer.class)).isEqualTo(10);
     }
 }
