@@ -18,6 +18,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -56,7 +57,7 @@ class SeckillOrderHttpIT {
 
     @Test
     void allowsExactlyThreeDifferentUsersWhenStockIsThree() throws Exception {
-        List<HttpResponse<String>> responses = postConcurrently(List.of(101L, 102L, 103L, 104L, 105L));
+        List<HttpResponse<byte[]>> responses = postConcurrently(List.of(101L, 102L, 103L, 104L, 105L));
 
         assertThat(responses).extracting(HttpResponse::statusCode)
                 .containsExactlyInAnyOrder(201, 201, 201, 409, 409);
@@ -68,7 +69,7 @@ class SeckillOrderHttpIT {
 
     @Test
     void allowsOnlyOneOrderWhenSameUserRequestsConcurrently() throws Exception {
-        List<HttpResponse<String>> responses = postConcurrently(List.of(201L, 201L, 201L, 201L));
+        List<HttpResponse<byte[]>> responses = postConcurrently(List.of(201L, 201L, 201L, 201L));
 
         assertThat(responses).extracting(HttpResponse::statusCode)
                 .containsExactlyInAnyOrder(201, 409, 409, 409);
@@ -80,26 +81,24 @@ class SeckillOrderHttpIT {
 
     @Test
     void rollsBackStockWhenDuplicateOrderIsRejected() throws Exception {
-        HttpResponse<String> first = post(301L);
+        HttpResponse<byte[]> first = post(301L);
         assertThat(first.statusCode()).isEqualTo(201);
         jdbcTemplate.update("UPDATE seckill_product SET stock = 3 WHERE id = 1");
 
-        HttpResponse<String> duplicate = post(301L);
+        HttpResponse<byte[]> duplicate = post(301L);
 
         assertThat(duplicate.statusCode()).isEqualTo(409);
-        assertThat(duplicate.body()).contains("ALREADY_PURCHASED").contains("已购买");
-        assertThat(duplicate.headers().firstValue(HttpHeaders.CONTENT_TYPE)).hasValueSatisfying(
-                value -> assertThat(value).contains("charset=UTF-8"));
+        assertThat(decodeUtf8(duplicate)).contains("ALREADY_PURCHASED").contains("已购买");
         assertThat(countOrders()).isEqualTo(1);
         assertThat(stock()).isEqualTo(3);
     }
 
-    private List<HttpResponse<String>> postConcurrently(List<Long> users) throws Exception {
+    private List<HttpResponse<byte[]>> postConcurrently(List<Long> users) throws Exception {
         var pool = Executors.newFixedThreadPool(users.size());
         var ready = new CountDownLatch(users.size());
         var start = new CountDownLatch(1);
         try {
-            List<Future<HttpResponse<String>>> futures = new ArrayList<>();
+            List<Future<HttpResponse<byte[]>>> futures = new ArrayList<>();
             for (long user : users) {
                 futures.add(pool.submit(() -> {
                     ready.countDown();
@@ -109,8 +108,8 @@ class SeckillOrderHttpIT {
             }
             ready.await();
             start.countDown();
-            List<HttpResponse<String>> responses = new ArrayList<>();
-            for (Future<HttpResponse<String>> future : futures) {
+            List<HttpResponse<byte[]>> responses = new ArrayList<>();
+            for (Future<HttpResponse<byte[]>> future : futures) {
                 responses.add(future.get());
             }
             return responses;
@@ -119,14 +118,14 @@ class SeckillOrderHttpIT {
         }
     }
 
-    private HttpResponse<String> post(long userId) throws Exception {
+    private HttpResponse<byte[]> post(long userId) throws Exception {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/api/seckill/orders"))
                 .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                 .POST(HttpRequest.BodyPublishers.ofString(
                         "{\"userId\":" + userId + ",\"productId\":1}", StandardCharsets.UTF_8))
                 .build();
-        return client.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        return client.send(request, HttpResponse.BodyHandlers.ofByteArray());
     }
 
     private int stock() {
@@ -137,8 +136,24 @@ class SeckillOrderHttpIT {
         return jdbcTemplate.queryForObject("SELECT COUNT(*) FROM seckill_order WHERE product_id = 1", Integer.class);
     }
 
-    private void assertUtf8(List<HttpResponse<String>> responses) {
-        responses.forEach(response -> assertThat(response.headers().firstValue(HttpHeaders.CONTENT_TYPE))
-                .hasValueSatisfying(value -> assertThat(value).contains("application/json").contains("charset=UTF-8")));
+    private void assertUtf8(List<HttpResponse<byte[]>> responses) {
+        responses.forEach(response -> {
+            Charset charset = declaredCharset(response);
+            assertThat(charset).isEqualTo(StandardCharsets.UTF_8);
+        });
+    }
+
+    private String decodeUtf8(HttpResponse<byte[]> response) {
+        return new String(response.body(), declaredCharset(response));
+    }
+
+    private Charset declaredCharset(HttpResponse<?> response) {
+        String contentType = response.headers().firstValue(HttpHeaders.CONTENT_TYPE).orElse("");
+        MediaType mediaType = MediaType.parseMediaType(contentType);
+        assertThat(mediaType.getType()).isEqualTo("application");
+        assertThat(mediaType.getSubtype()).isEqualTo("json");
+        Charset charset = mediaType.getCharset();
+        assertThat(charset).isNotNull();
+        return charset;
     }
 }
