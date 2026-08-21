@@ -5,3 +5,9 @@ spring:
     password: ${DB_PASSWORD:}
   flyway:
     enabled: true
+server:
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
