@@ -87,7 +87,7 @@ class SeckillOrderHttpIT {
         HttpResponse<String> duplicate = post(301L);
 
         assertThat(duplicate.statusCode()).isEqualTo(409);
-        assertThat(duplicate.body()).contains("ALREADY_PURCHASED");
+        assertThat(duplicate.body()).contains("ALREADY_PURCHASED").contains("已购买");
         assertThat(duplicate.headers().firstValue(HttpHeaders.CONTENT_TYPE)).hasValueSatisfying(
                 value -> assertThat(value).contains("charset=UTF-8"));
         assertThat(countOrders()).isEqualTo(1);
