@@ -203,9 +203,22 @@ docker compose -f compose.yaml -f compose.monitoring.yaml up -d prometheus grafa
 
 **预防：** 需要跨环境留档时，在删除卷前使用组织批准的备份方式导出；不要依赖可删除的本地命名卷作为唯一副本。
 
+## 14. 测试已通过但出现已停止 Redis 的重连告警
+
+**现象：** `mvnw.cmd verify` 的 Failsafe 结果为 0 failures、0 errors，但在 `ActuatorE2EIT` 或 `ProductionCacheWiringIT` 结束后仍出现 `ConnectionWatchdog`、`RedisConnectionException: Connection closed prematurely` 或 `Connection refused`。
+
+**原因：** 这两个测试用 `@SpringBootTest` 创建 Spring 上下文，Lettuce/Redisson 客户端由上下文管理；而 `@Testcontainers` 会在测试类结束时关闭 Redis 容器。若上下文仍保留在 Spring 测试缓存中，后台连接监视器会对已失效的临时端口进行异步重连。该日志发生在断言之后，因而不会自动使 Failsafe 测试失败。
+
+**解决：** 为这两个测试类添加 `@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)`，让 Spring 在该测试类结束时销毁上下文并关闭客户端资源。随后以 JDK 17 与可访问 Docker named pipe 的宿主权限重新执行完整验证。
+
+**验证：** 2026-08-21 的复跑中，24 个单元测试和 22 个 Testcontainers 集成测试均通过；日志未再出现对已停止 Redis 临时端口的重连告警。
+
+**预防：** 使用容器动态端口的 `@SpringBootTest` 必须在容器关闭前销毁依赖该端口的 Spring 上下文；不要仅因 Maven 返回成功就忽略异步资源清理告警。
+
 ## 最终验收证据
 
 - JDK 17 + Docker Desktop 下，`mvnw.cmd verify` 覆盖 24 个单元测试与 22 个 Testcontainers 集成测试，均为 0 failures、0 errors、0 skipped；
+- 2026-08-21 已验证 `ActuatorE2EIT` 与 `ProductionCacheWiringIT` 关闭上下文后，日志中不存在已停止 Redis 的 Lettuce 重连告警；
 - 两个独立 Redisson 客户端、100 个并发请求同一失效热点 Key，仓储仅回源 1 次；
 - k6 v2.2.0 以 50 VU 持续 60 秒实测：574,675 请求、P95 7.18ms、失败率 0%、业务 checks 100%；
 - 缓存写入、提交后失效、缓存重建锁和 HTTP 指标的手动命令均记录在 [README.md](README.md)。

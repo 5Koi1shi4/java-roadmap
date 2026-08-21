@@ -16,7 +16,7 @@
 | 阶段 | 项目 | 状态 |
 |---|---|---|
 | 1 | JWT 与 RBAC 权限服务 | 已验收 |
-| 2 | Redis 缓存与一致性 | 未开始 |
+| 2 | Redis 缓存与一致性 | 已验收 |
 | 3 | 秒杀、库存与接口幂等 | 未开始 |
 | 4 | 订单状态机与可靠消息 | 未开始 |
 | 5 | Elasticsearch 搜索 | 未开始 |
@@ -30,9 +30,9 @@
 ## 当前周
 
 - 周次：第 1 周
-- 已完成任务：JWT 与 RBAC 权限服务。
-- 验收证据：`labs/01-security-rbac` 的 `mvnw.cmd verify`；包含单元测试、MockMvc 授权测试与 Testcontainers MySQL 端到端认证流程。
-- 下一任务：Redis 缓存与一致性。
+- 已完成任务：JWT 与 RBAC 权限服务、Redis 缓存与一致性。
+- 验收证据：实验二在 JDK 17 与 Docker Desktop 下执行 `labs/02-redis-cache` 的 `mvnw.cmd verify`，24 个单元测试和 22 个 Testcontainers 集成测试均为 0 failures、0 errors、0 skipped；同时确认测试关闭临时 Redis 后不存在客户端重连告警。
+- 下一任务：秒杀、库存与接口幂等。
 
 ## 每周闭环
 

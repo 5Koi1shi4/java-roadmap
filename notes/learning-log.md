@@ -69,3 +69,12 @@
   - 将本地管理员初始化过程整理为不纳入版本库的脚本或明确的开发 profile，避免团队成员手工复制 SQL。
 
 - 明日第一步：完成实验一 README 与接口示例，在 `interview/question-bank.md` 写入 10 个与 JWT、RBAC、refresh token 轮换和并发条件更新相关的追问，然后复跑 `mvnw.cmd verify` 并准备提交实验一。
+
+## 2026-08-21
+
+- 今日目标：完成实验二 Redis 缓存与一致性的最终验收，并排除测试日志中的异步 Redis 重连告警。
+- 完成内容：为 `ActuatorE2EIT` 与 `ProductionCacheWiringIT` 添加类级 `@DirtiesContext(AFTER_CLASS)`，使 Spring 在 Testcontainers 关闭临时 Redis 前销毁上下文管理的 Lettuce/Redisson 客户端。
+- 问题与原因：原先 Failsafe 的 22 个集成测试均通过，但 `ConnectionWatchdog` 会在对应 Redis Testcontainer 停止后，对失效动态端口异步重连并记录 WARN。异常发生在测试断言之后，因此 Maven 成功不等于资源清理日志已通过人工验收。
+- 测试证据：使用 JDK 17 和 Docker Desktop 宿主权限执行 `mvnw.cmd verify`；24 个单元测试、22 个 Testcontainers 集成测试均为 0 failures、0 errors、0 skipped，且日志扫描未发现 `ConnectionWatchdog` 重连、`Connection closed prematurely` 或 `Connection refused`。
+- 技术选择及取舍：采用 `@DirtiesContext` 精确关闭使用动态容器端口的 Spring 测试上下文，而非降低日志级别；这保留了真正连接故障的可见性，也使测试资源生命周期与容器一致。
+- 明日第一步：开始阶段三“秒杀、库存与接口幂等”，先明确库存扣减、幂等键和并发验收测试。

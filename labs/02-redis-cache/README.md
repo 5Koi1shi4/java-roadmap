@@ -232,7 +232,7 @@ $env:JAVA_HOME = 'C:\Program Files\Java\jdk-17'
 .\mvnw.cmd verify
 ```
 
-2026-08-16 的最终复跑结果为 `BUILD SUCCESS`：Surefire 单元测试 24 个，`Failures: 0, Errors: 0, Skipped: 0`；Failsafe/Testcontainers 集成测试 22 个，`Failures: 0, Errors: 0, Skipped: 0`。集成测试启动 MySQL 8.4 与 Redis 7.4-alpine 容器，覆盖 Redis 序列化/TTL、提交后删除缓存、回滚保留数据库与缓存、原生 Redis 锁、Redisson 锁、跨实例热点重建、生产 `TransactionTemplate` 更新装配和 Actuator 指标。
+2026-08-21 的最终复跑结果为 `BUILD SUCCESS`：Surefire 单元测试 24 个，`Failures: 0, Errors: 0, Skipped: 0`；Failsafe/Testcontainers 集成测试 22 个，`Failures: 0, Errors: 0, Skipped: 0`。集成测试启动 MySQL 8.4 与 Redis 7.4-alpine 容器，覆盖 Redis 序列化/TTL、提交后删除缓存、回滚保留数据库与缓存、原生 Redis 锁、Redisson 锁、跨实例热点重建、生产 `TransactionTemplate` 更新装配和 Actuator 指标。两处 `@SpringBootTest` 在类结束后关闭 Spring 上下文，验证日志未出现已停止临时 Redis 的 Lettuce 重连告警。
 
 ## 2026-08-16 热点商品实测记录
 
