@@ -1,0 +1,7 @@
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3306/seckill}
+    username: ${DB_USERNAME:seckill}
+    password: ${DB_PASSWORD:}
+  flyway:
+    enabled: true
