@@ -209,4 +209,31 @@ class SeckillOrderControllerTest {
                         .content("{\"userId\":7,\"productId\":1}"))
                 .andExpect(status().isCreated());
     }
+
+    @Test
+    void canonicalizesNestedObjectRegardlessOfFieldOrder() throws Exception {
+        when(service.placeOrder(eq("canonical-key"), any(CreateOrderCommand.class)))
+                .thenReturn(new IdempotentOrderResult(201, "{\"id\":11}"));
+        mockMvc.perform(post("/api/seckill/orders").contentType(MediaType.APPLICATION_JSON)
+                        .header("Idempotency-Key", "canonical-key")
+                        .content("{\"userId\":7,\"productId\":1,\"meta\":{\"z\":2,\"a\":1}}"))
+                .andExpect(status().isCreated());
+        mockMvc.perform(post("/api/seckill/orders").contentType(MediaType.APPLICATION_JSON)
+                        .header("Idempotency-Key", "canonical-key")
+                        .content("{\"meta\":{\"a\":1,\"z\":2},\"productId\":1,\"userId\":7}"))
+                .andExpect(status().isCreated());
+        var commands = org.mockito.ArgumentCaptor.forClass(CreateOrderCommand.class);
+        verify(service, org.mockito.Mockito.times(2)).placeOrder(eq("canonical-key"), commands.capture());
+        org.assertj.core.api.Assertions.assertThat(commands.getAllValues().get(0).normalizedRequestBody())
+                .isEqualTo(commands.getAllValues().get(1).normalizedRequestBody());
+    }
+
+    @Test
+    void returnsJsonErrorForUnsupportedMediaType() throws Exception {
+        mockMvc.perform(post("/api/seckill/orders").contentType(MediaType.TEXT_PLAIN)
+                        .header("Idempotency-Key", "media-key").content("not-json"))
+                .andExpect(status().isUnsupportedMediaType())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.parseMediaType("application/json;charset=UTF-8")))
+                .andExpect(jsonPath("$.code").value("UNSUPPORTED_MEDIA_TYPE"));
+    }
 }

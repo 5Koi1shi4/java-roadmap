@@ -6,7 +6,9 @@ import com.example.seckill.application.CreateOrderCommand;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -27,7 +29,7 @@ public class SeckillOrderController {
 
     public SeckillOrderController(SeckillOrderService service, ObjectMapper objectMapper) {
         this.service = service;
-        this.objectMapper = objectMapper.copy().enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
+        this.objectMapper = objectMapper;
     }
 
     @PostMapping
@@ -53,7 +55,7 @@ public class SeckillOrderController {
         }
         String normalizedRequestBody;
         try {
-            normalizedRequestBody = objectMapper.writeValueAsString(requestBody);
+            normalizedRequestBody = objectMapper.writeValueAsString(canonicalize(requestBody));
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException("无法规范化请求 JSON", exception);
         }
@@ -62,6 +64,26 @@ public class SeckillOrderController {
         return ResponseEntity.status(result.httpStatus())
                 .contentType(JSON_UTF8)
                 .body(result.responseBody());
+    }
+
+    private JsonNode canonicalize(JsonNode node) {
+        if (node.isObject()) {
+            ObjectNode sorted = JsonNodeFactory.instance.objectNode();
+            java.util.Iterator<String> fields = node.fieldNames();
+            fields.forEachRemaining(name -> sorted.set(name, canonicalize(node.get(name))));
+            java.util.List<String> names = new java.util.ArrayList<>();
+            sorted.fieldNames().forEachRemaining(names::add);
+            names.sort(String::compareTo);
+            ObjectNode result = JsonNodeFactory.instance.objectNode();
+            names.forEach(name -> result.set(name, sorted.get(name)));
+            return result;
+        }
+        if (node.isArray()) {
+            ArrayNode array = JsonNodeFactory.instance.arrayNode();
+            node.forEach(child -> array.add(canonicalize(child)));
+            return array;
+        }
+        return node;
     }
 
     private ResponseEntity<ApiError> error(HttpStatus status, String code, String message) {
