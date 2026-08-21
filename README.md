@@ -1,43 +1,75 @@
 # Java Backend Roadmap
 
-面向 2027 届春招的 Java 后端项目化学习工作区。当前基础为能够使用 Spring Boot 完成基础 CRUD，每天计划投入 3–5 小时。
+面向 2027 届春招的 Java 后端项目化学习仓库。这里的 `main` 分支是稳定的学习总览与已验收实验入口；每个实验保持独立目录、独立 README 和可复跑的验证命令，方便阅读者按阶段进入。
+
+## 从这里开始
+
+推荐按以下顺序阅读：
+
+1. 本页：了解路线、当前进度和目录职责。
+2. 已验收实验的 README：理解目标、运行方式和验收范围。
+3. 实验的排障复盘：了解真实环境问题及其边界。
+4. [学习日志](notes/learning-log.md)、[面试题库](interview/question-bank.md) 与 [参考仓库阅读记录](references/README.md)：沉淀学习过程与延伸问题。
+
+## 学习路线
+
+| 阶段 | 项目 | 状态 | 阅读入口 |
+|---|---|---|---|
+| 1 | JWT 与 RBAC 权限服务 | 已验收 | [实验一 README](labs/01-security-rbac/README.md) · [排障复盘](labs/01-security-rbac/TROUBLESHOOTING.md) |
+| 2 | Redis 缓存与一致性 | 已验收 | [实验二 README](labs/02-redis-cache/README.md) · [排障复盘](labs/02-redis-cache/TROUBLESHOOTING.md) |
+| 3 | 秒杀、库存与接口幂等 | 未开始 | — |
+| 4 | 订单状态机与可靠消息 | 未开始 | — |
+| 5 | Elasticsearch 搜索 | 未开始 | — |
+| 6 | 安全文件服务与 MinIO | 未开始 | — |
+| 7 | 校园交易与服务平台 | 未开始 | — |
+| 8 | Spring Cloud 渐进拆分 | 未开始 | — |
+| 9 | Java AI 智能校园客服 | 未开始 | — |
+
+状态仅使用：`未开始`、`进行中`、`已验收`。
+
+## 已验收实验
+
+### 实验一：JWT 与 RBAC 权限服务
+
+覆盖 JWT 认证、RBAC 授权、可撤销 Refresh Token 轮换和 MySQL 端到端验证。
+
+- 入口：[labs/01-security-rbac](labs/01-security-rbac/README.md)
+- 验证：在实验目录使用 JDK 17 执行 `mvnw.cmd verify`。
+
+### 实验二：Redis 缓存与一致性
+
+覆盖 Cache Aside、正/负缓存、事务提交后失效、热点 Key 重建锁、Redisson、Actuator、k6、Prometheus 与 Grafana。
+
+- 入口：[labs/02-redis-cache](labs/02-redis-cache/README.md)
+- 验证：在 JDK 17 与 Docker Desktop 下执行 `mvnw.cmd verify`；已验收 24 个单元测试和 22 个 Testcontainers 集成测试。
+
+## 目录导航
+
+| 目录 | 用途 |
+|---|---|
+| [`labs/`](labs/) | 每个阶段的独立可运行实验、测试、Compose 配置和实验说明。 |
+| [`notes/`](notes/learning-log.md) | 每日目标、测试证据、问题复盘与技术取舍。 |
+| [`interview/`](interview/question-bank.md) | 从实验提炼的面试追问与知识点。 |
+| [`references/`](references/README.md) | 外部参考仓库及阅读记录。 |
+| [`compose/`](compose/README.md) | 共享容器与 Compose 使用说明。 |
 
 ## 技术基线
 
-- JDK 17
-- Maven Wrapper 3.9.x（各项目生成后固定版本）
-- Spring Boot 3.x
+- JDK 17、Maven Wrapper 3.9.x、Spring Boot 3.x
 - MySQL 8、Redis 7、RabbitMQ、Elasticsearch 8、MinIO
 - JUnit 5、Mockito、Testcontainers
 - Docker Desktop 与 Docker Compose
 
-## 进度
+## 学习闭环
 
-| 阶段 | 项目 | 状态 |
-|---|---|---|
-| 1 | JWT 与 RBAC 权限服务 | 已验收 |
-| 2 | Redis 缓存与一致性 | 已验收 |
-| 3 | 秒杀、库存与接口幂等 | 未开始 |
-| 4 | 订单状态机与可靠消息 | 未开始 |
-| 5 | Elasticsearch 搜索 | 未开始 |
-| 6 | 安全文件服务与 MinIO | 未开始 |
-| 7 | 校园交易与服务平台 | 未开始 |
-| 8 | Spring Cloud 渐进拆分 | 未开始 |
-| 9 | Java AI 智能校园客服 | 未开始 |
+1. 先写能失败的测试，明确行为边界。
+2. 实现最小功能并让测试通过。
+3. 用 Testcontainers 或真实 HTTP 流程验证外部协作。
+4. 补充 README、排障记录、学习日志和面试追问。
+5. 通过验收后更新本页状态，再进入下一阶段。
 
-状态只使用：`未开始`、`进行中`、`已验收`。
+## 协作与安全约定
 
-## 当前周
-
-- 周次：第 1 周
-- 已完成任务：JWT 与 RBAC 权限服务、Redis 缓存与一致性。
-- 验收证据：实验二在 JDK 17 与 Docker Desktop 下执行 `labs/02-redis-cache` 的 `mvnw.cmd verify`，24 个单元测试和 22 个 Testcontainers 集成测试均为 0 failures、0 errors、0 skipped；同时确认测试关闭临时 Redis 后不存在客户端重连告警。
-- 下一任务：秒杀、库存与接口幂等。
-
-## 每周闭环
-
-1. 先写失败测试。
-2. 实现最小功能并使测试通过。
-3. 补充集成测试、README 与运行命令。
-4. 记录问题、技术选择和面试追问。
-5. 通过验收后再进入下一项目。
+- Java 与 Maven 统一使用 JDK 17。
+- 本地密码、Token 和 `.env` 不提交；`.env.example` 仅保留占位符。
+- 每次改动只暂存本次相关文件；实验分支和工作树保持独立，不因调整总览而改变。
