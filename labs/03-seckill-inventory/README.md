@@ -17,7 +17,43 @@ docker compose up -d
 docker compose ps
 ```
 
-Compose 只启动实验三所需的 MySQL，不复用其他实验的服务或数据卷。若本机 3309 已占用，修改 `.env` 的 `MYSQL_PORT`，并同步 `DB_URL` 的端口。启动应用前确保 `DB_USERNAME`/`DB_PASSWORD` 与 MySQL 应用用户一致：
+Compose 只启动实验三所需的 MySQL，不复用其他实验的服务或数据卷。默认宿主端口是 3309；若本机 3309 已占用，修改 `.env` 的 `MYSQL_PORT`，并把下面检查中的 `3309` 与 `DB_URL` 端口一起改成同一个值。Compose 和应用必须使用同一份 `.env` 中的数据库用户名与密码。
+
+启动 Spring Boot 前，必须在当前 PowerShell 进程中加载本地 `.env`。Maven 不会自动读取 `.env`，因此只把文件放在项目目录中并不足以让 `application.yml` 获得 `DB_URL`、`DB_USERNAME` 和 `DB_PASSWORD`。下面的步骤不会回显密码，也不会修改 `.env`：
+
+```powershell
+$envFile = Join-Path (Get-Location) '.env'
+if (-not (Test-Path -LiteralPath $envFile)) {
+  throw '未找到 .env，请先执行 Copy-Item .env.example .env 并填写本机凭据。'
+}
+
+$dotenv = @{}
+foreach ($line in Get-Content -LiteralPath $envFile) {
+  if ($line -match '^\s*(DB_URL|DB_USERNAME|DB_PASSWORD)\s*=\s*(.*?)\s*$') {
+    $key = $Matches[1]
+    $value = $Matches[2].Trim()
+    if (($value.StartsWith('"') -and $value.EndsWith('"')) -or
+        ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+      $value = $value.Substring(1, $value.Length - 2)
+    }
+    $dotenv[$key] = $value
+  }
+}
+
+foreach ($key in 'DB_URL', 'DB_USERNAME', 'DB_PASSWORD') {
+  if (-not $dotenv.ContainsKey($key) -or [string]::IsNullOrWhiteSpace($dotenv[$key])) {
+    throw ".env 缺少 $key 或其值为空。"
+  }
+}
+if ($dotenv['DB_URL'] -notmatch '^jdbc:mysql://localhost:3309/') {
+  throw 'DB_URL 必须使用与 Compose 默认映射一致的 localhost:3309；如修改 MYSQL_PORT，请同步修改 DB_URL 和此检查。'
+}
+
+$env:DB_URL = $dotenv['DB_URL']
+$env:DB_USERNAME = $dotenv['DB_USERNAME']
+$env:DB_PASSWORD = $dotenv['DB_PASSWORD']
+Write-Host '已将 DB_URL、DB_USERNAME、DB_PASSWORD 加载到当前 PowerShell 进程（凭据未回显）。'
+```
 
 ```powershell
 $env:JAVA_HOME = 'C:\Program Files\Java\jdk-17'
