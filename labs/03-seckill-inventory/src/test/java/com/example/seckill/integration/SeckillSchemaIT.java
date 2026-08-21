@@ -39,4 +39,21 @@ class SeckillSchemaIT {
         assertThat(jdbcTemplate.queryForObject(
                 "SELECT stock FROM seckill_product WHERE id = 1", Integer.class)).isEqualTo(10);
     }
+
+    @Test
+    void createsIdempotencyRecordWithUniqueKeyAndResponseFields() {
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.tables " +
+                        "WHERE table_schema = DATABASE() AND table_name = 'idempotency_record'", Integer.class))
+                .isEqualTo(1);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.statistics " +
+                        "WHERE table_schema = DATABASE() AND table_name = 'idempotency_record' " +
+                        "AND index_name = 'uk_idempotency_record_key'", Integer.class)).isEqualTo(1);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.columns " +
+                        "WHERE table_schema = DATABASE() AND table_name = 'idempotency_record' " +
+                        "AND column_name IN ('idempotency_key', 'request_hash', 'status', 'response_status', " +
+                        "'response_body', 'created_at', 'updated_at')", Integer.class)).isEqualTo(7);
+    }
 }

@@ -3,6 +3,7 @@ package com.example.seckill.infrastructure.persistence;
 import com.example.seckill.domain.SeckillOrder;
 import com.example.seckill.domain.SeckillProduct;
 import com.example.seckill.domain.SeckillRepository;
+import com.example.seckill.domain.IdempotencyRecord;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
@@ -52,5 +53,37 @@ public class JdbcSeckillRepository implements SeckillRepository {
             throw new IllegalStateException("No generated order id returned");
         }
         return new SeckillOrder(key.longValue(), userId, productId, Instant.now());
+    }
+
+    @Override
+    public Optional<IdempotencyRecord> findByKey(String key) {
+        return jdbcTemplate.query(
+                        "SELECT idempotency_key, request_hash, status, response_status, response_body, " +
+                                "created_at, updated_at FROM idempotency_record WHERE idempotency_key = ?",
+                        (rs, rowNum) -> new IdempotencyRecord(
+                                rs.getString("idempotency_key"),
+                                rs.getString("request_hash"),
+                                rs.getString("status"),
+                                (Integer) rs.getObject("response_status"),
+                                rs.getString("response_body"),
+                                rs.getTimestamp("created_at").toInstant(),
+                                rs.getTimestamp("updated_at").toInstant()),
+                        key)
+                .stream().findFirst();
+    }
+
+    @Override
+    public void insertProcessing(String key, String requestHash) {
+        jdbcTemplate.update(
+                "INSERT INTO idempotency_record (idempotency_key, request_hash, status) VALUES (?, ?, 'PROCESSING')",
+                key, requestHash);
+    }
+
+    @Override
+    public void saveResponse(String key, int status, String body) {
+        jdbcTemplate.update(
+                "UPDATE idempotency_record SET status = 'SUCCEEDED', response_status = ?, response_body = ? " +
+                        "WHERE idempotency_key = ?",
+                status, body, key);
     }
 }

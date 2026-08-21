@@ -8,4 +8,10 @@ public interface SeckillRepository {
     Optional<SeckillProduct> findProduct(long productId);
 
     SeckillOrder insertOrder(long userId, long productId);
+
+    Optional<IdempotencyRecord> findByKey(String key);
+
+    void insertProcessing(String key, String requestHash);
+
+    void saveResponse(String key, int status, String body);
 }
