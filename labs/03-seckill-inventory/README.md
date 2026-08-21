@@ -29,7 +29,7 @@ if (-not (Test-Path -LiteralPath $envFile)) {
 
 $dotenv = @{}
 foreach ($line in Get-Content -LiteralPath $envFile) {
-  if ($line -match '^\s*(DB_URL|DB_USERNAME|DB_PASSWORD)\s*=\s*(.*?)\s*$') {
+  if ($line -match '^\s*(MYSQL_PORT|MYSQL_USERNAME|MYSQL_PASSWORD|DB_URL|DB_USERNAME|DB_PASSWORD)\s*=\s*(.*?)\s*$') {
     $key = $Matches[1]
     $value = $Matches[2].Trim()
     if (($value.StartsWith('"') -and $value.EndsWith('"')) -or
@@ -40,13 +40,25 @@ foreach ($line in Get-Content -LiteralPath $envFile) {
   }
 }
 
-foreach ($key in 'DB_URL', 'DB_USERNAME', 'DB_PASSWORD') {
+foreach ($key in 'MYSQL_PORT', 'MYSQL_USERNAME', 'MYSQL_PASSWORD', 'DB_URL', 'DB_USERNAME', 'DB_PASSWORD') {
   if (-not $dotenv.ContainsKey($key) -or [string]::IsNullOrWhiteSpace($dotenv[$key])) {
     throw ".env 缺少 $key 或其值为空。"
   }
 }
-if ($dotenv['DB_URL'] -notmatch '^jdbc:mysql://localhost:3309/') {
-  throw 'DB_URL 必须使用与 Compose 默认映射一致的 localhost:3309；如修改 MYSQL_PORT，请同步修改 DB_URL 和此检查。'
+if ($dotenv['MYSQL_PORT'] -notmatch '^\d+$') {
+  throw 'MYSQL_PORT 必须是数字。'
+}
+if ($dotenv['DB_URL'] -notmatch '^jdbc:mysql://localhost:(\d+)/') {
+  throw 'DB_URL 必须使用 jdbc:mysql://localhost:<MYSQL_PORT>/... 格式。'
+}
+if ([int]$Matches[1] -ne [int]$dotenv['MYSQL_PORT']) {
+  throw 'DB_URL 的端口必须与 MYSQL_PORT 一致。'
+}
+if ($dotenv['MYSQL_USERNAME'] -cne $dotenv['DB_USERNAME']) {
+  throw 'MYSQL_USERNAME 必须与 DB_USERNAME 一致。'
+}
+if ($dotenv['MYSQL_PASSWORD'] -cne $dotenv['DB_PASSWORD']) {
+  throw 'MYSQL_PASSWORD 必须与 DB_PASSWORD 一致。'
 }
 
 $env:DB_URL = $dotenv['DB_URL']
