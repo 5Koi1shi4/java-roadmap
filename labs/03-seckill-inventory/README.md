@@ -4,6 +4,8 @@
 
 重试时保持 `Idempotency-Key` 与请求体不变；同 key 并发只创建一笔订单并重放相同 UTF-8 JSON。不同 key 由 `(user_id, product_id)` 唯一索引保证只成交一次。系统异常返回 5xx 时幂等记录随事务回滚，修复后可安全复用同 key 重试。
 
+多实例时幂等记录存放在共享 MySQL，而不是进程内锁。请求先竞争 `idempotency_record` 唯一键，再读取该 key；竞争失败的实例短暂轮询，直到持有者提交终态响应，因此两个端口会返回完全相同的状态、原始 JSON 字节和 `application/json;charset=UTF-8`。处理超时后才允许接管 `PROCESSING` 记录，接管窗口应结合最长业务耗时设置。
+
 ```powershell
 $key = [guid]::NewGuid().ToString()
 $body = @{ userId = 101; productId = 1 } | ConvertTo-Json -Compress
@@ -110,5 +112,7 @@ $env:Path = "$env:JAVA_HOME\bin;$env:Path"
 ## 关键实现
 
 `UPDATE seckill_product SET stock = stock - 1 WHERE id = ? AND stock > 0` 以受影响行数表达库存是否可扣；成功后在同一 `@Transactional` 方法内插入订单。唯一索引处理并发重复请求，捕获冲突并转成业务错误；事务回滚会撤销冲突请求的库存更新。
+
+数据库锁顺序固定为“幂等键记录 → 商品库存 → 订单唯一索引”，避免不同代码路径先锁商品再锁幂等记录造成死锁。若 MySQL 返回死锁或锁等待超时，API 统一返回 UTF-8 的 `503 RETRYABLE_DATABASE_CONFLICT`，客户端应使用原幂等键重试；异常事务不会留下可永久阻塞的 `PROCESSING` 记录。
 
 更多环境问题见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。

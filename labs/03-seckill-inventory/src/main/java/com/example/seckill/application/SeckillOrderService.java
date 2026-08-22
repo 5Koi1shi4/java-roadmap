@@ -61,6 +61,19 @@ public class SeckillOrderService {
         }
         if (!inserted && repository.takeOverProcessingIfExpired(
                 key, Instant.now().minusSeconds(PROCESSING_TIMEOUT_SECONDS)) == 0) {
+            for (int attempt = 0; attempt < 200; attempt++) {
+                var completed = repository.findByKey(key)
+                        .filter(record -> record.responseStatus() != null && record.responseBody() != null);
+                if (completed.isPresent()) {
+                    return new IdempotentOrderResult(completed.get().responseStatus(), completed.get().responseBody());
+                }
+                try {
+                    Thread.sleep(10);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
             return new IdempotentOrderResult(409,
                     "{\"code\":\"REQUEST_IN_PROGRESS\",\"message\":\"请求正在处理中\"}");
         }

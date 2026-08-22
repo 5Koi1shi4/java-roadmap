@@ -10,6 +10,9 @@ import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.context.ConfigurableApplicationContext;
+import com.example.seckill.SeckillInventoryApplication;
 import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -37,6 +40,9 @@ class SeckillOrderHttpIT {
     @LocalServerPort
     int port;
 
+    private static ConfigurableApplicationContext secondInstance;
+    private int secondPort;
+
     @Autowired
     JdbcTemplate jdbcTemplate;
 
@@ -47,6 +53,28 @@ class SeckillOrderHttpIT {
         registry.add("spring.datasource.url", mysql::getJdbcUrl);
         registry.add("spring.datasource.username", mysql::getUsername);
         registry.add("spring.datasource.password", mysql::getPassword);
+    }
+
+    @org.junit.jupiter.api.BeforeAll
+    static void startSecondApplicationInstance() {
+        secondInstance = new SpringApplicationBuilder(SeckillInventoryApplication.class)
+                .properties("server.port=0",
+                        "spring.datasource.url=" + mysql.getJdbcUrl(),
+                        "spring.datasource.username=" + mysql.getUsername(),
+                        "spring.datasource.password=" + mysql.getPassword())
+                .run();
+    }
+
+    @org.junit.jupiter.api.AfterAll
+    static void stopSecondApplicationInstance() {
+        if (secondInstance != null) {
+            secondInstance.close();
+        }
+    }
+
+    @org.junit.jupiter.api.BeforeEach
+    void captureSecondPort() {
+        secondPort = secondInstance.getEnvironment().getProperty("local.server.port", Integer.class);
     }
 
     @BeforeEach
@@ -67,6 +95,37 @@ class SeckillOrderHttpIT {
         assertThat(decodeUtf8(responses.get(0))).contains("下单成功");
         assertThat(countOrders()).isEqualTo(1);
         assertThat(stock()).isEqualTo(2);
+    }
+
+    @Test
+    void replaysExactlyTheSameResponseAcrossTwoApplicationInstances() throws Exception {
+        List<HttpResponse<byte[]>> responses = postConcurrentlyAcrossInstances("cross-instance-key", 501L);
+
+        assertThat(responses).extracting(HttpResponse::statusCode).containsOnly(201);
+        assertThat(responses.get(0).body()).containsExactly(responses.get(1).body());
+        assertThat(responses.get(0).headers().firstValue(HttpHeaders.CONTENT_TYPE))
+                .isEqualTo(responses.get(1).headers().firstValue(HttpHeaders.CONTENT_TYPE));
+        assertThat(countOrders()).isEqualTo(1);
+        assertThat(stock()).isEqualTo(2);
+    }
+
+    private List<HttpResponse<byte[]>> postConcurrentlyAcrossInstances(String key, long userId) throws Exception {
+        var pool = Executors.newFixedThreadPool(2);
+        var start = new CountDownLatch(1);
+        try {
+            Future<HttpResponse<byte[]>> first = pool.submit(() -> {
+                start.await();
+                return post(key, userId, port);
+            });
+            Future<HttpResponse<byte[]>> second = pool.submit(() -> {
+                start.await();
+                return post(key, userId, secondPort);
+            });
+            start.countDown();
+            return List.of(first.get(), second.get());
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     @Test
@@ -182,8 +241,12 @@ class SeckillOrderHttpIT {
     }
 
     private HttpResponse<byte[]> post(String key, long userId) throws Exception {
+        return post(key, userId, port);
+    }
+
+    private HttpResponse<byte[]> post(String key, long userId, int targetPort) throws Exception {
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:" + port + "/api/seckill/orders"))
+                .uri(URI.create("http://localhost:" + targetPort + "/api/seckill/orders"))
                 .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                 .header("Idempotency-Key", key)
                 .POST(HttpRequest.BodyPublishers.ofString(

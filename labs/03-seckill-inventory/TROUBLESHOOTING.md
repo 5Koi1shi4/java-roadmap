@@ -4,6 +4,10 @@
 
 重试必须复用原 `Idempotency-Key` 和完全相同的 JSON；成功请求会重放原始 UTF-8 JSON。数据库异常返回 5xx 时，幂等记录随事务回滚，修复故障后可以安全重试。
 
+### 双实例请求一直返回处理中
+
+确认两个实例的 `DB_URL`、用户名和密码指向同一个 MySQL，而不是各自的本地库。跨实例协调依赖 `idempotency_record` 唯一键和行锁；竞争实例会等待终态响应，超过接管阈值才接管过期 `PROCESSING`。若日志出现死锁或锁等待超时，检查是否有额外 SQL 反向获取“商品 → 幂等键”的锁顺序；接口应返回 `503`、`RETRYABLE_DATABASE_CONFLICT` 和 `charset=UTF-8`。
+
 ## Docker 或 Testcontainers 启动失败
 
 `mvnw.cmd verify` 中的 `*IT` 由 Failsafe 执行，并需要 Docker Desktop Engine。先运行 `docker version` 和 `docker info` 确认引擎可访问；Windows named pipe 权限错误时，重启 Docker Desktop，或在已授权宿主 Docker 权限下重跑命令。不要把 Docker 环境错误误判为 Java 业务失败。只启动单元测试不能替代集成验收。
