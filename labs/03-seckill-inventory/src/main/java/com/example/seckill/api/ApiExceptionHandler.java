@@ -1,0 +1,91 @@
+package com.example.seckill.api;
+
+import com.example.seckill.application.AlreadyPurchasedException;
+import com.example.seckill.application.IdempotencyKeyReusedException;
+import com.example.seckill.application.ProductNotFoundException;
+import com.example.seckill.application.SoldOutException;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.CannotAcquireLockException;
+import org.springframework.dao.DeadlockLoserDataAccessException;
+import org.springframework.dao.PessimisticLockingFailureException;
+import java.sql.SQLException;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
+import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+
+@RestControllerAdvice
+public class ApiExceptionHandler {
+
+    @ExceptionHandler(ProductNotFoundException.class)
+    public ResponseEntity<ApiError> productNotFound(ProductNotFoundException exception) {
+        return error(HttpStatus.NOT_FOUND, "PRODUCT_NOT_FOUND", exception.getMessage());
+    }
+
+    @ExceptionHandler(SoldOutException.class)
+    public ResponseEntity<ApiError> soldOut(SoldOutException exception) {
+        return error(HttpStatus.CONFLICT, "SOLD_OUT", exception.getMessage());
+    }
+
+    @ExceptionHandler(AlreadyPurchasedException.class)
+    public ResponseEntity<ApiError> alreadyPurchased(AlreadyPurchasedException exception) {
+        return error(HttpStatus.CONFLICT, "ALREADY_PURCHASED", exception.getMessage());
+    }
+
+    @ExceptionHandler(IdempotencyKeyReusedException.class)
+    public ResponseEntity<ApiError> idempotencyKeyReused(IdempotencyKeyReusedException exception) {
+        return error(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED", "幂等键已被不同请求复用");
+    }
+
+    @ExceptionHandler(DataAccessException.class)
+    public ResponseEntity<ApiError> retryableDatabaseConflict(DataAccessException exception) {
+        if (!isLockConflict(exception)) {
+            return error(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_SERVER_ERROR", "数据库访问失败");
+        }
+        return error(HttpStatus.SERVICE_UNAVAILABLE, "RETRYABLE_DATABASE_CONFLICT", "数据库锁冲突，请使用相同幂等键重试");
+    }
+
+    private boolean isLockConflict(DataAccessException exception) {
+        if (exception instanceof CannotAcquireLockException
+                || exception instanceof DeadlockLoserDataAccessException
+                || exception instanceof PessimisticLockingFailureException) {
+            return true;
+        }
+        Throwable current = exception;
+        while (current != null) {
+            if (current instanceof SQLException sqlException) {
+                String state = sqlException.getSQLState();
+                int code = sqlException.getErrorCode();
+                if ("40001".equals(state) || code == 1213 || code == 1205) {
+                    return true;
+                }
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<ApiError> validation(MethodArgumentNotValidException exception) {
+        return error(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "请求参数校验失败");
+    }
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<ApiError> malformedJson(HttpMessageNotReadableException exception) {
+        return error(HttpStatus.BAD_REQUEST, "MALFORMED_JSON", "请求 JSON 格式错误");
+    }
+
+    @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
+    public ResponseEntity<ApiError> unsupportedMediaType(HttpMediaTypeNotSupportedException exception) {
+        return error(HttpStatus.UNSUPPORTED_MEDIA_TYPE, "UNSUPPORTED_MEDIA_TYPE", "请求 Content-Type 不受支持");
+    }
+
+    private ResponseEntity<ApiError> error(HttpStatus status, String code, String message) {
+        return ResponseEntity.status(status)
+                .contentType(org.springframework.http.MediaType.parseMediaType("application/json;charset=UTF-8"))
+                .body(new ApiError(code, message));
+    }
+}
