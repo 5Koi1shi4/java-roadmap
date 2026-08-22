@@ -13,6 +13,7 @@ import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Isolation;
 
 import java.sql.PreparedStatement;
 import java.sql.Statement;
@@ -82,6 +83,33 @@ public class JdbcSeckillRepository implements SeckillRepository {
                                 rs.getTimestamp("updated_at").toInstant()),
                         key)
                 .stream().findFirst();
+    }
+
+    @Override
+    @Transactional(isolation = Isolation.READ_COMMITTED, readOnly = true)
+    public Optional<IdempotencyRecord> findByKeyForUpdate(String key) {
+        return jdbcTemplate.query(
+                        "SELECT idempotency_key, request_hash, status, response_status, response_body, " +
+                                "created_at, updated_at FROM idempotency_record WHERE idempotency_key = ? FOR UPDATE",
+                        (rs, rowNum) -> new IdempotencyRecord(
+                                rs.getString("idempotency_key"),
+                                rs.getString("request_hash"),
+                                rs.getString("status"),
+                                (Integer) rs.getObject("response_status"),
+                                normalizeJson(rs.getString("response_body")),
+                                rs.getTimestamp("created_at").toInstant(),
+                                rs.getTimestamp("updated_at").toInstant()),
+                        key)
+                .stream().findFirst();
+    }
+
+    @Override
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public int takeOverProcessingIfExpired(String key, Instant expiredBefore) {
+        return jdbcTemplate.update(
+                "UPDATE idempotency_record SET updated_at = CURRENT_TIMESTAMP " +
+                        "WHERE idempotency_key = ? AND status = 'PROCESSING' AND updated_at < ?",
+                key, java.sql.Timestamp.from(expiredBefore));
     }
 
     private static String normalizeJson(String body) {

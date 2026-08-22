@@ -11,6 +11,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import java.time.Instant;
 
 @Testcontainers
 @SpringBootTest
@@ -20,6 +21,12 @@ class SeckillSchemaIT {
 
     @Autowired
     JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    com.example.seckill.infrastructure.persistence.JdbcSeckillRepository repository;
+
+    @Autowired
+    org.springframework.transaction.PlatformTransactionManager transactionManager;
 
     @DynamicPropertySource
     static void mysqlProperties(DynamicPropertyRegistry registry) {
@@ -55,5 +62,34 @@ class SeckillSchemaIT {
                         "WHERE table_schema = DATABASE() AND table_name = 'idempotency_record' " +
                         "AND column_name IN ('idempotency_key', 'request_hash', 'status', 'response_status', " +
                         "'response_body', 'created_at', 'updated_at')", Integer.class)).isEqualTo(7);
+    }
+    @Test
+    void readsIdempotencyRecordWithRowLockInsideReadCommittedTransaction() {
+        jdbcTemplate.update("DELETE FROM idempotency_record");
+        jdbcTemplate.update("INSERT INTO idempotency_record (idempotency_key, request_hash) VALUES (?, ?)",
+                "lock-key", "hash");
+
+        new org.springframework.transaction.support.TransactionTemplate(transactionManager)
+                .executeWithoutResult(status -> {
+                    var record = repository.findByKeyForUpdate("lock-key");
+                    assertThat(record).isPresent();
+                });
+    }
+
+    @Test
+    void takesOverOnlyExpiredProcessingRecordAndReportsAffectedRows() {
+        jdbcTemplate.update("DELETE FROM idempotency_record");
+        jdbcTemplate.update("INSERT INTO idempotency_record (idempotency_key, request_hash, status, updated_at) " +
+                        "VALUES (?, ?, 'PROCESSING', ?)", "expired-key", "hash",
+                java.sql.Timestamp.from(Instant.now().minusSeconds(120)));
+        jdbcTemplate.update("INSERT INTO idempotency_record (idempotency_key, request_hash, status, updated_at) " +
+                        "VALUES (?, ?, 'PROCESSING', ?)", "fresh-key", "hash",
+                java.sql.Timestamp.from(Instant.now()));
+
+        int expiredRows = repository.takeOverProcessingIfExpired("expired-key", Instant.now().minusSeconds(60));
+        int freshRows = repository.takeOverProcessingIfExpired("fresh-key", Instant.now().minusSeconds(60));
+
+        assertThat(expiredRows).isEqualTo(1);
+        assertThat(freshRows).isZero();
     }
 }
