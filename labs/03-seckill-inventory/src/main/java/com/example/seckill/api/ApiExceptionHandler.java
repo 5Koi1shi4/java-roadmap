@@ -7,6 +7,7 @@ import com.example.seckill.application.SoldOutException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.dao.DataAccessException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -33,6 +34,11 @@ public class ApiExceptionHandler {
     @ExceptionHandler(IdempotencyKeyReusedException.class)
     public ResponseEntity<ApiError> idempotencyKeyReused(IdempotencyKeyReusedException exception) {
         return error(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED", "幂等键已被不同请求复用");
+    }
+
+    @ExceptionHandler(DataAccessException.class)
+    public ResponseEntity<ApiError> retryableDatabaseConflict(DataAccessException exception) {
+        return error(HttpStatus.SERVICE_UNAVAILABLE, "RETRYABLE_DATABASE_CONFLICT", "数据库锁冲突，请使用相同幂等键重试");
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

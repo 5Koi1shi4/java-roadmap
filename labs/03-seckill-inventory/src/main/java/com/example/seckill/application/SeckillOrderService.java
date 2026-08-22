@@ -13,17 +13,14 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.locks.ReentrantLock;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
+import java.time.Instant;
 
 @Service
 public class SeckillOrderService {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private final SeckillRepository repository;
-    private final ConcurrentHashMap<String, ReentrantLock> idempotencyLocks = new ConcurrentHashMap<>();
+    private static final long PROCESSING_TIMEOUT_SECONDS = 60;
 
     public SeckillOrderService(SeckillRepository repository) {
         this.repository = repository;
@@ -46,40 +43,25 @@ public class SeckillOrderService {
 
     @Transactional
     public IdempotentOrderResult placeOrder(String key, CreateOrderCommand command) {
-        ReentrantLock lock = idempotencyLocks.computeIfAbsent(key, ignored -> new ReentrantLock());
-        lock.lock();
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCompletion(int status) {
-                    lock.unlock();
-                }
-            });
-        } else {
-            try {
-                return placeOrderUnderKeyLock(key, command);
-            } finally {
-                lock.unlock();
-            }
-        }
-        try {
-            return placeOrderUnderKeyLock(key, command);
-        } catch (RuntimeException | Error exception) {
-            throw exception;
-        }
-    }
-
-    private IdempotentOrderResult placeOrderUnderKeyLock(String key, CreateOrderCommand command) {
         String requestHash = requestHash(command.normalizedRequestBody());
         var existing = repository.findByKey(key);
-        if (existing.isPresent()) {
-            return resolveExisting(key, requestHash, existing.get());
-        }
-        try {
+        if (existing.isEmpty()) {
             repository.insertProcessing(key, requestHash);
-        } catch (DuplicateKeyException duplicate) {
-            return resolveExisting(key, requestHash, repository.findByKey(key)
-                    .orElseThrow(() -> duplicate));
+        }
+
+        var terminal = repository.findByKeyForUpdate(key).orElseGet(() -> existing.orElseGet(
+                () -> new com.example.seckill.domain.IdempotencyRecord(
+                        key, requestHash, "PROCESSING", null, null, Instant.now(), Instant.now())));
+        if (!terminal.requestHash().equals(requestHash)) {
+            throw new IdempotencyKeyReusedException(key);
+        }
+        if ("SUCCEEDED".equals(terminal.status())) {
+            return new IdempotentOrderResult(terminal.responseStatus(), terminal.responseBody());
+        }
+        if (existing.isPresent() && repository.takeOverProcessingIfExpired(
+                key, Instant.now().minusSeconds(PROCESSING_TIMEOUT_SECONDS)) == 0) {
+            return new IdempotentOrderResult(409,
+                    "{\"code\":\"REQUEST_IN_PROGRESS\",\"message\":\"请求正在处理中\"}");
         }
 
         try {
@@ -105,30 +87,6 @@ public class SeckillOrderService {
         }
     }
 
-    private IdempotentOrderResult resolveExisting(String key, String requestHash,
-                                                   com.example.seckill.domain.IdempotencyRecord record) {
-        if (!record.requestHash().equals(requestHash)) {
-            throw new IdempotencyKeyReusedException(key);
-        }
-        if ("PROCESSING".equals(record.status())) {
-            for (int attempt = 0; attempt < 500; attempt++) {
-                try {
-                    Thread.sleep(10);
-                } catch (InterruptedException exception) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
-                var refreshed = repository.findByKey(key).orElse(record);
-                if (!"PROCESSING".equals(refreshed.status())) {
-                    return new IdempotentOrderResult(refreshed.responseStatus(), refreshed.responseBody());
-                }
-            }
-            return new IdempotentOrderResult(409,
-                    "{\"code\":\"REQUEST_IN_PROGRESS\",\"message\":\"请求正在处理中\"}");
-        }
-        return new IdempotentOrderResult(record.responseStatus(), record.responseBody());
-    }
-
     private IdempotentOrderResult saveBusinessError(String key, int status, String code, String message) {
         ObjectNode response = JSON.createObjectNode();
         response.put("code", code);
@@ -140,6 +98,7 @@ public class SeckillOrderService {
 
     private IdempotentOrderResult persistedResult(String key, IdempotentOrderResult fallback) {
         return repository.findByKey(key)
+                .filter(record -> record.responseStatus() != null && record.responseBody() != null)
                 .map(record -> new IdempotentOrderResult(record.responseStatus(), record.responseBody()))
                 .orElse(fallback);
     }

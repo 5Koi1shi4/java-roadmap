@@ -25,8 +25,49 @@ import static org.mockito.Mockito.when;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.any;
 
 class SeckillOrderServiceTest {
+
+    @Test
+    void locksAfterUniqueKeyCompetitionAndReplaysTerminalResponse() {
+        SeckillRepository repository = mock(SeckillRepository.class);
+        SeckillOrderService service = new SeckillOrderService(repository);
+        String body = "{\"userId\":7,\"productId\":1}";
+        var terminal = new com.example.seckill.domain.IdempotencyRecord(
+                "race-key", service.requestHash(body), "SUCCEEDED", 201, "{\"id\":11}", Instant.now(), Instant.now());
+        when(repository.findByKey("race-key")).thenReturn(java.util.Optional.empty());
+        when(repository.findByKeyForUpdate("race-key")).thenReturn(java.util.Optional.of(terminal));
+
+        IdempotentOrderResult result = service.placeOrder("race-key", new CreateOrderCommand(7L, 1L, body));
+
+        assertThat(result).isEqualTo(new IdempotentOrderResult(201, "{\"id\":11}"));
+        verify(repository).insertProcessing(eq("race-key"), eq(service.requestHash(body)));
+        verify(repository).findByKeyForUpdate("race-key");
+        verify(repository).findByKey("race-key");
+    }
+
+    @Test
+    void takesOverExpiredProcessingRecordBeforeExecutingOrder() {
+        SeckillRepository repository = mock(SeckillRepository.class);
+        SeckillOrderService service = new SeckillOrderService(repository);
+        String body = "{\"userId\":7,\"productId\":1}";
+        var expired = new com.example.seckill.domain.IdempotencyRecord(
+                "expired-key", service.requestHash(body), "PROCESSING", null, null,
+                Instant.now().minusSeconds(120), Instant.now().minusSeconds(120));
+        when(repository.findByKey("expired-key")).thenReturn(java.util.Optional.of(expired));
+        when(repository.findByKeyForUpdate("expired-key")).thenReturn(java.util.Optional.of(expired));
+        when(repository.takeOverProcessingIfExpired(eq("expired-key"), any())).thenReturn(1);
+        when(repository.findProduct(1L)).thenReturn(java.util.Optional.of(new SeckillProduct(1L, "商品", 1)));
+        when(repository.decrementStockIfAvailable(1L)).thenReturn(1);
+        when(repository.insertOrder(7L, 1L)).thenReturn(new SeckillOrder(11L, 7L, 1L, Instant.now()));
+
+        IdempotentOrderResult result = service.placeOrder("expired-key", new CreateOrderCommand(7L, 1L, body));
+
+        assertThat(result.httpStatus()).isEqualTo(201);
+        verify(repository).takeOverProcessingIfExpired(eq("expired-key"), any());
+        verify(repository).saveResponse(eq("expired-key"), eq(201), anyString());
+    }
 
     @Test
     void replaysPersistedResponseForSameKeyAndSameRequest() {
