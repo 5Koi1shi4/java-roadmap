@@ -12,7 +12,7 @@ $body = @{ userId = 101; productId = 1 } | ConvertTo-Json -Compress
 Invoke-WebRequest -Uri http://localhost:8080/api/seckill/orders -Method Post -Headers @{ 'Idempotency-Key' = $key } -ContentType 'application/json; charset=UTF-8' -Body $body
 ```
 
-本实验用一个最小的 Spring Boot 服务演示秒杀下单的库存一致性：数据库条件更新防止超卖，事务保证扣库存与写订单的原子性，`(user_id, product_id)` 唯一索引保证同一用户只能购买一次。Flyway 会创建表并写入产品 1（初始库存 10）。
+本实验用一个最小的 Spring Boot 服务演示秒杀下单的库存一致性：数据库条件更新防止超卖，事务保证扣库存与写订单的原子性，`(user_id, product_id)` 唯一索引保证同一用户只能购买一次。Flyway 会创建表并写入产品 1（初始库存 10）。幂等主流程使用 `READ_COMMITTED`；先竞争 `idempotency_record` 唯一键，再用 `SELECT ... FOR UPDATE` 读取终态并重放响应，不依赖 `Thread.sleep`，也没有 `REQUEST_IN_PROGRESS` 业务状态。
 
 ## 环境
 
@@ -107,12 +107,12 @@ $env:Path = "$env:JAVA_HOME\bin;$env:Path"
 ./mvnw.cmd verify
 ```
 
-单元测试覆盖服务分支；`SeckillOrderHttpIT` 使用真实 HTTP 和 MySQL 验证并发库存、重复购买、售罄及 UTF-8 响应；`SeckillSchemaIT` 验证 Flyway 表结构、唯一索引和种子商品。Docker 不可用时，集成测试会失败，不能只把单元测试通过当作完整验收。
+30 个 Surefire 单元测试覆盖服务、控制器和锁冲突分支；13 个 Failsafe Testcontainers 集成测试中，`SeckillOrderHttpIT` 使用真实 HTTP 和 MySQL 验证并发库存、重复购买、售罄、双实例幂等重放、首事务回滚后重新争抢及 UTF-8 响应，`SeckillSchemaIT` 验证 Flyway 表结构、唯一索引和种子商品。Docker 不可用时，集成测试会失败，不能只把单元测试通过当作完整验收。
 
 ## 关键实现
 
 `UPDATE seckill_product SET stock = stock - 1 WHERE id = ? AND stock > 0` 以受影响行数表达库存是否可扣；成功后在同一 `@Transactional` 方法内插入订单。唯一索引处理并发重复请求，捕获冲突并转成业务错误；事务回滚会撤销冲突请求的库存更新。
 
-数据库锁顺序固定为“幂等键记录 → 商品库存 → 订单唯一索引”，避免不同代码路径先锁商品再锁幂等记录造成死锁。若 MySQL 返回死锁或锁等待超时，API 统一返回 UTF-8 的 `503 RETRYABLE_DATABASE_CONFLICT`，客户端应使用原幂等键重试；异常事务不会留下可永久阻塞的 `PROCESSING` 记录。
+数据库锁顺序固定为“幂等键记录 → 商品库存 → 订单唯一索引”，避免不同代码路径先锁商品再锁幂等记录造成死锁。幂等响应以原始 JSON 字符串写入 `LONGTEXT`（`utf8mb4`）并按 UTF-8 原样返回。首个持有者事务回滚后，唯一键不再被占用，竞争请求会重新争抢并继续处理；流程不靠 `Thread.sleep` 或 `REQUEST_IN_PROGRESS`。只有确认是死锁、锁等待超时等真实锁冲突才映射 UTF-8 的 `503 RETRYABLE_DATABASE_CONFLICT`，普通数据库异常仍返回 500；客户端应使用原幂等键重试。
 
 更多环境问题见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
