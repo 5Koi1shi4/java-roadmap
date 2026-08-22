@@ -1,5 +1,15 @@
 # 实验三：秒杀、库存与接口幂等
 
+## 幂等运行说明
+
+重试时保持 `Idempotency-Key` 与请求体不变；同 key 并发只创建一笔订单并重放相同 UTF-8 JSON。不同 key 由 `(user_id, product_id)` 唯一索引保证只成交一次。系统异常返回 5xx 时幂等记录随事务回滚，修复后可安全复用同 key 重试。
+
+```powershell
+$key = [guid]::NewGuid().ToString()
+$body = @{ userId = 101; productId = 1 } | ConvertTo-Json -Compress
+Invoke-WebRequest -Uri http://localhost:8080/api/seckill/orders -Method Post -Headers @{ 'Idempotency-Key' = $key } -ContentType 'application/json; charset=UTF-8' -Body $body
+```
+
 本实验用一个最小的 Spring Boot 服务演示秒杀下单的库存一致性：数据库条件更新防止超卖，事务保证扣库存与写订单的原子性，`(user_id, product_id)` 唯一索引保证同一用户只能购买一次。Flyway 会创建表并写入产品 1（初始库存 10）。
 
 ## 环境

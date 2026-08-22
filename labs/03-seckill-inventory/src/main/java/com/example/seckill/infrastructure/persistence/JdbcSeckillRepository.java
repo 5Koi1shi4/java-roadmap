@@ -4,10 +4,15 @@ import com.example.seckill.domain.SeckillOrder;
 import com.example.seckill.domain.SeckillProduct;
 import com.example.seckill.domain.SeckillRepository;
 import com.example.seckill.domain.IdempotencyRecord;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.PreparedStatement;
 import java.sql.Statement;
@@ -16,6 +21,7 @@ import java.util.Optional;
 
 @Repository
 public class JdbcSeckillRepository implements SeckillRepository {
+    private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbcTemplate;
 
     public JdbcSeckillRepository(JdbcTemplate jdbcTemplate) {
@@ -27,6 +33,11 @@ public class JdbcSeckillRepository implements SeckillRepository {
         return jdbcTemplate.update(
                 "UPDATE seckill_product SET stock = stock - 1 WHERE id = ? AND stock > 0",
                 productId);
+    }
+
+    @Override
+    public void restoreStock(long productId) {
+        jdbcTemplate.update("UPDATE seckill_product SET stock = stock + 1 WHERE id = ?", productId);
     }
 
     @Override
@@ -56,6 +67,7 @@ public class JdbcSeckillRepository implements SeckillRepository {
     }
 
     @Override
+    @Transactional(propagation = Propagation.REQUIRES_NEW, readOnly = true)
     public Optional<IdempotencyRecord> findByKey(String key) {
         return jdbcTemplate.query(
                         "SELECT idempotency_key, request_hash, status, response_status, response_body, " +
@@ -65,17 +77,40 @@ public class JdbcSeckillRepository implements SeckillRepository {
                                 rs.getString("request_hash"),
                                 rs.getString("status"),
                                 (Integer) rs.getObject("response_status"),
-                                rs.getString("response_body"),
+                                normalizeJson(rs.getString("response_body")),
                                 rs.getTimestamp("created_at").toInstant(),
                                 rs.getTimestamp("updated_at").toInstant()),
                         key)
                 .stream().findFirst();
     }
 
+    private static String normalizeJson(String body) {
+        if (body == null) {
+            return null;
+        }
+        try {
+            return JSON.writeValueAsString(canonical(JSON.readTree(body)));
+        } catch (Exception ignored) {
+            return body;
+        }
+    }
+
+    private static JsonNode canonical(JsonNode node) {
+        if (!node.isObject()) {
+            return node;
+        }
+        ObjectNode sorted = JSON.createObjectNode();
+        java.util.List<String> names = new java.util.ArrayList<>();
+        node.fieldNames().forEachRemaining(names::add);
+        names.sort(String::compareTo);
+        names.forEach(name -> sorted.set(name, canonical(node.get(name))));
+        return sorted;
+    }
+
     @Override
     public void insertProcessing(String key, String requestHash) {
         jdbcTemplate.update(
-                "INSERT INTO idempotency_record (idempotency_key, request_hash, status) VALUES (?, ?, 'PROCESSING')",
+                "INSERT IGNORE INTO idempotency_record (idempotency_key, request_hash, status) VALUES (?, ?, 'PROCESSING')",
                 key, requestHash);
     }
 

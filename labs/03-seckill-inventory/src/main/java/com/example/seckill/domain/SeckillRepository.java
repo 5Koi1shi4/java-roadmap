@@ -5,6 +5,8 @@ import java.util.Optional;
 public interface SeckillRepository {
     int decrementStockIfAvailable(long productId);
 
+    void restoreStock(long productId);
+
     Optional<SeckillProduct> findProduct(long productId);
 
     SeckillOrder insertOrder(long userId, long productId);

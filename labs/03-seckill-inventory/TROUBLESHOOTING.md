@@ -1,5 +1,9 @@
 # 实验三排障记录
 
+## 幂等键重试与 5xx
+
+重试必须复用原 `Idempotency-Key` 和完全相同的 JSON；成功请求会重放原始 UTF-8 JSON。数据库异常返回 5xx 时，幂等记录随事务回滚，修复故障后可以安全重试。
+
 ## Docker 或 Testcontainers 启动失败
 
 `mvnw.cmd verify` 中的 `*IT` 由 Failsafe 执行，并需要 Docker Desktop Engine。先运行 `docker version` 和 `docker info` 确认引擎可访问；Windows named pipe 权限错误时，重启 Docker Desktop，或在已授权宿主 Docker 权限下重跑命令。不要把 Docker 环境错误误判为 Java 业务失败。只启动单元测试不能替代集成验收。

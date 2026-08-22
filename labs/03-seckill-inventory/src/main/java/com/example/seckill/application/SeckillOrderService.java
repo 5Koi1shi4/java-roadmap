@@ -13,12 +13,17 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Service
 public class SeckillOrderService {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private final SeckillRepository repository;
+    private final ConcurrentHashMap<String, ReentrantLock> idempotencyLocks = new ConcurrentHashMap<>();
 
     public SeckillOrderService(SeckillRepository repository) {
         this.repository = repository;
@@ -34,12 +39,37 @@ public class SeckillOrderService {
         try {
             return repository.insertOrder(userId, productId);
         } catch (DuplicateKeyException e) {
+            repository.restoreStock(productId);
             throw new AlreadyPurchasedException(userId, productId);
         }
     }
 
     @Transactional
     public IdempotentOrderResult placeOrder(String key, CreateOrderCommand command) {
+        ReentrantLock lock = idempotencyLocks.computeIfAbsent(key, ignored -> new ReentrantLock());
+        lock.lock();
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCompletion(int status) {
+                    lock.unlock();
+                }
+            });
+        } else {
+            try {
+                return placeOrderUnderKeyLock(key, command);
+            } finally {
+                lock.unlock();
+            }
+        }
+        try {
+            return placeOrderUnderKeyLock(key, command);
+        } catch (RuntimeException | Error exception) {
+            throw exception;
+        }
+    }
+
+    private IdempotentOrderResult placeOrderUnderKeyLock(String key, CreateOrderCommand command) {
         String requestHash = requestHash(command.normalizedRequestBody());
         var existing = repository.findByKey(key);
         if (existing.isPresent()) {
@@ -56,7 +86,7 @@ public class SeckillOrderService {
             SeckillOrder order = placeOrder(command.userId(), command.productId());
             IdempotentOrderResult result = new IdempotentOrderResult(201, orderJson(order));
             repository.saveResponse(key, result.httpStatus(), result.responseBody());
-            return result;
+            return persistedResult(key, result);
         } catch (ProductNotFoundException exception) {
             return saveBusinessError(key, 404, "PRODUCT_NOT_FOUND", exception.getMessage());
         } catch (SoldOutException exception) {
@@ -81,6 +111,18 @@ public class SeckillOrderService {
             throw new IdempotencyKeyReusedException(key);
         }
         if ("PROCESSING".equals(record.status())) {
+            for (int attempt = 0; attempt < 500; attempt++) {
+                try {
+                    Thread.sleep(10);
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+                var refreshed = repository.findByKey(key).orElse(record);
+                if (!"PROCESSING".equals(refreshed.status())) {
+                    return new IdempotentOrderResult(refreshed.responseStatus(), refreshed.responseBody());
+                }
+            }
             return new IdempotentOrderResult(409,
                     "{\"code\":\"REQUEST_IN_PROGRESS\",\"message\":\"请求正在处理中\"}");
         }
@@ -93,15 +135,22 @@ public class SeckillOrderService {
         response.put("message", message);
         String body = writeJson(response);
         repository.saveResponse(key, status, body);
-        return new IdempotentOrderResult(status, body);
+        return persistedResult(key, new IdempotentOrderResult(status, body));
+    }
+
+    private IdempotentOrderResult persistedResult(String key, IdempotentOrderResult fallback) {
+        return repository.findByKey(key)
+                .map(record -> new IdempotentOrderResult(record.responseStatus(), record.responseBody()))
+                .orElse(fallback);
     }
 
     private String orderJson(SeckillOrder order) {
         ObjectNode response = JSON.createObjectNode();
-        response.put("id", order.id());
-        response.put("userId", order.userId());
-        response.put("productId", order.productId());
         response.put("createdAt", order.createdAt().toString());
+        response.put("id", order.id());
+        response.put("message", "下单成功");
+        response.put("productId", order.productId());
+        response.put("userId", order.userId());
         return writeJson(response);
     }
 

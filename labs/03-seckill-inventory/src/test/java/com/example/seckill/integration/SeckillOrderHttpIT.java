@@ -51,8 +51,55 @@ class SeckillOrderHttpIT {
 
     @BeforeEach
     void resetDatabase() {
+        jdbcTemplate.update("DELETE FROM idempotency_record");
         jdbcTemplate.update("DELETE FROM seckill_order");
         jdbcTemplate.update("UPDATE seckill_product SET stock = 3 WHERE id = 1");
+    }
+
+    @Test
+    void replaysExactlyTheSameUtf8JsonForConcurrentRequestsWithTheSameKey() throws Exception {
+        List<HttpResponse<byte[]>> responses = postConcurrently("same-key", List.of(401L, 401L, 401L, 401L));
+
+        assertThat(responses).extracting(HttpResponse::statusCode)
+                .containsOnly(201);
+        assertThat(responses).extracting(this::decodeUtf8)
+                .containsOnly(decodeUtf8(responses.get(0)));
+        assertThat(decodeUtf8(responses.get(0))).contains("下单成功");
+        assertThat(countOrders()).isEqualTo(1);
+        assertThat(stock()).isEqualTo(2);
+    }
+
+    @Test
+    void differentKeysStillCreateOnlyOneOrderForTheSameUser() throws Exception {
+        List<HttpResponse<byte[]>> responses = postConcurrently(
+                List.of("different-key-a", "different-key-b"), List.of(402L, 402L));
+
+        assertThat(responses).extracting(HttpResponse::statusCode)
+                .containsExactlyInAnyOrder(201, 409);
+        assertThat(responses.stream().filter(response -> response.statusCode() == 409)
+                .findFirst().map(this::decodeUtf8).orElseThrow()).contains("已购买");
+        assertThat(countOrders()).isEqualTo(1);
+        assertThat(stock()).isEqualTo(2);
+    }
+
+    @Test
+    void removesIdempotencyRecordAfterSystemFailureSoTheSameKeyCanRetry() throws Exception {
+        jdbcTemplate.execute("RENAME TABLE seckill_order TO seckill_order_backup");
+        try {
+            HttpResponse<byte[]> failed = post("system-failure-key", 403L);
+            assertThat(failed.statusCode()).isEqualTo(500);
+            assertThat(jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM idempotency_record WHERE idempotency_key = ?", Integer.class,
+                    "system-failure-key")).isZero();
+        } finally {
+            jdbcTemplate.execute("RENAME TABLE seckill_order_backup TO seckill_order");
+        }
+
+        HttpResponse<byte[]> retried = post("system-failure-key", 403L);
+        assertThat(retried.statusCode()).isEqualTo(201);
+        assertThat(decodeUtf8(retried)).contains("下单成功");
+        assertThat(countOrders()).isEqualTo(1);
+        assertThat(stock()).isEqualTo(2);
     }
 
     @Test
@@ -94,16 +141,28 @@ class SeckillOrderHttpIT {
     }
 
     private List<HttpResponse<byte[]>> postConcurrently(List<Long> users) throws Exception {
+        List<String> keys = java.util.stream.IntStream.range(0, users.size())
+                .mapToObj(index -> "user-key-" + users.get(index) + "-" + index).toList();
+        return postConcurrently(keys, users);
+    }
+
+    private List<HttpResponse<byte[]>> postConcurrently(String key, List<Long> users) throws Exception {
+        return postConcurrently(users.stream().map(user -> key).toList(), users);
+    }
+
+    private List<HttpResponse<byte[]>> postConcurrently(List<String> keys, List<Long> users) throws Exception {
         var pool = Executors.newFixedThreadPool(users.size());
         var ready = new CountDownLatch(users.size());
         var start = new CountDownLatch(1);
         try {
             List<Future<HttpResponse<byte[]>>> futures = new ArrayList<>();
-            for (long user : users) {
+            for (int index = 0; index < users.size(); index++) {
+                long user = users.get(index);
+                String key = keys.get(index);
                 futures.add(pool.submit(() -> {
                     ready.countDown();
                     start.await();
-                    return post(user);
+                    return post(key, user);
                 }));
             }
             ready.await();
@@ -119,9 +178,14 @@ class SeckillOrderHttpIT {
     }
 
     private HttpResponse<byte[]> post(long userId) throws Exception {
+        return post("legacy-user-key-" + userId + "-" + System.nanoTime(), userId);
+    }
+
+    private HttpResponse<byte[]> post(String key, long userId) throws Exception {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/api/seckill/orders"))
                 .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
+                .header("Idempotency-Key", key)
                 .POST(HttpRequest.BodyPublishers.ofString(
                         "{\"userId\":" + userId + ",\"productId\":1}", StandardCharsets.UTF_8))
                 .build();
