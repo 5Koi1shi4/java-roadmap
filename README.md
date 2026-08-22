@@ -17,7 +17,7 @@
 |---|---|---|---|
 | 1 | JWT 与 RBAC 权限服务 | 已验收 | [实验一 README](labs/01-security-rbac/README.md) · [排障复盘](labs/01-security-rbac/TROUBLESHOOTING.md) |
 | 2 | Redis 缓存与一致性 | 已验收 | [实验二 README](labs/02-redis-cache/README.md) · [排障复盘](labs/02-redis-cache/TROUBLESHOOTING.md) |
-| 3 | 秒杀、库存与接口幂等 | 未开始 | — |
+| 3 | 秒杀、库存与接口幂等 | 已验收 | [实验三 README](labs/03-seckill-inventory/README.md) · [排障复盘](labs/03-seckill-inventory/TROUBLESHOOTING.md) |
 | 4 | 订单状态机与可靠消息 | 未开始 | — |
 | 5 | Elasticsearch 搜索 | 未开始 | — |
 | 6 | 安全文件服务与 MinIO | 未开始 | — |
@@ -42,6 +42,13 @@
 
 - 入口：[labs/02-redis-cache](labs/02-redis-cache/README.md)
 - 验证：在 JDK 17 与 Docker Desktop 下执行 `mvnw.cmd verify`；已验收 24 个单元测试和 22 个 Testcontainers 集成测试。
+
+### 实验三：秒杀、库存与接口幂等
+
+覆盖 MySQL 条件扣库存、一人一单、事务回滚、接口幂等、UTF-8 响应与多实例数据库协调。
+
+- 入口：[labs/03-seckill-inventory](labs/03-seckill-inventory/README.md)
+- 验证：在 JDK 17 与 Docker Desktop 下执行 `mvnw.cmd verify`；已验收 32 个 Surefire 测试和 13 个 Testcontainers 集成测试。
 
 ## 目录导航
 
