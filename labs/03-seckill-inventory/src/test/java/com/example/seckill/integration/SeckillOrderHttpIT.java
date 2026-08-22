@@ -55,14 +55,16 @@ class SeckillOrderHttpIT {
         registry.add("spring.datasource.password", mysql::getPassword);
     }
 
-    @org.junit.jupiter.api.BeforeAll
-    static void startSecondApplicationInstance() {
-        secondInstance = new SpringApplicationBuilder(SeckillInventoryApplication.class)
-                .properties("server.port=0",
-                        "spring.datasource.url=" + mysql.getJdbcUrl(),
-                        "spring.datasource.username=" + mysql.getUsername(),
-                        "spring.datasource.password=" + mysql.getPassword())
-                .run();
+    @org.junit.jupiter.api.BeforeEach
+    void startSecondApplicationInstance() {
+        if (secondInstance == null) {
+            secondInstance = new SpringApplicationBuilder(SeckillInventoryApplication.class)
+                    .run("--server.port=0",
+                            "--spring.datasource.url=" + mysql.getJdbcUrl(),
+                            "--spring.datasource.username=" + mysql.getUsername(),
+                            "--spring.datasource.password=" + mysql.getPassword());
+        }
+        secondPort = secondInstance.getEnvironment().getProperty("local.server.port", Integer.class);
     }
 
     @org.junit.jupiter.api.AfterAll
@@ -72,9 +74,14 @@ class SeckillOrderHttpIT {
         }
     }
 
-    @org.junit.jupiter.api.BeforeEach
-    void captureSecondPort() {
-        secondPort = secondInstance.getEnvironment().getProperty("local.server.port", Integer.class);
+    @Test
+    void secondInstanceUsesContainerDatabaseCredentials() {
+        assertThat(secondInstance.getEnvironment().getProperty("spring.datasource.url"))
+                .isEqualTo(mysql.getJdbcUrl());
+        assertThat(secondInstance.getEnvironment().getProperty("spring.datasource.username"))
+                .isEqualTo(mysql.getUsername());
+        assertThat(secondInstance.getEnvironment().getProperty("spring.datasource.password"))
+                .isEqualTo(mysql.getPassword());
     }
 
     @BeforeEach
