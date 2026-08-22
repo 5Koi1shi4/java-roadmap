@@ -15,6 +15,8 @@ import com.example.seckill.api.ApiExceptionHandler;
 import org.springframework.dao.DeadlockLoserDataAccessException;
 import org.springframework.jdbc.BadSqlGrammarException;
 import org.springframework.http.HttpStatus;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Transactional;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -47,11 +49,10 @@ class SeckillOrderServiceTest {
         when(repository.findByKeyForUpdate("race-processing-key")).thenReturn(java.util.Optional.of(processing));
         when(repository.takeOverProcessingIfExpired(eq("race-processing-key"), any())).thenReturn(0);
 
-        IdempotentOrderResult result = service.placeOrder("race-processing-key",
-                new CreateOrderCommand(7L, 1L, body));
-
-        assertThat(result.httpStatus()).isEqualTo(409);
-        assertThat(result.responseBody()).contains("REQUEST_IN_PROGRESS");
+        assertThatThrownBy(() -> service.placeOrder("race-processing-key",
+                new CreateOrderCommand(7L, 1L, body)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Idempotency record remains PROCESSING");
         verify(repository, never()).findProduct(anyLong());
         verify(repository, never()).insertOrder(anyLong(), anyLong());
     }
@@ -246,6 +247,36 @@ class SeckillOrderServiceTest {
         when(repository.insertOrder(7L, 1L)).thenReturn(new SeckillOrder(11L, 7L, 1L, Instant.now()));
 
         assertThat(service.placeOrder(7L, 1L).id()).isEqualTo(11L);
+    }
+
+    @Test
+    void retriesIdempotencyInsertWhenCompetingTransactionRolledBack() {
+        SeckillRepository repository = mock(SeckillRepository.class);
+        SeckillOrderService service = new SeckillOrderService(repository);
+        String body = "{\"userId\":7,\"productId\":1}";
+        var processing = new com.example.seckill.domain.IdempotencyRecord(
+                "rollback-key", service.requestHash(body), "PROCESSING", null, null,
+                Instant.now(), Instant.now());
+        when(repository.findByKey("rollback-key")).thenReturn(java.util.Optional.empty());
+        when(repository.insertProcessing(eq("rollback-key"), anyString())).thenReturn(0, 1);
+        when(repository.findByKeyForUpdate("rollback-key")).thenReturn(
+                java.util.Optional.empty(), java.util.Optional.of(processing));
+        when(repository.findProduct(1L)).thenReturn(java.util.Optional.of(new SeckillProduct(1L, "商品", 1)));
+        when(repository.decrementStockIfAvailable(1L)).thenReturn(1);
+        when(repository.insertOrder(7L, 1L)).thenReturn(new SeckillOrder(11L, 7L, 1L, Instant.now()));
+
+        assertThat(service.placeOrder("rollback-key", new CreateOrderCommand(7L, 1L, body)).httpStatus())
+                .isEqualTo(201);
+        verify(repository, org.mockito.Mockito.times(2)).insertProcessing(eq("rollback-key"), anyString());
+    }
+
+    @Test
+    void idempotentEntryDeclaresReadCommittedIsolation() throws NoSuchMethodException {
+        Transactional annotation = SeckillOrderService.class
+                .getDeclaredMethod("placeOrder", String.class, CreateOrderCommand.class)
+                .getAnnotation(Transactional.class);
+        assertThat(annotation).isNotNull();
+        assertThat(annotation.isolation()).isEqualTo(Isolation.READ_COMMITTED);
     }
 
     @Test
