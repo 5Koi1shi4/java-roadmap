@@ -12,6 +12,11 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import java.time.Instant;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.DefaultTransactionDefinition;
 
 @Testcontainers
 @SpringBootTest
@@ -74,6 +79,49 @@ class SeckillSchemaIT {
                     var record = repository.findByKeyForUpdate("lock-key");
                     assertThat(record).isPresent();
                 });
+    }
+
+    @Test
+    void lockingReadBlocksAnotherTransactionUntilTheLockingTransactionCommits() throws Exception {
+        jdbcTemplate.update("DELETE FROM idempotency_record");
+        jdbcTemplate.update("INSERT INTO idempotency_record (idempotency_key, request_hash) VALUES (?, ?)",
+                "transaction-key", "hash");
+
+        var firstTransaction = new DefaultTransactionDefinition();
+        firstTransaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
+        var transaction = transactionManager.getTransaction(firstTransaction);
+        try {
+            assertThat(repository.findByKeyForUpdate("transaction-key")).isPresent();
+
+            CountDownLatch updateStarted = new CountDownLatch(1);
+            CountDownLatch updateFinished = new CountDownLatch(1);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            Thread updater = new Thread(() -> {
+                updateStarted.countDown();
+                try {
+                    jdbcTemplate.update("UPDATE idempotency_record SET request_hash = ? " +
+                            "WHERE idempotency_key = ?", "updated-hash", "transaction-key");
+                } catch (Throwable exception) {
+                    failure.set(exception);
+                } finally {
+                    updateFinished.countDown();
+                }
+            });
+            updater.start();
+
+            assertThat(updateStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(updateFinished.await(300, TimeUnit.MILLISECONDS)).isFalse();
+            transactionManager.commit(transaction);
+            assertThat(updateFinished.await(5, TimeUnit.SECONDS)).isTrue();
+            updater.join(5_000);
+            assertThat(failure.get()).isNull();
+            assertThat(jdbcTemplate.queryForObject("SELECT request_hash FROM idempotency_record " +
+                    "WHERE idempotency_key = ?", String.class, "transaction-key"))
+                    .isEqualTo("updated-hash");
+        } catch (Throwable exception) {
+            transactionManager.rollback(transaction);
+            throw exception;
+        }
     }
 
     @Test

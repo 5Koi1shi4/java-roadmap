@@ -86,7 +86,7 @@ public class JdbcSeckillRepository implements SeckillRepository {
     }
 
     @Override
-    @Transactional(isolation = Isolation.READ_COMMITTED, readOnly = true)
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public Optional<IdempotencyRecord> findByKeyForUpdate(String key) {
         return jdbcTemplate.query(
                         "SELECT idempotency_key, request_hash, status, response_status, response_body, " +
