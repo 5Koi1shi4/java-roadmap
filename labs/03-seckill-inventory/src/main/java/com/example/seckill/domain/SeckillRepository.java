@@ -18,7 +18,7 @@ public interface SeckillRepository {
 
     int takeOverProcessingIfExpired(String key, Instant expiredBefore);
 
-    void insertProcessing(String key, String requestHash);
+    int insertProcessing(String key, String requestHash);
 
     void saveResponse(String key, int status, String body);
 }

@@ -136,8 +136,8 @@ public class JdbcSeckillRepository implements SeckillRepository {
     }
 
     @Override
-    public void insertProcessing(String key, String requestHash) {
-        jdbcTemplate.update(
+    public int insertProcessing(String key, String requestHash) {
+        return jdbcTemplate.update(
                 "INSERT IGNORE INTO idempotency_record (idempotency_key, request_hash, status) VALUES (?, ?, 'PROCESSING')",
                 key, requestHash);
     }

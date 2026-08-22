@@ -45,8 +45,9 @@ public class SeckillOrderService {
     public IdempotentOrderResult placeOrder(String key, CreateOrderCommand command) {
         String requestHash = requestHash(command.normalizedRequestBody());
         var existing = repository.findByKey(key);
+        boolean inserted = false;
         if (existing.isEmpty()) {
-            repository.insertProcessing(key, requestHash);
+            inserted = repository.insertProcessing(key, requestHash) == 1;
         }
 
         var terminal = repository.findByKeyForUpdate(key).orElseGet(() -> existing.orElseGet(
@@ -58,7 +59,7 @@ public class SeckillOrderService {
         if ("SUCCEEDED".equals(terminal.status())) {
             return new IdempotentOrderResult(terminal.responseStatus(), terminal.responseBody());
         }
-        if (existing.isPresent() && repository.takeOverProcessingIfExpired(
+        if (!inserted && repository.takeOverProcessingIfExpired(
                 key, Instant.now().minusSeconds(PROCESSING_TIMEOUT_SECONDS)) == 0) {
             return new IdempotentOrderResult(409,
                     "{\"code\":\"REQUEST_IN_PROGRESS\",\"message\":\"请求正在处理中\"}");

@@ -11,9 +11,13 @@ import com.example.seckill.domain.SeckillProduct;
 import com.example.seckill.domain.SeckillRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.example.seckill.api.ApiExceptionHandler;
+import org.springframework.dao.DeadlockLoserDataAccessException;
+import org.springframework.http.HttpStatus;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.sql.SQLException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -28,6 +32,40 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.any;
 
 class SeckillOrderServiceTest {
+
+    @Test
+    void doesNotExecuteWhenInsertCompetesWithFreshProcessingRecord() {
+        SeckillRepository repository = mock(SeckillRepository.class);
+        SeckillOrderService service = new SeckillOrderService(repository);
+        when(repository.insertProcessing(anyString(), anyString())).thenReturn(0);
+        String body = "{\"userId\":7,\"productId\":1}";
+        var processing = new com.example.seckill.domain.IdempotencyRecord(
+                "race-processing-key", service.requestHash(body), "PROCESSING", null, null,
+                Instant.now(), Instant.now());
+        when(repository.findByKey("race-processing-key")).thenReturn(java.util.Optional.empty());
+        when(repository.findByKeyForUpdate("race-processing-key")).thenReturn(java.util.Optional.of(processing));
+        when(repository.takeOverProcessingIfExpired(eq("race-processing-key"), any())).thenReturn(0);
+
+        IdempotentOrderResult result = service.placeOrder("race-processing-key",
+                new CreateOrderCommand(7L, 1L, body));
+
+        assertThat(result.httpStatus()).isEqualTo(409);
+        assertThat(result.responseBody()).contains("REQUEST_IN_PROGRESS");
+        verify(repository, never()).findProduct(anyLong());
+        verify(repository, never()).insertOrder(anyLong(), anyLong());
+    }
+
+    @Test
+    void mapsDeadlockToUtf8RetryableHttpError() throws Exception {
+        var response = new ApiExceptionHandler().retryableDatabaseConflict(
+                new DeadlockLoserDataAccessException("deadlock", new SQLException("1213")));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(response.getHeaders().getContentType().toString()).containsIgnoringCase("charset=UTF-8");
+        assertThat(new ObjectMapper().writeValueAsString(response.getBody()))
+                .contains("RETRYABLE_DATABASE_CONFLICT")
+                .contains("数据库锁冲突");
+    }
 
     @Test
     void locksAfterUniqueKeyCompetitionAndReplaysTerminalResponse() {
@@ -51,6 +89,7 @@ class SeckillOrderServiceTest {
     void takesOverExpiredProcessingRecordBeforeExecutingOrder() {
         SeckillRepository repository = mock(SeckillRepository.class);
         SeckillOrderService service = new SeckillOrderService(repository);
+        when(repository.insertProcessing(anyString(), anyString())).thenReturn(1);
         String body = "{\"userId\":7,\"productId\":1}";
         var expired = new com.example.seckill.domain.IdempotencyRecord(
                 "expired-key", service.requestHash(body), "PROCESSING", null, null,
@@ -73,6 +112,7 @@ class SeckillOrderServiceTest {
     void replaysPersistedResponseForSameKeyAndSameRequest() {
         SeckillRepository repository = mock(SeckillRepository.class);
         SeckillOrderService service = new SeckillOrderService(repository);
+        when(repository.insertProcessing(anyString(), anyString())).thenReturn(1);
         String body = "{\"userId\":7,\"productId\":1}";
         when(repository.findByKey("retry-key")).thenReturn(java.util.Optional.of(new com.example.seckill.domain.IdempotencyRecord(
                 "retry-key", service.requestHash(body), "SUCCEEDED", 201, "{\"id\":11}", Instant.now(), Instant.now())));
@@ -88,6 +128,7 @@ class SeckillOrderServiceTest {
     void rejectsSameKeyWhenCompleteRequestBodyDiffers() {
         SeckillRepository repository = mock(SeckillRepository.class);
         SeckillOrderService service = new SeckillOrderService(repository);
+        when(repository.insertProcessing(anyString(), anyString())).thenReturn(1);
         String original = "{\"userId\":7,\"productId\":1}";
         when(repository.findByKey("retry-key")).thenReturn(java.util.Optional.of(new com.example.seckill.domain.IdempotencyRecord(
                 "retry-key", service.requestHash(original), "SUCCEEDED", 201, "{}", Instant.now(), Instant.now())));
@@ -101,6 +142,7 @@ class SeckillOrderServiceTest {
     void persistsSoldOutResponseForReplay() {
         SeckillRepository repository = mock(SeckillRepository.class);
         SeckillOrderService service = new SeckillOrderService(repository);
+        when(repository.insertProcessing(anyString(), anyString())).thenReturn(1);
         String body = "{\"userId\":7,\"productId\":1}";
         when(repository.findByKey("sold-out-key")).thenReturn(java.util.Optional.empty());
         when(repository.decrementStockIfAvailable(1L)).thenReturn(0);
@@ -117,6 +159,7 @@ class SeckillOrderServiceTest {
     void persistsAlreadyPurchasedAsSucceededAndProducesValidUtf8Json() throws Exception {
         SeckillRepository repository = mock(SeckillRepository.class);
         SeckillOrderService service = new SeckillOrderService(repository);
+        when(repository.insertProcessing(anyString(), anyString())).thenReturn(1);
         String body = "{\"userId\":7,\"productId\":1,\"note\":\"中文\"}";
         when(repository.findByKey("duplicate-key")).thenReturn(java.util.Optional.empty());
         when(repository.findProduct(1L)).thenReturn(java.util.Optional.of(new SeckillProduct(1L, "商品", 1)));
@@ -137,6 +180,7 @@ class SeckillOrderServiceTest {
     void escapesControlCharactersInBusinessErrorJson() throws Exception {
         SeckillRepository repository = mock(SeckillRepository.class);
         SeckillOrderService service = new SeckillOrderService(repository);
+        when(repository.insertProcessing(anyString(), anyString())).thenReturn(1);
         String body = "{\"userId\":7,\"productId\":1}";
         when(repository.findByKey("escaped-key")).thenReturn(java.util.Optional.empty());
         when(repository.findProduct(1L)).thenReturn(java.util.Optional.of(new SeckillProduct(1L, "商品", 1)));
@@ -171,6 +215,7 @@ class SeckillOrderServiceTest {
     void propagatesUnexpectedFailureWithoutSavingResponse() {
         SeckillRepository repository = mock(SeckillRepository.class);
         SeckillOrderService service = new SeckillOrderService(repository);
+        when(repository.insertProcessing(anyString(), anyString())).thenReturn(1);
         when(repository.findByKey("system-error-key")).thenReturn(java.util.Optional.empty());
         when(repository.findProduct(1L)).thenThrow(new IllegalStateException("database unavailable"));
 
@@ -185,6 +230,7 @@ class SeckillOrderServiceTest {
     void decrementsStockAndReturnsOrder() {
         SeckillRepository repository = mock(SeckillRepository.class);
         SeckillOrderService service = new SeckillOrderService(repository);
+        when(repository.insertProcessing(anyString(), anyString())).thenReturn(1);
         when(repository.decrementStockIfAvailable(1L)).thenReturn(1);
         when(repository.findProduct(1L)).thenReturn(java.util.Optional.of(new SeckillProduct(1L, "商品", 1)));
         when(repository.insertOrder(7L, 1L)).thenReturn(new SeckillOrder(11L, 7L, 1L, Instant.now()));
@@ -196,6 +242,7 @@ class SeckillOrderServiceTest {
     void throwsSoldOutWhenConditionalUpdateAffectsNoRow() {
         SeckillRepository repository = mock(SeckillRepository.class);
         SeckillOrderService service = new SeckillOrderService(repository);
+        when(repository.insertProcessing(anyString(), anyString())).thenReturn(1);
         when(repository.decrementStockIfAvailable(1L)).thenReturn(0);
         when(repository.findProduct(1L)).thenReturn(java.util.Optional.of(new SeckillProduct(1L, "商品", 1)));
 
