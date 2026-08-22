@@ -22,7 +22,9 @@ import org.springframework.transaction.support.DefaultTransactionDefinition;
 @SpringBootTest
 class SeckillSchemaIT {
     @Container
-    static MySQLContainer<?> mysql = new MySQLContainer<>("mysql:8.4");
+    static MySQLContainer<?> mysql = new MySQLContainer<>("mysql:8.4")
+            .withUsername("root")
+            .withPassword("test");
 
     @Autowired
     JdbcTemplate jdbcTemplate;
@@ -89,15 +91,15 @@ class SeckillSchemaIT {
 
         var firstTransaction = new DefaultTransactionDefinition();
         firstTransaction.setIsolationLevel(TransactionDefinition.ISOLATION_READ_COMMITTED);
-        var transaction = transactionManager.getTransaction(firstTransaction);
+        org.springframework.transaction.TransactionStatus transaction =
+                transactionManager.getTransaction(firstTransaction);
+        Thread updater = null;
         try {
             assertThat(repository.findByKeyForUpdate("transaction-key")).isPresent();
 
-            CountDownLatch updateStarted = new CountDownLatch(1);
             CountDownLatch updateFinished = new CountDownLatch(1);
             AtomicReference<Throwable> failure = new AtomicReference<>();
-            Thread updater = new Thread(() -> {
-                updateStarted.countDown();
+            updater = new Thread(() -> {
                 try {
                     jdbcTemplate.update("UPDATE idempotency_record SET request_hash = ? " +
                             "WHERE idempotency_key = ?", "updated-hash", "transaction-key");
@@ -109,9 +111,10 @@ class SeckillSchemaIT {
             });
             updater.start();
 
-            assertThat(updateStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(awaitRowLockWait(5, TimeUnit.SECONDS)).isTrue();
             assertThat(updateFinished.await(300, TimeUnit.MILLISECONDS)).isFalse();
             transactionManager.commit(transaction);
+            transaction = null;
             assertThat(updateFinished.await(5, TimeUnit.SECONDS)).isTrue();
             updater.join(5_000);
             assertThat(failure.get()).isNull();
@@ -119,9 +122,34 @@ class SeckillSchemaIT {
                     "WHERE idempotency_key = ?", String.class, "transaction-key"))
                     .isEqualTo("updated-hash");
         } catch (Throwable exception) {
-            transactionManager.rollback(transaction);
+            if (transaction != null) {
+                transactionManager.rollback(transaction);
+                transaction = null;
+            }
             throw exception;
+        } finally {
+            if (transaction != null) {
+                transactionManager.rollback(transaction);
+            }
+            if (updater != null) {
+                updater.join(5_000);
+                assertThat(updater.isAlive()).as("updater thread must always terminate").isFalse();
+            }
         }
+    }
+
+    private boolean awaitRowLockWait(long timeout, TimeUnit unit) throws InterruptedException {
+        long deadline = System.nanoTime() + unit.toNanos(timeout);
+        while (System.nanoTime() < deadline) {
+            Integer waits = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM information_schema.processlist " +
+                            "WHERE command = 'Query' AND info LIKE 'UPDATE idempotency_record%'", Integer.class);
+            if (waits != null && waits > 0) {
+                return true;
+            }
+            Thread.sleep(25);
+        }
+        return false;
     }
 
     @Test
