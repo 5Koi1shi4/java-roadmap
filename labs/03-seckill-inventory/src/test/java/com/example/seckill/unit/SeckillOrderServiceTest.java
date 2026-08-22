@@ -13,6 +13,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.example.seckill.api.ApiExceptionHandler;
 import org.springframework.dao.DeadlockLoserDataAccessException;
+import org.springframework.jdbc.BadSqlGrammarException;
 import org.springframework.http.HttpStatus;
 import org.junit.jupiter.api.Test;
 
@@ -65,6 +66,15 @@ class SeckillOrderServiceTest {
         assertThat(new ObjectMapper().writeValueAsString(response.getBody()))
                 .contains("RETRYABLE_DATABASE_CONFLICT")
                 .contains("数据库锁冲突");
+    }
+
+    @Test
+    void keepsStructuralDatabaseErrorsAsInternalServerError() {
+        var response = new ApiExceptionHandler().retryableDatabaseConflict(
+                new BadSqlGrammarException("query", "SELECT missing", new SQLException("42S02")));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(response.getBody().code()).isEqualTo("INTERNAL_SERVER_ERROR");
     }
 
     @Test

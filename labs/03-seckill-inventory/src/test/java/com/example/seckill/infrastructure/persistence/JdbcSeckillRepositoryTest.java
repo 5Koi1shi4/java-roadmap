@@ -16,4 +16,13 @@ class JdbcSeckillRepositoryTest {
         assertThat(transactional).isNotNull();
         assertThat(transactional.readOnly()).isFalse();
     }
+
+    @Test
+    void idempotencyReadMustJoinCallerTransaction() throws NoSuchMethodException {
+        Transactional transactional = JdbcSeckillRepository.class
+                .getDeclaredMethod("findByKey", String.class)
+                .getAnnotation(Transactional.class);
+
+        assertThat(transactional).isNull();
+    }
 }

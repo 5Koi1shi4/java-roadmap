@@ -8,6 +8,10 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.dao.DataAccessException;
+import org.springframework.dao.CannotAcquireLockException;
+import org.springframework.dao.DeadlockLoserDataAccessException;
+import org.springframework.dao.PessimisticLockingFailureException;
+import java.sql.SQLException;
 import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -38,7 +42,30 @@ public class ApiExceptionHandler {
 
     @ExceptionHandler(DataAccessException.class)
     public ResponseEntity<ApiError> retryableDatabaseConflict(DataAccessException exception) {
+        if (!isLockConflict(exception)) {
+            return error(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_SERVER_ERROR", "数据库访问失败");
+        }
         return error(HttpStatus.SERVICE_UNAVAILABLE, "RETRYABLE_DATABASE_CONFLICT", "数据库锁冲突，请使用相同幂等键重试");
+    }
+
+    private boolean isLockConflict(DataAccessException exception) {
+        if (exception instanceof CannotAcquireLockException
+                || exception instanceof DeadlockLoserDataAccessException
+                || exception instanceof PessimisticLockingFailureException) {
+            return true;
+        }
+        Throwable current = exception;
+        while (current != null) {
+            if (current instanceof SQLException sqlException) {
+                String state = sqlException.getSQLState();
+                int code = sqlException.getErrorCode();
+                if ("40001".equals(state) || code == 1213 || code == 1205) {
+                    return true;
+                }
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

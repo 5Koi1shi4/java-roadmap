@@ -11,7 +11,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Repository;
-import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.annotation.Isolation;
 
@@ -68,7 +67,6 @@ public class JdbcSeckillRepository implements SeckillRepository {
     }
 
     @Override
-    @Transactional(propagation = Propagation.REQUIRES_NEW, readOnly = true)
     public Optional<IdempotencyRecord> findByKey(String key) {
         return jdbcTemplate.query(
                         "SELECT idempotency_key, request_hash, status, response_status, response_body, " +
@@ -138,7 +136,8 @@ public class JdbcSeckillRepository implements SeckillRepository {
     @Override
     public int insertProcessing(String key, String requestHash) {
         return jdbcTemplate.update(
-                "INSERT IGNORE INTO idempotency_record (idempotency_key, request_hash, status) VALUES (?, ?, 'PROCESSING')",
+                "INSERT INTO idempotency_record (idempotency_key, request_hash, status) VALUES (?, ?, 'PROCESSING') " +
+                        "ON DUPLICATE KEY UPDATE idempotency_key = idempotency_key",
                 key, requestHash);
     }
 
