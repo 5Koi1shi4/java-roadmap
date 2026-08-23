@@ -109,9 +109,6 @@ public class OrderTimeoutConsumer {
 
     private int retryCount(Message message) {
         Object value = message.getMessageProperties().getHeaders().get("x-retry-count");
-        if (value == null) {
-            value = message.getMessageProperties().getHeaders().get("retry-count");
-        }
         if (value instanceof Number number) {
             return number.intValue();
         }

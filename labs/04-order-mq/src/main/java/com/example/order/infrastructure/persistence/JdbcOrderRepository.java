@@ -17,6 +17,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.sql.PreparedStatement;
 import java.sql.Statement;
 import java.sql.Timestamp;
+import java.sql.Types;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.UUID;
@@ -248,6 +249,100 @@ public class JdbcOrderRepository {
                         + "last_error = IF(status = 'COMPLETED', last_error, VALUES(last_error)), "
                         + "completed_at = IF(status = 'COMPLETED', completed_at, VALUES(completed_at))",
                 eventId.toString(), category, message, Timestamp.from(failedAt));
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public long insertManualFailure(UUID eventId, String payload, String category,
+                                    String message, int retryCount, Instant createdAt) {
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbcTemplate.update(connection -> {
+            PreparedStatement statement = connection.prepareStatement(
+                    "INSERT INTO manual_failure "
+                            + "(event_id, payload, failure_category, last_error, retry_count, "
+                            + "manual_delivery_status, attempts, created_at, updated_at) "
+                            + "VALUES (?, ?, ?, ?, ?, 'PENDING', 0, ?, ?)",
+                    Statement.RETURN_GENERATED_KEYS);
+            if (eventId == null) {
+                statement.setNull(1, Types.CHAR);
+            } else {
+                statement.setString(1, eventId.toString());
+            }
+            statement.setString(2, payload);
+            statement.setString(3, category);
+            statement.setString(4, message);
+            statement.setInt(5, retryCount);
+            statement.setTimestamp(6, Timestamp.from(createdAt));
+            statement.setTimestamp(7, Timestamp.from(createdAt));
+            return statement;
+        }, keyHolder);
+        Number id = keyHolder.getKey();
+        if (id == null) {
+            throw new IllegalStateException("No manual failure id returned");
+        }
+        return id.longValue();
+    }
+
+    public List<ManualFailure> pendingManualFailures(int limit) {
+        int bounded = Math.min(Math.max(limit, 0), 50);
+        if (bounded == 0) {
+            return List.of();
+        }
+        return jdbcTemplate.query(
+                "SELECT id, event_id, payload, failure_category, last_error, retry_count, attempts, "
+                        + "manual_delivery_status, updated_at FROM manual_failure "
+                        + "WHERE manual_delivery_status = 'PENDING' AND attempts < 3 "
+                        + "ORDER BY id LIMIT ?",
+                (rs, rowNum) -> manualFailure(rs), bounded);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public ManualFailure markManualAttempt(long id, Instant now) {
+        jdbcTemplate.update(
+                "UPDATE manual_failure SET attempts = attempts + 1, updated_at = ? "
+                        + "WHERE id = ? AND manual_delivery_status = 'PENDING' AND attempts < 3",
+                Timestamp.from(now), id);
+        return manualFailure(id);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public int markManualDelivered(long id, Instant now) {
+        return jdbcTemplate.update(
+                "UPDATE manual_failure SET manual_delivery_status = 'DELIVERED', updated_at = ? "
+                        + "WHERE id = ? AND manual_delivery_status = 'PENDING'",
+                Timestamp.from(now), id);
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public int markManualGiveUp(long id, Instant now) {
+        return jdbcTemplate.update(
+                "UPDATE manual_failure SET manual_delivery_status = 'GIVE_UP', updated_at = ? "
+                        + "WHERE id = ? AND manual_delivery_status = 'PENDING' AND attempts >= 3",
+                Timestamp.from(now), id);
+    }
+
+    private ManualFailure manualFailure(long id) {
+        return jdbcTemplate.query(
+                        "SELECT id, event_id, payload, failure_category, last_error, retry_count, attempts, "
+                                + "manual_delivery_status, updated_at FROM manual_failure WHERE id = ?",
+                        (rs, rowNum) -> manualFailure(rs), id)
+                .stream().findFirst().orElse(null);
+    }
+
+    private ManualFailure manualFailure(java.sql.ResultSet rs) throws java.sql.SQLException {
+        String eventId = rs.getString("event_id");
+        return new ManualFailure(
+                rs.getLong("id"), eventId == null ? null : UUID.fromString(eventId),
+                rs.getString("payload"), rs.getString("failure_category"), rs.getString("last_error"),
+                rs.getInt("retry_count"), rs.getInt("attempts"),
+                ManualDeliveryStatus.valueOf(rs.getString("manual_delivery_status")),
+                rs.getTimestamp("updated_at").toInstant());
+    }
+
+    public enum ManualDeliveryStatus { PENDING, DELIVERED, GIVE_UP }
+
+    public record ManualFailure(long id, UUID eventId, String payload, String category,
+                                String message, int retryCount, int attempts,
+                                ManualDeliveryStatus status, Instant updatedAt) {
     }
 
     public record ConsumptionClaim(State state, UUID claimToken) {

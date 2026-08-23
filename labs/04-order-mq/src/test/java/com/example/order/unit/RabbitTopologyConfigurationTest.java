@@ -17,7 +17,7 @@ import org.springframework.amqp.rabbit.core.RabbitOperations;
 import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFactory;
 import org.springframework.amqp.rabbit.retry.MessageRecoverer;
 import org.springframework.amqp.AmqpException;
-import org.springframework.amqp.ImmediateRequeueAmqpException;
+import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -79,10 +79,32 @@ class RabbitTopologyConfigurationTest {
                 template, new FailureClassifier(), repository, new ObjectMapper());
 
         assertThatThrownBy(() -> recoverer.recover(message, new RuntimeException("bad json")))
-                .isInstanceOf(ImmediateRequeueAmqpException.class)
+                .isInstanceOf(AmqpRejectAndDontRequeueException.class)
                 .hasMessageContaining("publisher confirm");
         verify(template).invoke(any());
         verify(repository, never()).recordConsumptionFailure(any(), any(), any(), any());
+    }
+
+    @Test
+    void durableFailureIsPersistedBeforeManualPublishAttempt() {
+        RabbitTemplate template = mock(RabbitTemplate.class);
+        JdbcOrderRepository repository = mock(JdbcOrderRepository.class);
+        when(repository.insertManualFailure(any(), any(), any(), any(), any(Integer.class), any()))
+                .thenReturn(42L);
+        when(template.invoke(any())).thenReturn(false);
+        Message message = new Message(
+                "{\"eventId\":\"00000000-0000-0000-0000-000000000001\"}".getBytes(),
+                new MessageProperties());
+        MessageRecoverer recoverer = new RabbitTopologyConfiguration().timeoutMessageRecoverer(
+                template, new FailureClassifier(), repository, new ObjectMapper());
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> recoverer.recover(message, new RuntimeException("manual down")))
+                .isInstanceOf(AmqpRejectAndDontRequeueException.class);
+        org.mockito.InOrder order = inOrder(repository, template);
+        order.verify(repository).insertManualFailure(any(), any(), any(), any(), any(Integer.class), any());
+        order.verify(template).invoke(any());
+        verify(repository, never()).markManualDelivered(any(Long.class), any());
     }
 
     @Test

@@ -10,8 +10,7 @@ import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFacto
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.retry.MessageRecoverer;
-import org.springframework.amqp.AmqpException;
-import org.springframework.amqp.ImmediateRequeueAmqpException;
+import org.springframework.amqp.AmqpRejectAndDontRequeueException;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -137,7 +136,6 @@ public class RabbitTopologyConfiguration {
             int inboundRetryCount = retryCountHeader(headers);
             Object exhausted = headers.get("x-retry-exhausted");
             headers.remove("x-retry-count");
-            headers.remove("retry-count");
             properties.setHeaders(headers);
             properties.setContentType(message.getMessageProperties().getContentType());
             FailureClassifier.Category category = classifier.classify(failure);
@@ -151,6 +149,9 @@ public class RabbitTopologyConfiguration {
             }
             properties.setHeader("x-retry-count", attempts);
             UUID eventId = eventId(message, objectMapper);
+            String payload = new String(message.getBody(), java.nio.charset.StandardCharsets.UTF_8);
+            long failureId = repository.insertManualFailure(
+                    eventId, payload, category.name(), failureMessage, attempts, Instant.now());
             Message outbound = new Message(message.getBody(), properties);
             Boolean confirmed;
             try {
@@ -159,11 +160,12 @@ public class RabbitTopologyConfiguration {
                     return operations.waitForConfirms(10_000L);
                 });
             } catch (RuntimeException exception) {
-                throw new ImmediateRequeueAmqpException("manual queue publish failed", exception);
+                throw new AmqpRejectAndDontRequeueException("manual queue publish failed", exception);
             }
             if (!Boolean.TRUE.equals(confirmed)) {
-                throw new ImmediateRequeueAmqpException("manual queue publisher confirm nack");
+                throw new AmqpRejectAndDontRequeueException("manual queue publisher confirm nack");
             }
+            repository.markManualDelivered(failureId, Instant.now());
             if (eventId != null) {
                 repository.recordConsumptionFailure(eventId, category.name(), failureMessage, Instant.now());
             }
