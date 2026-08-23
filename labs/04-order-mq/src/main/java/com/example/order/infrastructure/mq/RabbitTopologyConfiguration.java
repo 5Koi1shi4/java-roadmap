@@ -34,11 +34,13 @@ import java.util.UUID;
 public class RabbitTopologyConfiguration {
     public static final String TIMEOUT_EXCHANGE = "order.timeout.exchange";
     public static final String CANCEL_EXCHANGE = "order.cancel.exchange";
+    public static final String MANUAL_EXCHANGE = "order.manual.exchange";
     public static final String TIMEOUT_QUEUE_10S = "order.timeout.10s.queue";
     public static final String TIMEOUT_QUEUE_1M = "order.timeout.1m.queue";
     public static final String TIMEOUT_QUEUE_5M = "order.timeout.5m.queue";
     public static final String CANCEL_QUEUE = "order.cancel.queue";
     public static final String MANUAL_QUEUE = "order.manual.queue";
+    public static final String MANUAL_ROUTING_KEY = "order.manual";
     public static final String TIMEOUT_ROUTING_KEY = "order.timeout.1m";
     public static final String CANCEL_ROUTING_KEY = "order.cancel";
 
@@ -55,6 +57,11 @@ public class RabbitTopologyConfiguration {
     @Bean
     public DirectExchange orderCancelExchange() {
         return new DirectExchange(CANCEL_EXCHANGE, true, false);
+    }
+
+    @Bean
+    public DirectExchange orderManualExchange() {
+        return new DirectExchange(MANUAL_EXCHANGE, true, false);
     }
 
     @Bean
@@ -81,7 +88,11 @@ public class RabbitTopologyConfiguration {
 
     @Bean
     public Queue orderCancelQueue() {
-        return new Queue(CANCEL_QUEUE, true);
+        return new Queue(CANCEL_QUEUE, true, false, false, Map.of(
+                "x-queue-type", "quorum",
+                "x-delivery-limit", 3,
+                "x-dead-letter-exchange", MANUAL_EXCHANGE,
+                "x-dead-letter-routing-key", MANUAL_ROUTING_KEY));
     }
 
     @Bean
@@ -111,6 +122,12 @@ public class RabbitTopologyConfiguration {
     public Binding cancelBinding(@Qualifier("orderCancelQueue") Queue orderCancelQueue,
                                  @Qualifier("orderCancelExchange") DirectExchange orderCancelExchange) {
         return BindingBuilder.bind(orderCancelQueue).to(orderCancelExchange).with(CANCEL_ROUTING_KEY);
+    }
+
+    @Bean
+    public Binding manualFailureBinding(@Qualifier("orderManualQueue") Queue orderManualQueue,
+                                       @Qualifier("orderManualExchange") DirectExchange orderManualExchange) {
+        return BindingBuilder.bind(orderManualQueue).to(orderManualExchange).with(MANUAL_ROUTING_KEY);
     }
 
     @Bean

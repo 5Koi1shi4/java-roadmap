@@ -16,7 +16,7 @@ import java.util.List;
 /** Bounded compensating publisher for durable manual-failure records. */
 @Component
 public class ManualFailureDispatcher {
-    private static final int BATCH_SIZE = 50;
+    private static final int BATCH_SIZE = 1;
     private static final int MAX_ATTEMPTS = 3;
 
     private final JdbcOrderRepository repository;
@@ -44,36 +44,22 @@ public class ManualFailureDispatcher {
         Instant now = clock.instant();
         List<JdbcOrderRepository.ManualFailure> pending = repository.claimManualFailures(
                 now, now.plusSeconds(30), BATCH_SIZE);
-        // Keep the old method usable for lightweight callers created before claim fencing.
-        boolean fenced = !pending.isEmpty();
-        if (pending.isEmpty()) {
-            pending = repository.pendingManualFailures(BATCH_SIZE);
-        }
         for (JdbcOrderRepository.ManualFailure original : pending) {
-            JdbcOrderRepository.ManualFailure failure = fenced
-                    ? original : repository.markManualAttempt(original.id(), clock.instant());
-            if (failure == null || failure.status() != JdbcOrderRepository.ManualDeliveryStatus.PENDING) {
-                if (fenced && (failure == null || failure.status() != JdbcOrderRepository.ManualDeliveryStatus.PUBLISHING)) {
-                    continue;
-                }
-            }
-            if (failure == null) {
+            if (original == null || original.status() != JdbcOrderRepository.ManualDeliveryStatus.PUBLISHING
+                    || original.claimToken() == null) {
                 continue;
             }
+            JdbcOrderRepository.ManualFailure failure = original;
             try {
                 Boolean confirmed = rabbitTemplate.invoke(operations -> {
                     operations.send("", RabbitTopologyConfiguration.MANUAL_QUEUE, message(failure));
                     return operations.waitForConfirms(10_000L);
                 });
                 if (Boolean.TRUE.equals(confirmed)) {
-                    if (failure.claimToken() != null) {
-                        if (failure.eventId() != null) {
-                            repository.markManualDelivered(failure.eventId(), failure.claimToken(), clock.instant());
-                        } else {
-                            repository.markManualDelivered(failure.id(), failure.claimToken(), clock.instant());
-                        }
+                    if (failure.eventId() != null) {
+                        repository.markManualDelivered(failure.eventId(), failure.claimToken(), clock.instant());
                     } else {
-                        repository.markManualDelivered(failure.id(), clock.instant());
+                        repository.markManualDelivered(failure.id(), failure.claimToken(), clock.instant());
                     }
                 } else {
                     markFailure(failure);
@@ -92,9 +78,6 @@ public class ManualFailureDispatcher {
                 repository.markManualPublishFailure(failure.id(), failure.claimToken(), clock.instant());
             }
             return;
-        }
-        if (failure.attempts() >= maxAttempts) {
-            repository.markManualGiveUp(failure.id(), clock.instant());
         }
     }
 

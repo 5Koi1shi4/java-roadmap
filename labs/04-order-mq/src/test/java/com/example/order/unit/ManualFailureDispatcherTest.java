@@ -16,6 +16,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class ManualFailureDispatcherTest {
@@ -31,7 +32,7 @@ class ManualFailureDispatcherTest {
         RabbitTemplate template = mock(RabbitTemplate.class);
         ManualFailureDispatcher dispatcher = new ManualFailureDispatcher(repository, template, 3);
         UUID token = UUID.randomUUID();
-        when(repository.claimManualFailures(any(), any(), eq(50)))
+        when(repository.claimManualFailures(any(), any(), eq(1)))
                 .thenReturn(List.of(failure(1L, 1, token)));
         when(template.invoke(any())).thenReturn(true);
 
@@ -46,7 +47,7 @@ class ManualFailureDispatcherTest {
         RabbitTemplate template = mock(RabbitTemplate.class);
         ManualFailureDispatcher dispatcher = new ManualFailureDispatcher(repository, template, 3);
         UUID stale = UUID.randomUUID();
-        when(repository.claimManualFailures(any(), any(), eq(50)))
+        when(repository.claimManualFailures(any(), any(), eq(1)))
                 .thenReturn(List.of(failure(1L, 3, stale)));
         when(template.invoke(any())).thenReturn(false);
 
@@ -59,13 +60,13 @@ class ManualFailureDispatcherTest {
         JdbcOrderRepository repository = mock(JdbcOrderRepository.class);
         RabbitTemplate template = mock(RabbitTemplate.class);
         ManualFailureDispatcher dispatcher = new ManualFailureDispatcher(repository, template, 3);
-        when(repository.pendingManualFailures(50)).thenReturn(List.of(failure(1L, 0)));
-        when(repository.markManualAttempt(any(Long.class), any(Instant.class))).thenReturn(failure(1L, 1));
+        when(repository.claimManualFailures(any(), any(), eq(1)))
+                .thenReturn(List.of(failure(1L, 1, UUID.randomUUID())));
         when(template.invoke(any())).thenReturn(false);
 
         dispatcher.dispatchOnce();
 
-        verify(repository, never()).markManualGiveUp(eq(1L), any(Instant.class));
+        verify(repository).markManualPublishFailure(any(UUID.class), any(UUID.class), any(Instant.class));
     }
 
     @Test
@@ -73,13 +74,13 @@ class ManualFailureDispatcherTest {
         JdbcOrderRepository repository = mock(JdbcOrderRepository.class);
         RabbitTemplate template = mock(RabbitTemplate.class);
         ManualFailureDispatcher dispatcher = new ManualFailureDispatcher(repository, template, 3);
-        when(repository.pendingManualFailures(50)).thenReturn(List.of(failure(1L, 2)));
-        when(repository.markManualAttempt(any(Long.class), any(Instant.class))).thenReturn(failure(1L, 3));
+        when(repository.claimManualFailures(any(), any(), eq(1)))
+                .thenReturn(List.of(failure(1L, 3, UUID.randomUUID())));
         when(template.invoke(any())).thenReturn(false);
 
         dispatcher.dispatchOnce();
 
-        verify(repository).markManualGiveUp(eq(1L), any(Instant.class));
+        verify(repository).markManualPublishFailure(any(UUID.class), any(UUID.class), any(Instant.class));
     }
 
     @Test
@@ -87,13 +88,25 @@ class ManualFailureDispatcherTest {
         JdbcOrderRepository repository = mock(JdbcOrderRepository.class);
         RabbitTemplate template = mock(RabbitTemplate.class);
         ManualFailureDispatcher dispatcher = new ManualFailureDispatcher(repository, template, 3);
-        when(repository.pendingManualFailures(50)).thenReturn(List.of(failure(1L, 0)));
-        when(repository.markManualAttempt(any(Long.class), any(Instant.class))).thenReturn(failure(1L, 1));
+        when(repository.claimManualFailures(any(), any(), eq(1)))
+                .thenReturn(List.of(failure(1L, 1, UUID.randomUUID())));
         when(template.invoke(any())).thenReturn(true);
 
         dispatcher.dispatchOnce();
 
-        verify(repository).markManualDelivered(eq(1L), any(Instant.class));
+        verify(repository).markManualDelivered(any(UUID.class), any(UUID.class), any(Instant.class));
+    }
+
+    @Test
+    void emptyClaimEndsDispatchWithoutLegacyPendingScan() {
+        JdbcOrderRepository repository = mock(JdbcOrderRepository.class);
+        RabbitTemplate template = mock(RabbitTemplate.class);
+        ManualFailureDispatcher dispatcher = new ManualFailureDispatcher(repository, template, 3);
+        when(repository.claimManualFailures(any(), any(), eq(1))).thenReturn(List.of());
+
+        dispatcher.dispatchOnce();
+
+        verifyNoInteractions(template);
     }
 
     @Test

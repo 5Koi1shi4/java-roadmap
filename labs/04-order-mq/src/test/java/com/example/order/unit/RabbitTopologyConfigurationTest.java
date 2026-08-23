@@ -40,6 +40,29 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class RabbitTopologyConfigurationTest {
     @Test
+    void cancelQueueUsesQuorumDeliveryLimitAndManualDeadLetterRoute() {
+        org.springframework.amqp.core.Queue queue = new RabbitTopologyConfiguration().orderCancelQueue();
+
+        assertThat(queue.getArguments())
+                .containsEntry("x-queue-type", "quorum")
+                .containsEntry("x-delivery-limit", 3)
+                .containsEntry("x-dead-letter-exchange", RabbitTopologyConfiguration.MANUAL_EXCHANGE)
+                .containsEntry("x-dead-letter-routing-key", RabbitTopologyConfiguration.MANUAL_ROUTING_KEY);
+    }
+
+    @Test
+    void manualDeadLetterExchangeRoutesToManualQueue() {
+        RabbitTopologyConfiguration configuration = new RabbitTopologyConfiguration();
+
+        org.springframework.amqp.core.Binding binding = configuration.manualFailureBinding(
+                configuration.orderManualQueue(), configuration.orderManualExchange());
+
+        assertThat(binding.getDestination()).isEqualTo(RabbitTopologyConfiguration.MANUAL_QUEUE);
+        assertThat(binding.getExchange()).isEqualTo(RabbitTopologyConfiguration.MANUAL_EXCHANGE);
+        assertThat(binding.getRoutingKey()).isEqualTo(RabbitTopologyConfiguration.MANUAL_ROUTING_KEY);
+    }
+
+    @Test
     void timeoutConsumerListensToCancelQueueAfterTtlDeadLettering() throws Exception {
         Method method = OrderTimeoutConsumer.class.getDeclaredMethod("consume", Message.class);
 

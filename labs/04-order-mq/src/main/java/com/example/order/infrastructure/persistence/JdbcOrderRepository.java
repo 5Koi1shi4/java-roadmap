@@ -282,19 +282,6 @@ public class JdbcOrderRepository {
         return id.longValue();
     }
 
-    public List<ManualFailure> pendingManualFailures(int limit) {
-        int bounded = Math.min(Math.max(limit, 0), 50);
-        if (bounded == 0) {
-            return List.of();
-        }
-        return jdbcTemplate.query(
-                "SELECT id, event_id, payload, failure_category, last_error, retry_count, attempts, "
-                        + "manual_delivery_status, claim_token, lease_until, updated_at FROM manual_failure "
-                        + "WHERE manual_delivery_status = 'PENDING' AND attempts < 3 "
-                        + "ORDER BY id LIMIT ?",
-                (rs, rowNum) -> manualFailure(rs), bounded);
-    }
-
     /** Atomically claims pending or expired publishing rows and increments attempts. */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public List<ManualFailure> claimManualFailures(Instant now, Instant leaseUntil, int limit) {
@@ -332,15 +319,6 @@ public class JdbcOrderRepository {
             }
         }
         return claimed;
-    }
-
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public ManualFailure markManualAttempt(long id, Instant now) {
-        jdbcTemplate.update(
-                "UPDATE manual_failure SET attempts = attempts + 1, updated_at = ? "
-                        + "WHERE id = ? AND manual_delivery_status = 'PENDING' AND attempts < 3",
-                Timestamp.from(now), id);
-        return manualFailure(id);
     }
 
     /** Fenced success transition; a late owner cannot update a reclaimed row. */
@@ -381,19 +359,12 @@ public class JdbcOrderRepository {
                 Timestamp.from(now), eventId.toString(), claimToken.toString());
     }
 
+    /** Marks a directly confirmed fallback publish delivered while the row is still pending. */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public int markManualDelivered(long id, Instant now) {
         return jdbcTemplate.update(
                 "UPDATE manual_failure SET manual_delivery_status = 'DELIVERED', updated_at = ? "
                         + "WHERE id = ? AND manual_delivery_status = 'PENDING'",
-                Timestamp.from(now), id);
-    }
-
-    @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public int markManualGiveUp(long id, Instant now) {
-        return jdbcTemplate.update(
-                "UPDATE manual_failure SET manual_delivery_status = 'GIVE_UP', updated_at = ? "
-                        + "WHERE id = ? AND manual_delivery_status = 'PENDING' AND attempts >= 3",
                 Timestamp.from(now), id);
     }
 
