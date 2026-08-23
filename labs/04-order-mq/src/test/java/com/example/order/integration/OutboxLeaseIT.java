@@ -9,11 +9,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
-import org.testcontainers.containers.MySQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
+import org.springframework.test.annotation.DirtiesContext;
 
 import java.time.Instant;
 import java.util.List;
@@ -21,30 +20,27 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@Testcontainers
 @SpringBootTest(classes = OrderMqApplication.class, webEnvironment = WebEnvironment.NONE)
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class OutboxLeaseIT {
-    @Container
-    static MySQLContainer<?> mysql = new MySQLContainer<>("mysql:8.4")
-            .withUsername("root")
-            .withPassword("test");
-
     @Autowired
     JdbcOrderRepository repository;
 
     @Autowired
     JdbcTemplate jdbcTemplate;
 
+    @Autowired
+    RabbitAdmin rabbitAdmin;
+
     @DynamicPropertySource
     static void mysqlProperties(DynamicPropertyRegistry registry) {
-        registry.add("spring.datasource.url", mysql::getJdbcUrl);
-        registry.add("spring.datasource.username", mysql::getUsername);
-        registry.add("spring.datasource.password", mysql::getPassword);
+        SharedContainers.registerProperties(registry);
     }
 
     @BeforeEach
     void cleanDatabase() {
-        jdbcTemplate.update("DELETE FROM outbox_event");
+        SharedContainers.cleanDatabase(jdbcTemplate);
+        SharedContainers.purgeQueues(rabbitAdmin);
     }
 
     @Test

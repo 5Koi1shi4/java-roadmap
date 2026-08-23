@@ -19,10 +19,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.awaitility.Awaitility;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
-import org.testcontainers.containers.MySQLContainer;
-import org.testcontainers.containers.RabbitMQContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
+import org.springframework.test.annotation.DirtiesContext;
 
 import java.time.Instant;
 import java.time.Duration;
@@ -30,19 +27,9 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@Testcontainers
 @SpringBootTest(classes = OrderMqApplication.class, webEnvironment = WebEnvironment.NONE)
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class OrderTimeoutIT {
-    @Container
-    static MySQLContainer<?> mysql = new MySQLContainer<>("mysql:8.4")
-            .withUsername("root")
-            .withPassword("test");
-
-    @Container
-    static RabbitMQContainer rabbit = new RabbitMQContainer("rabbitmq:3.13-management")
-            .withUser("order_mq", "test")
-            .withVhost("/");
-
     @Autowired
     OrderService orderService;
 
@@ -66,21 +53,13 @@ class OrderTimeoutIT {
 
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
-        registry.add("spring.datasource.url", mysql::getJdbcUrl);
-        registry.add("spring.datasource.username", mysql::getUsername);
-        registry.add("spring.datasource.password", mysql::getPassword);
-        registry.add("spring.rabbitmq.host", rabbit::getHost);
-        registry.add("spring.rabbitmq.port", rabbit::getAmqpPort);
-        registry.add("spring.rabbitmq.username", () -> "order_mq");
-        registry.add("spring.rabbitmq.password", () -> "test");
+        SharedContainers.registerProperties(registry);
     }
 
     @BeforeEach
     void cleanDatabase() {
-        jdbcTemplate.update("DELETE FROM consumed_message");
-        jdbcTemplate.update("DELETE FROM outbox_event");
-        jdbcTemplate.update("DELETE FROM orders");
-        jdbcTemplate.update("UPDATE order_stock SET available = 10 WHERE product_id = 1");
+        SharedContainers.cleanDatabase(jdbcTemplate);
+        SharedContainers.purgeQueues(rabbitAdmin);
     }
 
     @Test
