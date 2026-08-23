@@ -15,7 +15,8 @@ final class SharedContainers {
 
     static final RabbitMQContainer RABBIT = new RabbitMQContainer("rabbitmq:3.13-management")
             .withUser("order_mq", "test")
-            .withVhost("/");
+            .withVhost("/")
+            .withPermission("/", "order_mq", ".*", ".*", ".*");
 
     static {
         MYSQL.start();

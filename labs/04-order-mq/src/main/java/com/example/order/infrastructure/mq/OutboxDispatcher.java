@@ -2,6 +2,7 @@ package com.example.order.infrastructure.mq;
 
 import com.example.order.infrastructure.persistence.JdbcOrderRepository;
 import org.springframework.amqp.AmqpException;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.time.Clock;
@@ -19,6 +20,7 @@ public class OutboxDispatcher {
     private final Clock clock;
     private final Duration leaseDuration;
 
+    @Autowired
     public OutboxDispatcher(JdbcOrderRepository repository, OrderEventPublisher publisher) {
         this(repository, publisher, Clock.systemUTC(), Duration.ofSeconds(30));
     }
