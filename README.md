@@ -1,6 +1,6 @@
 # Java Backend Roadmap
 
-面向 2027 届春招的 Java 后端项目化学习仓库。这里的 `main` 分支是稳定的学习总览与已验收实验入口；每个实验保持独立目录、独立 README 和可复跑的验证命令，方便阅读者按阶段进入。
+面向 2027 届春招的 Java 后端项目化学习仓库。这里的 `main` 分支是文档中心，维护稳定的学习总览、已验收记录和复盘入口；每个实验在独立分支中保持可复跑的验证命令，方便阅读者按阶段进入。
 
 ## 从这里开始
 
@@ -13,12 +13,12 @@
 
 ## 学习路线
 
-| 阶段 | 项目 | 状态 | 阅读入口 |
+| 阶段 | 项目 | 状态 | 独立分支入口 |
 |---|---|---|---|
-| 1 | JWT 与 RBAC 权限服务 | 已验收 | [实验一 README](labs/01-security-rbac/README.md) · [排障复盘](labs/01-security-rbac/TROUBLESHOOTING.md) |
-| 2 | Redis 缓存与一致性 | 已验收 | [实验二 README](labs/02-redis-cache/README.md) · [排障复盘](labs/02-redis-cache/TROUBLESHOOTING.md) |
-| 3 | 秒杀、库存与接口幂等 | 已验收 | [实验三 README](labs/03-seckill-inventory/README.md) · [排障复盘](labs/03-seckill-inventory/TROUBLESHOOTING.md) |
-| 4 | 订单状态机与可靠消息 | 未开始 | — |
+| 1 | JWT 与 RBAC 权限服务 | 已验收 | [learning/security-rbac](https://github.com/5Koi1shi4/java-roadmap/tree/learning/security-rbac/labs/01-security-rbac) |
+| 2 | Redis 缓存与一致性 | 已验收 | [learning/redis-cache](https://github.com/5Koi1shi4/java-roadmap/tree/learning/redis-cache/labs/02-redis-cache) |
+| 3 | 秒杀、库存与接口幂等 | 已验收 | [learning/seckill-inventory](https://github.com/5Koi1shi4/java-roadmap/tree/learning/seckill-inventory/labs/03-seckill-inventory) |
+| 4 | 订单状态机与可靠消息 | 已验收 | [feat/order-mq-reliable-messaging](https://github.com/5Koi1shi4/java-roadmap/tree/feat/order-mq-reliable-messaging/labs/04-order-mq) |
 | 5 | Elasticsearch 搜索 | 未开始 | — |
 | 6 | 安全文件服务与 MinIO | 未开始 | — |
 | 7 | 校园交易与服务平台 | 未开始 | — |
@@ -33,28 +33,35 @@
 
 覆盖 JWT 认证、RBAC 授权、可撤销 Refresh Token 轮换和 MySQL 端到端验证。
 
-- 入口：[labs/01-security-rbac](labs/01-security-rbac/README.md)
+- 入口：[learning/security-rbac](https://github.com/5Koi1shi4/java-roadmap/tree/learning/security-rbac/labs/01-security-rbac)
 - 验证：在实验目录使用 JDK 17 执行 `mvnw.cmd verify`。
 
 ### 实验二：Redis 缓存与一致性
 
 覆盖 Cache Aside、正/负缓存、事务提交后失效、热点 Key 重建锁、Redisson、Actuator、k6、Prometheus 与 Grafana。
 
-- 入口：[labs/02-redis-cache](labs/02-redis-cache/README.md)
+- 入口：[learning/redis-cache](https://github.com/5Koi1shi4/java-roadmap/tree/learning/redis-cache/labs/02-redis-cache)
 - 验证：在 JDK 17 与 Docker Desktop 下执行 `mvnw.cmd verify`；已验收 24 个单元测试和 22 个 Testcontainers 集成测试。
 
 ### 实验三：秒杀、库存与接口幂等
 
 覆盖 MySQL 条件扣库存、一人一单、事务回滚、接口幂等、UTF-8 响应与多实例数据库协调。
 
-- 入口：[labs/03-seckill-inventory](labs/03-seckill-inventory/README.md)
+- 入口：[learning/seckill-inventory](https://github.com/5Koi1shi4/java-roadmap/tree/learning/seckill-inventory/labs/03-seckill-inventory)
 - 验证：在 JDK 17 与 Docker Desktop 下执行 `mvnw.cmd verify`；已验收 32 个 Surefire 测试和 13 个 Testcontainers 集成测试。
+
+### 实验四：订单状态机与可靠消息
+
+覆盖订单状态条件更新、事务内 Outbox、RabbitMQ publisher confirm、租约接管、TTL 分桶、DLX、消费幂等、异常分类和有限重试。
+
+- 入口：[feat/order-mq-reliable-messaging](https://github.com/5Koi1shi4/java-roadmap/tree/feat/order-mq-reliable-messaging/labs/04-order-mq)
+- 验证：在 JDK 17 与 Docker Desktop 下执行 `mvnw.cmd verify`；已验收 59 个 Surefire 单元测试和 26 个 Failsafe/Testcontainers 集成测试，0 failures、0 errors、0 skipped。
 
 ## 目录导航
 
 | 目录 | 用途 |
 |---|---|
-| [`labs/`](labs/) | 每个阶段的独立可运行实验、测试、Compose 配置和实验说明。 |
+| `labs/` | 实验代码保留在本地工作区，并通过独立分支入口访问。 |
 | [`notes/`](notes/learning-log.md) | 每日目标、测试证据、问题复盘与技术取舍。 |
 | [`interview/`](interview/question-bank.md) | 从实验提炼的面试追问与知识点。 |
 | [`references/`](references/README.md) | 外部参考仓库及阅读记录。 |
@@ -79,4 +86,5 @@
 
 - Java 与 Maven 统一使用 JDK 17。
 - 本地密码、Token 和 `.env` 不提交；`.env.example` 仅保留占位符。
+- `main` 只存放文档；实验分支不会合并进 `main`，实验验收更新通过独立的文档提交完成。
 - 每次改动只暂存本次相关文件；实验分支和工作树保持独立，不因调整总览而改变。

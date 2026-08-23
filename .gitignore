@@ -56,4 +56,10 @@ projects/smart-support/
 # Local linked worktrees
 .worktrees/
 
+# Local agent instructions are never committed.
+/AGENTS.md
+
+# Experiment projects remain in local main worktree but live in isolated branches.
+/labs/
+
 bb54c17 (docs: initialize java backend learning roadmap)

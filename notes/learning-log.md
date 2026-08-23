@@ -78,3 +78,22 @@
 - 测试证据：使用 JDK 17 和 Docker Desktop 宿主权限执行 `mvnw.cmd verify`；24 个单元测试、22 个 Testcontainers 集成测试均为 0 failures、0 errors、0 skipped，且日志扫描未发现 `ConnectionWatchdog` 重连、`Connection closed prematurely` 或 `Connection refused`。
 - 技术选择及取舍：采用 `@DirtiesContext` 精确关闭使用动态容器端口的 Spring 测试上下文，而非降低日志级别；这保留了真正连接故障的可见性，也使测试资源生命周期与容器一致。
 - 明日第一步：开始阶段三“秒杀、库存与接口幂等”，先明确库存扣减、幂等键和并发验收测试。
+
+## 2026-08-23
+
+- 今日目标：完成阶段四订单状态机与 RabbitMQ 可靠消息实验，并把实现、测试、排障和面试追问闭环。
+- 完成内容：
+  - 用条件更新实现 `PENDING_PAYMENT → PAID/CANCELLED`；创建订单时在同一事务写入订单、扣减库存和 `ORDER_TIMEOUT` Outbox。
+  - Outbox dispatcher 以 `NEW → PUBLISHING` 数据库租约和 claim token 控制并发，publisher confirm 成功后才标记已发布；过期租约可被下一实例接管，旧 owner 的迟到 ACK/NACK 会被 fencing。
+  - RabbitMQ 使用 10s、1m、5m 固定 TTL 桶和 DLX；生产默认 1m，集成测试用 `order.timeout.routing-key=order.timeout.10s` 覆盖为 10s。取消 quorum 队列设置三次投递限制，失败后进入人工处理队列。
+  - 消费记录以 eventId 唯一键和 `PROCESSING/COMPLETED` 租约去重；取消订单、实际释放库存和完成记录在同一事务中提交，重复消息不会再次释放库存。
+  - 事件模型固定为五字段；构造器拒绝非法值，Jackson 在反序列化边界快速失败，服务层只处理状态和库存等业务规则。
+- 测试证据：使用 JDK 17、MySQL 8.4 与 RabbitMQ 3.13 Testcontainers 完整执行 `mvnw.cmd verify`，当前验收提交 `ad55717` 的结果为 59 个 Surefire 单元测试、26 个 Failsafe 集成测试，0 failures、0 errors、0 skipped，Maven `BUILD SUCCESS`（耗时 1:46）。集成测试用共享容器提升效率，但每个测试独立清理数据库和同步 purge 队列。
+- 本轮排障：
+  - ObjectMapper 夹具补充 `JavaTimeModule`，解决 `Instant` 事件时间字段读写问题，并用稳定五字段模型验证未知字段、缺失字段和非法值的快速失败。
+  - Testcontainers RabbitMQ 显式声明 `/` vhost 与 order_mq 的 configure/write/read 权限，解决连接成功但声明队列被拒绝的问题。
+  - 共享容器的队列清理改用同步 `rabbitAdmin.purgeQueue(queue, false)`，避免旧消息在下一测试发布后被误消费。
+  - Spring Retry 恢复器改读实际 Retry 上下文次数，修正入站 `x-retry-count` 与本轮 attempt 的 off-by-one；TIMESTAMP 夹具统一使用 UTC `Instant`，消除宿主时区差异。
+- 技术选择及取舍：消费幂等使用数据库唯一键加事务，而不是只依赖 RabbitMQ 的投递语义。唯一键把同一 eventId 的并发竞争收敛到数据库；事务把订单条件取消、库存释放和 `COMPLETED` 记录绑定，业务提交前不 ACK，崩溃后可重试或接管。代价是消费路径依赖数据库可用性，因此对死锁、锁等待超时和连接异常仅做有限重试。
+- 已知边界：数据库人工失败副本和人工 publish 同时失败的极端路径只能依赖 broker-only DLX；该副本保留原 payload 与 Rabbit `x-death` / delivery metadata，但可能缺少自定义 `failure-category` / `failure-message`，不能宣称完全无损。
+- 明日第一步：进入阶段五前，先复查实验四的 Outbox、消费幂等和人工失败监控指标设计。

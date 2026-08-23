@@ -64,6 +64,68 @@
 
 **代码证据：** `AdminAuthorizationIT` 使用 MockMvc；`AuthFlowE2ETest` 使用 `TestRestTemplate`、Testcontainers MySQL 和并发请求。
 
+## 实验四：订单状态机与 RabbitMQ 可靠消息
+
+### 11. 为什么支付和取消都必须使用带原状态条件的更新？
+
+**回答：** `PENDING_PAYMENT → PAID` 和 `PENDING_PAYMENT → CANCELLED` 是唯一允许的迁移。SQL 以原状态作为 `WHERE` 条件，受影响行数为 0 时再读取当前状态，从而避免支付和超时线程互相覆盖；已支付订单不会被超时取消，重复取消也不会再次释放库存。
+
+**代码证据：** `JdbcOrderRepository.markPaidIfPending`、`cancelIfPending`、`OrderService.cancelExpired`；`OrderPersistenceIT.doesNotCancelPaidOrder` 和 `ReliableMessagingFlowIT.paidOrderSurvivesLateTimeoutEvent`。
+
+### 12. Outbox 解决了什么双写问题？它为什么仍需要 publisher confirm？
+
+**回答：** 建单事务同时写订单和 `outbox_event`，避免订单已提交但超时事件未落库；发布由异步 dispatcher 补偿，不把 Rabbit 调用放进数据库事务。Outbox 行写入不等于 broker 已接收，因此 `OrderEventPublisher` 必须等待 correlated publisher confirm，只有确认成功才把状态标为已发布。
+
+**代码证据：** `OrderService.createOrder`、`JdbcOrderRepository.insertTimeoutOutbox`、`OutboxDispatcher.dispatchOnce`、`OrderEventPublisher.publish`；`OrderPersistenceIT.persistsOrderAndTimeoutEventAtomically` 和 `OutboxDispatcherTest.releasesEventWhenPublisherNacks`。
+
+### 13. Outbox 租约如何控制并发，旧实例的迟到 ACK 为什么不能覆盖新实例？
+
+**回答：** 领取使用数据库条件更新，把 `NEW` 或已过期的 `PUBLISHING` 变为当前 owner 的租约，批量最多 50 行。每次领取带随机 claim token；完成发布或释放重试时必须同时匹配 eventId 和 token，旧租约迟到的写入影响行数为 0。
+
+**代码证据：** `JdbcOrderRepository.claimPublishable`、`markPublished`、`releaseForRetry`；`OutboxLeaseIT.expiredPublishingEventCanBeClaimedByNextDispatcher`、`lateAckFromPreviousOwnerCannotCompleteNewLease` 和 `lateNackFromPreviousOwnerCannotReleaseNewLease`。
+
+### 14. 消费者什么时候确认消息？PROCESSING 和 COMPLETED 的边界是什么？
+
+**回答：** 消费者先领取 `consumed_message` 为 `PROCESSING`，再在同一数据库事务中执行订单条件取消、实际库存释放并写 `COMPLETED`；事务提交之前不能 ACK。已完成记录直接确认；未完成且租约过期可以被接管，租约仍有效则不能并发执行。
+
+**代码证据：** `OrderTimeoutConsumer.handle`、`JdbcOrderRepository.beginConsumption`、`completeConsumption`；`OrderTimeoutIT.completedFailureRecordRemainsCompleted` 和 `ReliableMessagingFlowIT.publishesTimeoutAndEventuallyCancelsOnlyPendingOrder`。
+
+### 15. 为什么重复消息不会重复释放库存？
+
+**回答：** 全局唯一 `eventId` 在 `consumed_message` 上有唯一键，第一次成功消费把状态提交为 `COMPLETED`；同 eventId 的后续投递命中终态并跳过业务。即使消息重复到达，`cancelIfPending` 也只会匹配待支付订单，只有受影响行数为 1 时才释放库存。
+
+**代码证据：** `V1__order_mq_schema.sql` 的唯一索引、`JdbcOrderRepository.beginConsumption`、`OrderService.cancelExpired`；`OrderTimeoutIT.duplicateEventIdCancelsAndReleasesStockOnlyOnce` 和 `ReliableMessagingFlowIT.duplicateEventIdReleasesStockOnlyOnce`。
+
+### 16. 哪些异常可重试，哪些异常应直接人工处理？
+
+**回答：** 连接中断、短暂数据库异常、死锁、锁等待超时和事务回滚属于可恢复基础设施异常；JSON 解析、事件字段/版本校验、非法状态迁移属于不可恢复输入或业务错误。`FailureClassifier` 只允许前一类进入有限重试，后一类直接恢复到人工队列并记录类别与原因。
+
+**代码证据：** `FailureClassifier.classify`、`RetryableMessageException`、`NonRetryableMessageException`；`FailureClassifierTest.classifiesBrokenJsonAndUnsupportedVersionAsNonRetryable` 与 `classifiesTransientDatabaseConnectionAsRetryable`。
+
+### 17. 三次重试如何避免无限重试和 attempt 计数偏差？
+
+**回答：** listener 使用 Spring Retry `SimpleRetryPolicy(maxAttempts=3)`，这里的 3 包含首次处理；重试耗尽由 recoverer 发送人工消息。恢复器读取 `RetrySynchronizationManager` 的实际 attempt，而不是盲目累加入站 `x-retry-count`，因此不可重试错误记录 1 次、可重试耗尽记录 3 次；非法或已耗尽的 header 不会继续执行业务。
+
+**代码证据：** `RabbitTopologyConfiguration.timeoutRetryInterceptor`、`timeoutMessageRecoverer`、`OrderTimeoutConsumer.retryCount`；`RabbitTopologyConfigurationTest.manualRecoveryUsesOneAttemptForNonRetryableSpringRetryFailure`、`manualRecoveryUsesThreeAttemptsAfterRetryableSpringRetryFailures` 和 `OrderTimeoutConsumerTest.exhaustedInboundRetryCountGoesToRecovererWithoutBusinessExecution`。
+
+### 18. TTL 队列为什么要按延迟分桶？DLX 在本实验中做什么？
+
+**回答：** RabbitMQ TTL 是消息到期机制，不是精确定时器；同一队列混合不同 TTL 时，队头未到期消息会阻塞后面的消息。实验声明 10s、1m、5m 三个同 TTL 队列，过期消息经 `order.cancel.exchange` 路由到取消队列；取消队列超过 quorum `x-delivery-limit=3` 后再死信到人工队列。
+
+**代码证据：** `RabbitTopologyConfiguration.timeoutQueue`、`orderCancelQueue`、bindings；`OrderTimeoutIT.declaresTtlBucketsAndDeadLetterDestination`、`RabbitTopologyConfigurationTest.cancelQueueUsesQuorumDeliveryLimitAndManualDeadLetterRoute`。
+
+### 19. 为什么事件构造器和反序列化边界都要快速失败？服务层应该做什么？
+
+**回答：** `OrderTimeoutEvent` 的构造器拒绝空 eventId、错误 eventType、非正 orderId、空 occurredAt 和未知 schemaVersion；Jackson 反序列化拒绝缺失/未知字段和非法类型，协议错误在消息边界分类为不可重试。这样 `OrderService` 只编排库存、状态迁移和事务业务规则，不负责清洗外部 JSON。
+
+**代码证据：** `OrderTimeoutEvent` canonical constructor、`OrderTimeoutConsumer.consume`、`OrderService.cancelExpired`；`OrderServiceTest.rejectsMissingRequiredTimeoutEventFieldAtJacksonBoundary`、`rejectsInvalidTimeoutEventFieldsAtJacksonBoundary` 和 `rejectsMalformedTimeoutEventBeforeChangingOrder`。
+
+### 20. 共享 Testcontainers 如何兼顾测试效率和隔离？
+
+**回答：** 集成测试共享一对 MySQL/RabbitMQ 容器，避免每个类重复启动镜像；每个测试使用独立订单和 eventId，并在 setup 清理四张业务表、恢复库存、同步 purge 五个队列。同步 purge 必须在下一次发布前完成，否则旧消息会污染断言；单元测试则不启动 Spring，使用 mock 和固定 Clock 快速覆盖边界。
+
+**代码证据：** `SharedContainers`、各集成测试的 `@BeforeEach`、`RabbitAdmin.purgeQueue(queue, false)`；`OrderSchemaIT.purgeQueuesCompletesBeforeTheNextMessageIsPublished`、`ReliableMessagingFlowIT` 和 `OutboxDispatcherTest`。
+
 ## 技术取舍速记
 
 | 选择                       | 收益                              | 代价                                  |
