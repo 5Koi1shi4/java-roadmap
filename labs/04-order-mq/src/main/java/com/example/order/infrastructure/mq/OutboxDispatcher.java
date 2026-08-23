@@ -41,11 +41,11 @@ public class OutboxDispatcher {
         for (OutboxEvent event : events) {
             try {
                 publisher.publish(event);
-                repository.markPublished(event.eventId(), now);
+                repository.markPublished(event.eventId(), event.claimToken(), now);
             } catch (AmqpException exception) {
-                repository.releaseForRetry(event.eventId(), "AMQP", message(exception));
+                repository.releaseForRetry(event.eventId(), event.claimToken(), "AMQP", message(exception));
             } catch (RuntimeException exception) {
-                repository.releaseForRetry(event.eventId(), "PUBLISH", message(exception));
+                repository.releaseForRetry(event.eventId(), event.claimToken(), "PUBLISH", message(exception));
             }
         }
     }

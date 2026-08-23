@@ -42,9 +42,9 @@ class OutboxDispatcherTest {
 
         verify(repository).claimPublishable(NOW, NOW.plusSeconds(30), 50);
         verify(publisher).publish(first);
-        verify(repository).markPublished(first.eventId(), NOW);
+        verify(repository).markPublished(first.eventId(), first.claimToken(), NOW);
         verify(publisher).publish(second);
-        verify(repository).markPublished(second.eventId(), NOW);
+        verify(repository).markPublished(second.eventId(), second.claimToken(), NOW);
         verifyNoMoreInteractions(repository, publisher);
     }
 
@@ -59,7 +59,7 @@ class OutboxDispatcherTest {
         new OutboxDispatcher(repository, publisher,
                 Clock.fixed(NOW, ZoneOffset.UTC), Duration.ofSeconds(30)).dispatchOnce();
 
-        verify(repository).releaseForRetry(eq(event.eventId()), eq("AMQP"), eq("publisher nack"));
+        verify(repository).releaseForRetry(eq(event.eventId()), eq(event.claimToken()), eq("AMQP"), eq("publisher nack"));
     }
 
     @Test
@@ -73,7 +73,7 @@ class OutboxDispatcherTest {
         new OutboxDispatcher(repository, publisher,
                 Clock.fixed(NOW, ZoneOffset.UTC), Duration.ofSeconds(30)).dispatchOnce();
 
-        verify(repository).releaseForRetry(eq(event.eventId()), eq("PUBLISH"), eq("connection closed"));
+        verify(repository).releaseForRetry(eq(event.eventId()), eq(event.claimToken()), eq("PUBLISH"), eq("connection closed"));
     }
 
     @Test
@@ -100,6 +100,6 @@ class OutboxDispatcherTest {
     }
 
     private OutboxEvent event() {
-        return new OutboxEvent(UUID.randomUUID(), "ORDER", 1L, "ORDER_TIMEOUT", "{}", NOW);
+        return new OutboxEvent(UUID.randomUUID(), UUID.randomUUID(), "ORDER", 1L, "ORDER_TIMEOUT", "{}", NOW);
     }
 }

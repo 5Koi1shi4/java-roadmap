@@ -72,6 +72,42 @@ class OutboxLeaseIT {
     }
 
     @Test
+    void lateAckFromPreviousOwnerCannotCompleteNewLease() {
+        UUID eventId = UUID.randomUUID();
+        Instant now = Instant.parse("2026-08-23T00:00:00Z");
+        repository.insertOutbox(eventId, "NEW");
+        assertThat(repository.claim(eventId, now, now.plusSeconds(30))).isTrue();
+        UUID firstToken = repository.claimToken(eventId);
+
+        repository.forcePublishing(eventId, now.minusSeconds(1));
+        assertThat(repository.claim(eventId, now, now.plusSeconds(30))).isTrue();
+        UUID secondToken = repository.claimToken(eventId);
+
+        assertThat(repository.markPublished(eventId, firstToken, now)).isZero();
+        assertThat(status(eventId)).isEqualTo("PUBLISHING");
+        assertThat(repository.markPublished(eventId, secondToken, now)).isEqualTo(1);
+        assertThat(status(eventId)).isEqualTo("PUBLISHED");
+    }
+
+    @Test
+    void lateNackFromPreviousOwnerCannotReleaseNewLease() {
+        UUID eventId = UUID.randomUUID();
+        Instant now = Instant.parse("2026-08-23T00:00:00Z");
+        repository.insertOutbox(eventId, "NEW");
+        assertThat(repository.claim(eventId, now, now.plusSeconds(30))).isTrue();
+        UUID firstToken = repository.claimToken(eventId);
+
+        repository.forcePublishing(eventId, now.minusSeconds(1));
+        assertThat(repository.claim(eventId, now, now.plusSeconds(30))).isTrue();
+        UUID secondToken = repository.claimToken(eventId);
+
+        assertThat(repository.releaseForRetry(eventId, firstToken, "AMQP", "late nack")).isZero();
+        assertThat(status(eventId)).isEqualTo("PUBLISHING");
+        assertThat(repository.releaseForRetry(eventId, secondToken, "AMQP", "current nack")).isEqualTo(1);
+        assertThat(status(eventId)).isEqualTo("NEW");
+    }
+
+    @Test
     void eachDispatchClaimsNoMoreThanFiftyRows() {
         for (int i = 0; i < 51; i++) {
             repository.insertOutbox(UUID.randomUUID(), "NEW");

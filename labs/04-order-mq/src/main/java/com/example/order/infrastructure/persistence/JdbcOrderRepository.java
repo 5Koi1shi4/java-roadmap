@@ -129,11 +129,12 @@ public class JdbcOrderRepository {
                 (rs, rowNum) -> rs.getLong("id"), Timestamp.from(now), limit);
         List<com.example.order.infrastructure.mq.OutboxEvent> claimed = new ArrayList<>();
         for (Long id : candidates) {
+            UUID claimToken = UUID.randomUUID();
             int updated = jdbcTemplate.update(
-                    "UPDATE outbox_event SET status = 'PUBLISHING', lease_until = ?, "
+                    "UPDATE outbox_event SET status = 'PUBLISHING', lease_until = ?, claim_token = ?, "
                             + "publish_attempts = publish_attempts + 1 "
                             + "WHERE id = ? AND (status = 'NEW' OR (status = 'PUBLISHING' AND lease_until < ?))",
-                    Timestamp.from(leaseUntil), id, Timestamp.from(now));
+                    Timestamp.from(leaseUntil), claimToken.toString(), id, Timestamp.from(now));
             if (updated == 1) {
                 claimed.add(findOutboxEvent(id));
             }
@@ -142,27 +143,35 @@ public class JdbcOrderRepository {
     }
 
     public boolean claim(UUID eventId, Instant now, Instant leaseUntil) {
+        UUID claimToken = UUID.randomUUID();
         return jdbcTemplate.update(
-                "UPDATE outbox_event SET status = 'PUBLISHING', lease_until = ?, "
+                "UPDATE outbox_event SET status = 'PUBLISHING', lease_until = ?, claim_token = ?, "
                         + "publish_attempts = publish_attempts + 1 "
                         + "WHERE event_id = ? AND (status = 'NEW' OR (status = 'PUBLISHING' AND lease_until < ?))",
-                Timestamp.from(leaseUntil), eventId.toString(), Timestamp.from(now)) == 1;
+                Timestamp.from(leaseUntil), claimToken.toString(), eventId.toString(), Timestamp.from(now)) == 1;
     }
 
-    public int markPublished(UUID eventId, Instant publishedAt) {
+    public UUID claimToken(UUID eventId) {
+        String token = jdbcTemplate.query("SELECT claim_token FROM outbox_event WHERE event_id = ?",
+                        (rs, rowNum) -> rs.getString("claim_token"), eventId.toString())
+                .stream().findFirst().orElse(null);
+        return token == null ? null : UUID.fromString(token);
+    }
+
+    public int markPublished(UUID eventId, UUID claimToken, Instant publishedAt) {
         return jdbcTemplate.update(
                 "UPDATE outbox_event SET status = 'PUBLISHED', published_at = ?, "
-                        + "lease_until = NULL, last_error = NULL "
-                        + "WHERE event_id = ? AND status = 'PUBLISHING'",
-                Timestamp.from(publishedAt), eventId.toString());
+                        + "lease_until = NULL, claim_token = NULL, last_error = NULL "
+                        + "WHERE event_id = ? AND status = 'PUBLISHING' AND claim_token = ?",
+                Timestamp.from(publishedAt), eventId.toString(), claimToken.toString());
     }
 
-    public int releaseForRetry(UUID eventId, String category, String message) {
+    public int releaseForRetry(UUID eventId, UUID claimToken, String category, String message) {
         String error = "[" + category + "] " + message;
         return jdbcTemplate.update(
-                "UPDATE outbox_event SET status = 'NEW', lease_until = NULL, last_error = ? "
-                        + "WHERE event_id = ? AND status = 'PUBLISHING'",
-                error, eventId.toString());
+                "UPDATE outbox_event SET status = 'NEW', lease_until = NULL, claim_token = NULL, last_error = ? "
+                        + "WHERE event_id = ? AND status = 'PUBLISHING' AND claim_token = ?",
+                error, eventId.toString(), claimToken.toString());
     }
 
     /** Small database fixture helpers used by lease integration tests. */
@@ -182,10 +191,11 @@ public class JdbcOrderRepository {
 
     private com.example.order.infrastructure.mq.OutboxEvent findOutboxEvent(long id) {
         return jdbcTemplate.queryForObject(
-                "SELECT event_id, aggregate_type, aggregate_id, event_type, payload, created_at "
+                "SELECT event_id, claim_token, aggregate_type, aggregate_id, event_type, payload, created_at "
                         + "FROM outbox_event WHERE id = ?",
                 (rs, rowNum) -> new com.example.order.infrastructure.mq.OutboxEvent(
                         UUID.fromString(rs.getString("event_id")),
+                        UUID.fromString(rs.getString("claim_token")),
                         rs.getString("aggregate_type"),
                         rs.getLong("aggregate_id"),
                         rs.getString("event_type"),
