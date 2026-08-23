@@ -11,6 +11,7 @@ import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.retry.MessageRecoverer;
 import org.springframework.amqp.AmqpException;
+import org.springframework.amqp.ImmediateRequeueAmqpException;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -133,6 +134,8 @@ public class RabbitTopologyConfiguration {
         return (message, failure) -> {
             MessageProperties properties = new MessageProperties();
             Map<String, Object> headers = new HashMap<>(message.getMessageProperties().getHeaders());
+            int inboundRetryCount = retryCountHeader(headers);
+            Object exhausted = headers.get("x-retry-exhausted");
             headers.remove("x-retry-count");
             headers.remove("retry-count");
             properties.setHeaders(headers);
@@ -143,18 +146,26 @@ public class RabbitTopologyConfiguration {
             properties.setHeader("failure-message", failureMessage);
             int attempts = RetrySynchronizationManager.getContext() == null
                     ? 1 : RetrySynchronizationManager.getContext().getRetryCount() + 1;
+            if (Boolean.TRUE.equals(exhausted) || "true".equalsIgnoreCase(String.valueOf(exhausted))) {
+                attempts = Math.max(attempts, inboundRetryCount);
+            }
             properties.setHeader("x-retry-count", attempts);
             UUID eventId = eventId(message, objectMapper);
+            Message outbound = new Message(message.getBody(), properties);
+            Boolean confirmed;
+            try {
+                confirmed = rabbitTemplate.invoke(operations -> {
+                    operations.send("", MANUAL_QUEUE, outbound);
+                    return operations.waitForConfirms(10_000L);
+                });
+            } catch (RuntimeException exception) {
+                throw new ImmediateRequeueAmqpException("manual queue publish failed", exception);
+            }
+            if (!Boolean.TRUE.equals(confirmed)) {
+                throw new ImmediateRequeueAmqpException("manual queue publisher confirm nack");
+            }
             if (eventId != null) {
                 repository.recordConsumptionFailure(eventId, category.name(), failureMessage, Instant.now());
-            }
-            Message outbound = new Message(message.getBody(), properties);
-            Boolean confirmed = rabbitTemplate.invoke(operations -> {
-                operations.send("", MANUAL_QUEUE, outbound);
-                return operations.waitForConfirms(10_000L);
-            });
-            if (!Boolean.TRUE.equals(confirmed)) {
-                throw new AmqpException("manual queue publisher confirm nack");
             }
         };
     }
@@ -184,6 +195,18 @@ public class RabbitTopologyConfiguration {
             return value == null ? null : UUID.fromString(value.asText());
         } catch (Exception ignored) {
             return null;
+        }
+    }
+
+    private static int retryCountHeader(Map<String, Object> headers) {
+        Object value = headers.get("x-retry-count");
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        try {
+            return value == null ? 1 : Integer.parseInt(value.toString());
+        } catch (NumberFormatException ignored) {
+            return 1;
         }
     }
 

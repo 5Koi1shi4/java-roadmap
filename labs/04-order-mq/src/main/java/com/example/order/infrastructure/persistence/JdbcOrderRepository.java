@@ -207,6 +207,9 @@ public class JdbcOrderRepository {
         if ("COMPLETED".equals(existing.status())) {
             return ConsumptionClaim.completed();
         }
+        if ("FAILED".equals(existing.status())) {
+            return ConsumptionClaim.failed();
+        }
         if (!"PROCESSING".equals(existing.status())
                 || existing.leaseUntil() == null
                 || !existing.leaseUntil().isBefore(now)) {
@@ -238,14 +241,17 @@ public class JdbcOrderRepository {
                 "INSERT INTO consumed_message "
                         + "(event_id, status, failure_category, last_error, completed_at) "
                         + "VALUES (?, 'FAILED', ?, ?, ?) "
-                        + "ON DUPLICATE KEY UPDATE status = 'FAILED', lease_until = NULL, claim_token = NULL, "
-                        + "failure_category = VALUES(failure_category), last_error = VALUES(last_error), "
-                        + "completed_at = VALUES(completed_at)",
+                        + "ON DUPLICATE KEY UPDATE status = IF(status = 'COMPLETED', 'COMPLETED', 'FAILED'), "
+                        + "lease_until = IF(status = 'COMPLETED', lease_until, NULL), "
+                        + "claim_token = IF(status = 'COMPLETED', claim_token, NULL), "
+                        + "failure_category = IF(status = 'COMPLETED', failure_category, VALUES(failure_category)), "
+                        + "last_error = IF(status = 'COMPLETED', last_error, VALUES(last_error)), "
+                        + "completed_at = IF(status = 'COMPLETED', completed_at, VALUES(completed_at))",
                 eventId.toString(), category, message, Timestamp.from(failedAt));
     }
 
     public record ConsumptionClaim(State state, UUID claimToken) {
-        public enum State { PROCESSING, COMPLETED, IN_PROGRESS }
+        public enum State { PROCESSING, COMPLETED, FAILED, IN_PROGRESS }
 
         static ConsumptionClaim processing(UUID token) {
             return new ConsumptionClaim(State.PROCESSING, token);
@@ -253,6 +259,10 @@ public class JdbcOrderRepository {
 
         static ConsumptionClaim completed() {
             return new ConsumptionClaim(State.COMPLETED, null);
+        }
+
+        static ConsumptionClaim failed() {
+            return new ConsumptionClaim(State.FAILED, null);
         }
 
         static ConsumptionClaim inProgress() {
@@ -265,6 +275,10 @@ public class JdbcOrderRepository {
 
         public boolean isCompleted() {
             return state == State.COMPLETED;
+        }
+
+        public boolean isTerminal() {
+            return state == State.COMPLETED || state == State.FAILED;
         }
     }
 

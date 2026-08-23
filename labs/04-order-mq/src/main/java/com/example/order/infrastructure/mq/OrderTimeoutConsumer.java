@@ -59,7 +59,8 @@ public class OrderTimeoutConsumer {
             OrderTimeoutEvent event = objectMapper.readValue(message.getBody(), OrderTimeoutEvent.class);
             message.getMessageProperties().setHeader("event-id", event.eventId().toString());
             int retryCount = retryCount(message);
-            if (retryCount < 0 || retryCount > 3) {
+            if (retryCount < 0 || retryCount >= 3) {
+                message.getMessageProperties().setHeader("x-retry-exhausted", true);
                 throw new NonRetryableMessageException("retry count exceeds maximum of 3");
             }
             handle(event);
@@ -80,7 +81,7 @@ public class OrderTimeoutConsumer {
         } catch (RuntimeException exception) {
             throw classified(exception);
         }
-        if (claim.isCompleted()) {
+        if (claim.isTerminal()) {
             return;
         }
         if (!claim.isProcessing()) {

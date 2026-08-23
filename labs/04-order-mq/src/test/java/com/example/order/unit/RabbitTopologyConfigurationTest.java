@@ -2,6 +2,7 @@ package com.example.order.unit;
 
 import com.example.order.infrastructure.mq.FailureClassifier;
 import com.example.order.infrastructure.mq.OrderTimeoutConsumer;
+import com.example.order.infrastructure.mq.NonRetryableMessageException;
 import com.example.order.infrastructure.mq.RabbitTopologyConfiguration;
 import com.example.order.application.OrderService;
 import com.example.order.infrastructure.persistence.JdbcOrderRepository;
@@ -16,6 +17,7 @@ import org.springframework.amqp.rabbit.core.RabbitOperations;
 import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFactory;
 import org.springframework.amqp.rabbit.retry.MessageRecoverer;
 import org.springframework.amqp.AmqpException;
+import org.springframework.amqp.ImmediateRequeueAmqpException;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -31,6 +33,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.never;
 import java.util.concurrent.atomic.AtomicReference;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -75,9 +79,10 @@ class RabbitTopologyConfigurationTest {
                 template, new FailureClassifier(), repository, new ObjectMapper());
 
         assertThatThrownBy(() -> recoverer.recover(message, new RuntimeException("bad json")))
-                .isInstanceOf(AmqpException.class)
+                .isInstanceOf(ImmediateRequeueAmqpException.class)
                 .hasMessageContaining("publisher confirm");
         verify(template).invoke(any());
+        verify(repository, never()).recordConsumptionFailure(any(), any(), any(), any());
     }
 
     @Test
@@ -110,6 +115,33 @@ class RabbitTopologyConfigurationTest {
         } finally {
             RetrySynchronizationManager.clear();
         }
+
+        assertThat(sent.get().getMessageProperties().getHeaders().get("x-retry-count")).isEqualTo(3);
+    }
+
+    @Test
+    void exhaustedInboundHeaderIsRetainedAtLeastThree() {
+        RabbitTemplate template = mock(RabbitTemplate.class);
+        RabbitOperations operations = mock(RabbitOperations.class);
+        AtomicReference<Message> sent = new AtomicReference<>();
+        doAnswer(invocation -> {
+            sent.set(invocation.getArgument(2));
+            return null;
+        }).when(operations).send(any(String.class), any(String.class), any(Message.class));
+        when(operations.waitForConfirms(10_000L)).thenReturn(true);
+        when(template.invoke(any())).thenAnswer(invocation -> {
+            RabbitOperations.OperationsCallback<Boolean> callback = invocation.getArgument(0);
+            return callback.doInRabbit(operations);
+        });
+        Message incoming = new Message(
+                "{\"eventId\":\"00000000-0000-0000-0000-000000000001\"}".getBytes(),
+                new MessageProperties());
+        incoming.getMessageProperties().setHeader("x-retry-count", 3);
+        incoming.getMessageProperties().setHeader("x-retry-exhausted", true);
+
+        new RabbitTopologyConfiguration().timeoutMessageRecoverer(
+                template, new FailureClassifier(), mock(JdbcOrderRepository.class), new ObjectMapper())
+                .recover(incoming, new NonRetryableMessageException("bad"));
 
         assertThat(sent.get().getMessageProperties().getHeaders().get("x-retry-count")).isEqualTo(3);
     }
