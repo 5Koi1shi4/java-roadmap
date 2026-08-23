@@ -142,6 +142,53 @@ class RabbitTopologyConfigurationTest {
     }
 
     @Test
+    void databaseFailureFallsBackToConfirmedManualPublish() {
+        RabbitTemplate template = mock(RabbitTemplate.class);
+        JdbcOrderRepository repository = mock(JdbcOrderRepository.class);
+        when(repository.insertManualFailure(any(), any(), any(), any(), any(Integer.class), any()))
+                .thenThrow(new RuntimeException("database unavailable"));
+        when(template.invoke(any())).thenReturn(true);
+        Message message = new Message("{broken-json".getBytes(), new MessageProperties());
+
+        new RabbitTopologyConfiguration().timeoutMessageRecoverer(
+                template, new FailureClassifier(), repository, new ObjectMapper())
+                .recover(message, new RuntimeException("bad json"));
+
+        verify(template).invoke(any());
+    }
+
+    @Test
+    void databaseFailureAndManualPublishFailureRequestsImmediateRequeue() {
+        RabbitTemplate template = mock(RabbitTemplate.class);
+        JdbcOrderRepository repository = mock(JdbcOrderRepository.class);
+        when(repository.insertManualFailure(any(), any(), any(), any(), any(Integer.class), any()))
+                .thenThrow(new RuntimeException("database unavailable"));
+        when(template.invoke(any())).thenThrow(new RuntimeException("broker unavailable"));
+        Message message = new Message("{broken-json".getBytes(), new MessageProperties());
+
+        assertThatThrownBy(() -> new RabbitTopologyConfiguration().timeoutMessageRecoverer(
+                template, new FailureClassifier(), repository, new ObjectMapper())
+                .recover(message, new RuntimeException("bad json")))
+                .isInstanceOf(org.springframework.amqp.ImmediateRequeueAmqpException.class);
+    }
+
+    @Test
+    void databaseSuccessAndManualPublishFailureLeavesPendingWithoutRequeue() {
+        RabbitTemplate template = mock(RabbitTemplate.class);
+        JdbcOrderRepository repository = mock(JdbcOrderRepository.class);
+        when(repository.insertManualFailure(any(), any(), any(), any(), any(Integer.class), any()))
+                .thenReturn(42L);
+        when(template.invoke(any())).thenReturn(false);
+        Message message = new Message("{broken-json".getBytes(), new MessageProperties());
+
+        assertThatThrownBy(() -> new RabbitTopologyConfiguration().timeoutMessageRecoverer(
+                template, new FailureClassifier(), repository, new ObjectMapper())
+                .recover(message, new RuntimeException("bad json")))
+                .isInstanceOf(AmqpRejectAndDontRequeueException.class);
+        verify(repository, never()).markManualDelivered(any(Long.class), any());
+    }
+
+    @Test
     void exhaustedInboundHeaderIsRetainedAtLeastThree() {
         RabbitTemplate template = mock(RabbitTemplate.class);
         RabbitOperations operations = mock(RabbitOperations.class);

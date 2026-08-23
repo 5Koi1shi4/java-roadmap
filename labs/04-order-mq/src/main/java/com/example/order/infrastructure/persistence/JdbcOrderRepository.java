@@ -289,10 +289,49 @@ public class JdbcOrderRepository {
         }
         return jdbcTemplate.query(
                 "SELECT id, event_id, payload, failure_category, last_error, retry_count, attempts, "
-                        + "manual_delivery_status, updated_at FROM manual_failure "
+                        + "manual_delivery_status, claim_token, lease_until, updated_at FROM manual_failure "
                         + "WHERE manual_delivery_status = 'PENDING' AND attempts < 3 "
                         + "ORDER BY id LIMIT ?",
                 (rs, rowNum) -> manualFailure(rs), bounded);
+    }
+
+    /** Atomically claims pending or expired publishing rows and increments attempts. */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public List<ManualFailure> claimManualFailures(Instant now, Instant leaseUntil, int limit) {
+        int bounded = Math.min(Math.max(limit, 0), 50);
+        if (bounded == 0) {
+            return List.of();
+        }
+        // A crashed owner must not leave an already exhausted row in PUBLISHING forever.
+        jdbcTemplate.update(
+                "UPDATE manual_failure SET manual_delivery_status = 'GIVE_UP', "
+                        + "claim_token = NULL, lease_until = NULL, updated_at = ? "
+                        + "WHERE manual_delivery_status = 'PUBLISHING' AND attempts >= 3 AND lease_until < ?",
+                Timestamp.from(now), Timestamp.from(now));
+        List<Long> candidates = jdbcTemplate.query(
+                "SELECT id FROM manual_failure "
+                        + "WHERE attempts < 3 AND (manual_delivery_status = 'PENDING' "
+                        + "OR (manual_delivery_status = 'PUBLISHING' AND lease_until < ?)) "
+                        + "ORDER BY id LIMIT ?",
+                (rs, rowNum) -> rs.getLong("id"), Timestamp.from(now), bounded);
+        List<ManualFailure> claimed = new ArrayList<>();
+        for (Long id : candidates) {
+            UUID claimToken = UUID.randomUUID();
+            int updated = jdbcTemplate.update(
+                    "UPDATE manual_failure SET manual_delivery_status = 'PUBLISHING', "
+                            + "claim_token = ?, lease_until = ?, attempts = attempts + 1, updated_at = ? "
+                            + "WHERE id = ? AND attempts < 3 AND (manual_delivery_status = 'PENDING' "
+                            + "OR (manual_delivery_status = 'PUBLISHING' AND lease_until < ?))",
+                    claimToken.toString(), Timestamp.from(leaseUntil), Timestamp.from(now), id,
+                    Timestamp.from(now));
+            if (updated == 1) {
+                ManualFailure failure = manualFailure(id, claimToken);
+                if (failure != null) {
+                    claimed.add(failure);
+                }
+            }
+        }
+        return claimed;
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -302,6 +341,44 @@ public class JdbcOrderRepository {
                         + "WHERE id = ? AND manual_delivery_status = 'PENDING' AND attempts < 3",
                 Timestamp.from(now), id);
         return manualFailure(id);
+    }
+
+    /** Fenced success transition; a late owner cannot update a reclaimed row. */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public int markManualDelivered(long id, UUID claimToken, Instant now) {
+        return jdbcTemplate.update(
+                "UPDATE manual_failure SET manual_delivery_status = 'DELIVERED', "
+                        + "lease_until = NULL, claim_token = NULL, updated_at = ? "
+                        + "WHERE id = ? AND manual_delivery_status = 'PUBLISHING' AND claim_token = ?",
+                Timestamp.from(now), id, claimToken.toString());
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public int markManualDelivered(UUID eventId, UUID claimToken, Instant now) {
+        return jdbcTemplate.update(
+                "UPDATE manual_failure SET manual_delivery_status = 'DELIVERED', "
+                        + "lease_until = NULL, claim_token = NULL, updated_at = ? "
+                        + "WHERE event_id = ? AND manual_delivery_status = 'PUBLISHING' AND claim_token = ?",
+                Timestamp.from(now), eventId.toString(), claimToken.toString());
+    }
+
+    /** Fenced failure transition; the third claimed attempt is terminal. */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public int markManualPublishFailure(long id, UUID claimToken, Instant now) {
+        return jdbcTemplate.update(
+                "UPDATE manual_failure SET manual_delivery_status = "
+                        + "IF(attempts >= 3, 'GIVE_UP', 'PENDING'), lease_until = NULL, claim_token = NULL, updated_at = ? "
+                        + "WHERE id = ? AND manual_delivery_status = 'PUBLISHING' AND claim_token = ?",
+                Timestamp.from(now), id, claimToken.toString());
+    }
+
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public int markManualPublishFailure(UUID eventId, UUID claimToken, Instant now) {
+        return jdbcTemplate.update(
+                "UPDATE manual_failure SET manual_delivery_status = "
+                        + "IF(attempts >= 3, 'GIVE_UP', 'PENDING'), lease_until = NULL, claim_token = NULL, updated_at = ? "
+                        + "WHERE event_id = ? AND manual_delivery_status = 'PUBLISHING' AND claim_token = ?",
+                Timestamp.from(now), eventId.toString(), claimToken.toString());
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -323,26 +400,47 @@ public class JdbcOrderRepository {
     private ManualFailure manualFailure(long id) {
         return jdbcTemplate.query(
                         "SELECT id, event_id, payload, failure_category, last_error, retry_count, attempts, "
-                                + "manual_delivery_status, updated_at FROM manual_failure WHERE id = ?",
+                                + "manual_delivery_status, claim_token, lease_until, updated_at FROM manual_failure WHERE id = ?",
                         (rs, rowNum) -> manualFailure(rs), id)
+                .stream().findFirst().orElse(null);
+    }
+
+    private ManualFailure manualFailure(long id, UUID claimToken) {
+        return jdbcTemplate.query(
+                        "SELECT id, event_id, payload, failure_category, last_error, retry_count, attempts, "
+                                + "manual_delivery_status, claim_token, lease_until, updated_at "
+                                + "FROM manual_failure WHERE id = ? AND claim_token = ?",
+                        (rs, rowNum) -> manualFailure(rs), id, claimToken.toString())
                 .stream().findFirst().orElse(null);
     }
 
     private ManualFailure manualFailure(java.sql.ResultSet rs) throws java.sql.SQLException {
         String eventId = rs.getString("event_id");
+        String claimToken = rs.getString("claim_token");
+        Timestamp lease = rs.getTimestamp("lease_until");
         return new ManualFailure(
                 rs.getLong("id"), eventId == null ? null : UUID.fromString(eventId),
                 rs.getString("payload"), rs.getString("failure_category"), rs.getString("last_error"),
                 rs.getInt("retry_count"), rs.getInt("attempts"),
                 ManualDeliveryStatus.valueOf(rs.getString("manual_delivery_status")),
+                claimToken == null ? null : UUID.fromString(claimToken),
+                lease == null ? null : lease.toInstant(),
                 rs.getTimestamp("updated_at").toInstant());
     }
 
-    public enum ManualDeliveryStatus { PENDING, DELIVERED, GIVE_UP }
+    public enum ManualDeliveryStatus { PENDING, PUBLISHING, DELIVERED, GIVE_UP }
 
     public record ManualFailure(long id, UUID eventId, String payload, String category,
                                 String message, int retryCount, int attempts,
-                                ManualDeliveryStatus status, Instant updatedAt) {
+                                ManualDeliveryStatus status, UUID claimToken,
+                                Instant leaseUntil, Instant updatedAt) {
+        /** Compatibility constructor for callers that create an unclaimed pending row. */
+        public ManualFailure(long id, UUID eventId, String payload, String category,
+                             String message, int retryCount, int attempts,
+                             ManualDeliveryStatus status, Instant updatedAt) {
+            this(id, eventId, payload, category, message, retryCount, attempts,
+                    status, null, null, updatedAt);
+        }
     }
 
     public record ConsumptionClaim(State state, UUID claimToken) {

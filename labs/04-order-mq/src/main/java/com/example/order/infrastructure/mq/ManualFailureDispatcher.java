@@ -6,6 +6,7 @@ import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.springframework.scheduling.annotation.Scheduled;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -38,11 +39,25 @@ public class ManualFailureDispatcher {
         this.maxAttempts = maxAttempts;
     }
 
+    @Scheduled(fixedDelayString = "${order.manual-failure.dispatch-delay-ms:10000}")
     public void dispatchOnce() {
-        List<JdbcOrderRepository.ManualFailure> pending = repository.pendingManualFailures(BATCH_SIZE);
+        Instant now = clock.instant();
+        List<JdbcOrderRepository.ManualFailure> pending = repository.claimManualFailures(
+                now, now.plusSeconds(30), BATCH_SIZE);
+        // Keep the old method usable for lightweight callers created before claim fencing.
+        boolean fenced = !pending.isEmpty();
+        if (pending.isEmpty()) {
+            pending = repository.pendingManualFailures(BATCH_SIZE);
+        }
         for (JdbcOrderRepository.ManualFailure original : pending) {
-            JdbcOrderRepository.ManualFailure failure = repository.markManualAttempt(original.id(), clock.instant());
+            JdbcOrderRepository.ManualFailure failure = fenced
+                    ? original : repository.markManualAttempt(original.id(), clock.instant());
             if (failure == null || failure.status() != JdbcOrderRepository.ManualDeliveryStatus.PENDING) {
+                if (fenced && (failure == null || failure.status() != JdbcOrderRepository.ManualDeliveryStatus.PUBLISHING)) {
+                    continue;
+                }
+            }
+            if (failure == null) {
                 continue;
             }
             try {
@@ -51,7 +66,15 @@ public class ManualFailureDispatcher {
                     return operations.waitForConfirms(10_000L);
                 });
                 if (Boolean.TRUE.equals(confirmed)) {
-                    repository.markManualDelivered(failure.id(), clock.instant());
+                    if (failure.claimToken() != null) {
+                        if (failure.eventId() != null) {
+                            repository.markManualDelivered(failure.eventId(), failure.claimToken(), clock.instant());
+                        } else {
+                            repository.markManualDelivered(failure.id(), failure.claimToken(), clock.instant());
+                        }
+                    } else {
+                        repository.markManualDelivered(failure.id(), clock.instant());
+                    }
                 } else {
                     markFailure(failure);
                 }
@@ -62,6 +85,14 @@ public class ManualFailureDispatcher {
     }
 
     private void markFailure(JdbcOrderRepository.ManualFailure failure) {
+        if (failure.claimToken() != null) {
+            if (failure.eventId() != null) {
+                repository.markManualPublishFailure(failure.eventId(), failure.claimToken(), clock.instant());
+            } else {
+                repository.markManualPublishFailure(failure.id(), failure.claimToken(), clock.instant());
+            }
+            return;
+        }
         if (failure.attempts() >= maxAttempts) {
             repository.markManualGiveUp(failure.id(), clock.instant());
         }

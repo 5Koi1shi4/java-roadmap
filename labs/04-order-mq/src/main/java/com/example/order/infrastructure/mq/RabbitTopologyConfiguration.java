@@ -11,6 +11,7 @@ import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.retry.MessageRecoverer;
 import org.springframework.amqp.AmqpRejectAndDontRequeueException;
+import org.springframework.amqp.ImmediateRequeueAmqpException;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -150,9 +151,16 @@ public class RabbitTopologyConfiguration {
             properties.setHeader("x-retry-count", attempts);
             UUID eventId = eventId(message, objectMapper);
             String payload = new String(message.getBody(), java.nio.charset.StandardCharsets.UTF_8);
-            long failureId = repository.insertManualFailure(
-                    eventId, payload, category.name(), failureMessage, attempts, Instant.now());
             Message outbound = new Message(message.getBody(), properties);
+            long failureId = 0L;
+            RuntimeException databaseFailure = null;
+            try {
+                failureId = repository.insertManualFailure(
+                        eventId, payload, category.name(), failureMessage, attempts, Instant.now());
+            } catch (RuntimeException exception) {
+                // The database is the preferred durable copy, but it is not the only safe path.
+                databaseFailure = exception;
+            }
             Boolean confirmed;
             try {
                 confirmed = rabbitTemplate.invoke(operations -> {
@@ -160,10 +168,21 @@ public class RabbitTopologyConfiguration {
                     return operations.waitForConfirms(10_000L);
                 });
             } catch (RuntimeException exception) {
+                if (databaseFailure != null) {
+                    throw new ImmediateRequeueAmqpException(
+                            "manual queue and durable fallback unavailable", exception);
+                }
                 throw new AmqpRejectAndDontRequeueException("manual queue publish failed", exception);
             }
             if (!Boolean.TRUE.equals(confirmed)) {
+                if (databaseFailure != null) {
+                    throw new ImmediateRequeueAmqpException(
+                            "manual queue confirm failed and durable fallback unavailable");
+                }
                 throw new AmqpRejectAndDontRequeueException("manual queue publisher confirm nack");
+            }
+            if (databaseFailure != null) {
+                return;
             }
             repository.markManualDelivered(failureId, Instant.now());
             if (eventId != null) {
