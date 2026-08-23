@@ -81,9 +81,8 @@ class ReliableMessagingFlowIT {
         dispatcher.dispatchOnce();
 
         Awaitility.await().atMost(Duration.ofSeconds(25)).untilAsserted(() ->
-                assertThat(jdbcTemplate.queryForObject(
-                        "SELECT status FROM consumed_message WHERE event_id = ?",
-                        String.class, eventIdFor(orderId))).isEqualTo("COMPLETED"));
+                assertThat(consumedMessageCount(eventIdFor(orderId))).isEqualTo(1));
+        assertThat(consumedMessageStatus(eventIdFor(orderId))).isEqualTo("COMPLETED");
         assertThat(statusOf(orderId)).isEqualTo("PAID");
         assertThat(stock()).isEqualTo(9);
     }
@@ -153,5 +152,15 @@ class ReliableMessagingFlowIT {
     private int stock() {
         return jdbcTemplate.queryForObject(
                 "SELECT available FROM order_stock WHERE product_id = 1", Integer.class);
+    }
+
+    private int consumedMessageCount(String eventId) {
+        return jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM consumed_message WHERE event_id = ?", Integer.class, eventId);
+    }
+
+    private String consumedMessageStatus(String eventId) {
+        return jdbcTemplate.queryForObject(
+                "SELECT status FROM consumed_message WHERE event_id = ?", String.class, eventId);
     }
 }

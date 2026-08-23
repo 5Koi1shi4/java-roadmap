@@ -161,7 +161,7 @@ public class RabbitTopologyConfiguration {
             properties.setHeader("failure-category", category.name());
             properties.setHeader("failure-message", failureMessage);
             int attempts = RetrySynchronizationManager.getContext() == null
-                    ? 1 : RetrySynchronizationManager.getContext().getRetryCount() + 1;
+                    ? 1 : Math.max(1, RetrySynchronizationManager.getContext().getRetryCount());
             if (Boolean.TRUE.equals(exhausted) || "true".equalsIgnoreCase(String.valueOf(exhausted))) {
                 attempts = Math.max(attempts, inboundRetryCount);
             }

@@ -58,7 +58,7 @@ final class SharedContainers {
         };
         for (String queue : queues) {
             if (rabbitAdmin.getQueueProperties(queue) != null) {
-                rabbitAdmin.purgeQueue(queue, true);
+                rabbitAdmin.purgeQueue(queue, false);
             }
         }
     }

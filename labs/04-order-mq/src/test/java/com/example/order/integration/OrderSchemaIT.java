@@ -1,11 +1,13 @@
 package com.example.order.integration;
 
+import com.example.order.infrastructure.mq.RabbitTopologyConfiguration;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -20,6 +22,9 @@ class OrderSchemaIT {
 
     @Autowired
     RabbitAdmin rabbitAdmin;
+
+    @Autowired
+    RabbitTemplate rabbitTemplate;
 
     @DynamicPropertySource
     static void mysqlProperties(DynamicPropertyRegistry registry) {
@@ -40,6 +45,15 @@ class OrderSchemaIT {
         assertThat(countTable("consumed_message")).isEqualTo(1);
         assertThat(countIndex("outbox_event", "uk_outbox_event_id")).isEqualTo(1);
         assertThat(countIndex("consumed_message", "uk_consumed_message_event_id")).isEqualTo(1);
+    }
+
+    @Test
+    void purgeQueuesCompletesBeforeTheNextMessageIsPublished() {
+        rabbitTemplate.convertAndSend("", RabbitTopologyConfiguration.MANUAL_QUEUE, "stale");
+
+        SharedContainers.purgeQueues(rabbitAdmin);
+
+        assertThat(rabbitTemplate.receive(RabbitTopologyConfiguration.MANUAL_QUEUE, 1_000L)).isNull();
     }
 
     private int countTable(String tableName) {

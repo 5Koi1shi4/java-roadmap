@@ -4,6 +4,7 @@ import com.example.order.infrastructure.mq.FailureClassifier;
 import com.example.order.infrastructure.mq.OrderTimeoutConsumer;
 import com.example.order.infrastructure.mq.NonRetryableMessageException;
 import com.example.order.infrastructure.mq.RabbitTopologyConfiguration;
+import com.example.order.infrastructure.mq.RetryableMessageException;
 import com.example.order.application.OrderService;
 import com.example.order.infrastructure.persistence.JdbcOrderRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -23,6 +24,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 import org.springframework.retry.context.RetryContextSupport;
+import org.springframework.retry.policy.SimpleRetryPolicy;
+import org.springframework.retry.support.RetryTemplate;
 import org.springframework.retry.support.RetrySynchronizationManager;
 
 import java.lang.reflect.Method;
@@ -154,12 +157,47 @@ class RabbitTopologyConfigurationTest {
         RetryContextSupport context = new RetryContextSupport(null);
         context.registerThrowable(new RuntimeException("attempt 1"));
         context.registerThrowable(new RuntimeException("attempt 2"));
+        context.registerThrowable(new RuntimeException("attempt 3"));
         RetrySynchronizationManager.register(context);
         try {
             recoverer.recover(incoming, new com.example.order.infrastructure.mq.RetryableMessageException("down"));
         } finally {
             RetrySynchronizationManager.clear();
         }
+
+        assertThat(sent.get().getMessageProperties().getHeaders().get("x-retry-count")).isEqualTo(3);
+    }
+
+    @Test
+    void manualRecoveryUsesOneAttemptForNonRetryableSpringRetryFailure() {
+        AtomicReference<Message> sent = new AtomicReference<>();
+        RabbitTemplate template = confirmedTemplate(sent);
+        MessageRecoverer recoverer = new RabbitTopologyConfiguration().timeoutMessageRecoverer(
+                template, new FailureClassifier(), mock(JdbcOrderRepository.class), new ObjectMapper());
+
+        retryTemplate().execute(context -> {
+            throw new NonRetryableMessageException("bad json");
+        }, context -> {
+            recoverer.recover(invalidMessage(), context.getLastThrowable());
+            return null;
+        });
+
+        assertThat(sent.get().getMessageProperties().getHeaders().get("x-retry-count")).isEqualTo(1);
+    }
+
+    @Test
+    void manualRecoveryUsesThreeAttemptsAfterRetryableSpringRetryFailures() {
+        AtomicReference<Message> sent = new AtomicReference<>();
+        RabbitTemplate template = confirmedTemplate(sent);
+        MessageRecoverer recoverer = new RabbitTopologyConfiguration().timeoutMessageRecoverer(
+                template, new FailureClassifier(), mock(JdbcOrderRepository.class), new ObjectMapper());
+
+        retryTemplate().execute(context -> {
+            throw new RetryableMessageException("broker down");
+        }, context -> {
+            recoverer.recover(invalidMessage(), context.getLastThrowable());
+            return null;
+        });
 
         assertThat(sent.get().getMessageProperties().getHeaders().get("x-retry-count")).isEqualTo(3);
     }
@@ -236,6 +274,32 @@ class RabbitTopologyConfigurationTest {
                 .recover(incoming, new NonRetryableMessageException("bad"));
 
         assertThat(sent.get().getMessageProperties().getHeaders().get("x-retry-count")).isEqualTo(3);
+    }
+
+    private RetryTemplate retryTemplate() {
+        RetryTemplate template = new RetryTemplate();
+        template.setRetryPolicy(new SimpleRetryPolicy(
+                3, java.util.Map.of(RetryableMessageException.class, true), true));
+        return template;
+    }
+
+    private RabbitTemplate confirmedTemplate(AtomicReference<Message> sent) {
+        RabbitTemplate template = mock(RabbitTemplate.class);
+        RabbitOperations operations = mock(RabbitOperations.class);
+        doAnswer(invocation -> {
+            sent.set(invocation.getArgument(2));
+            return null;
+        }).when(operations).send(any(String.class), any(String.class), any(Message.class));
+        when(operations.waitForConfirms(10_000L)).thenReturn(true);
+        when(template.invoke(any())).thenAnswer(invocation -> {
+            RabbitOperations.OperationsCallback<Boolean> callback = invocation.getArgument(0);
+            return callback.doInRabbit(operations);
+        });
+        return template;
+    }
+
+    private Message invalidMessage() {
+        return new Message("{broken-json".getBytes(), new MessageProperties());
     }
 
     @Configuration(proxyBeanMethods = false)
