@@ -9,6 +9,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Repository;
 
 import java.sql.PreparedStatement;
@@ -172,6 +173,86 @@ public class JdbcOrderRepository {
                 "UPDATE outbox_event SET status = 'NEW', lease_until = NULL, claim_token = NULL, last_error = ? "
                         + "WHERE event_id = ? AND status = 'PUBLISHING' AND claim_token = ?",
                 error, eventId.toString(), claimToken.toString());
+    }
+
+    /** Claims a consumed event, fencing a previous owner when its lease has expired. */
+    public ConsumptionClaim beginConsumption(UUID eventId, Instant now, Instant leaseUntil) {
+        UUID token = UUID.randomUUID();
+        try {
+            int inserted = jdbcTemplate.update(
+                    "INSERT INTO consumed_message (event_id, status, lease_until, claim_token) "
+                            + "VALUES (?, 'PROCESSING', ?, ?)",
+                    eventId.toString(), Timestamp.from(leaseUntil), token.toString());
+            if (inserted == 1) {
+                return ConsumptionClaim.processing(token);
+            }
+        } catch (DuplicateKeyException ignored) {
+            // A concurrent consumer already owns the unique event id; inspect its state below.
+        }
+
+        ConsumptionRow existing = jdbcTemplate.query(
+                        "SELECT status, lease_until, claim_token FROM consumed_message WHERE event_id = ?",
+                        (rs, rowNum) -> new ConsumptionRow(
+                                rs.getString("status"),
+                                rs.getTimestamp("lease_until") == null
+                                        ? null : rs.getTimestamp("lease_until").toInstant(),
+                                rs.getString("claim_token")),
+                        eventId.toString())
+                .stream().findFirst().orElse(null);
+        if (existing == null) {
+            return beginConsumption(eventId, now, leaseUntil);
+        }
+        if ("COMPLETED".equals(existing.status())) {
+            return ConsumptionClaim.completed();
+        }
+        if (!"PROCESSING".equals(existing.status())
+                || existing.leaseUntil() == null
+                || !existing.leaseUntil().isBefore(now)) {
+            return ConsumptionClaim.inProgress();
+        }
+
+        UUID takeoverToken = UUID.randomUUID();
+        int takenOver = jdbcTemplate.update(
+                "UPDATE consumed_message SET status = 'PROCESSING', lease_until = ?, claim_token = ?, "
+                        + "failure_category = NULL, last_error = NULL, completed_at = NULL "
+                        + "WHERE event_id = ? AND status = 'PROCESSING' AND lease_until < ?",
+                Timestamp.from(leaseUntil), takeoverToken.toString(), eventId.toString(), Timestamp.from(now));
+        return takenOver == 1 ? ConsumptionClaim.processing(takeoverToken) : ConsumptionClaim.inProgress();
+    }
+
+    /** Marks a message complete only when this consumer still owns its fencing token. */
+    public int completeConsumption(UUID eventId, UUID claimToken, Instant completedAt) {
+        return jdbcTemplate.update(
+                "UPDATE consumed_message SET status = 'COMPLETED', lease_until = NULL, completed_at = ?, "
+                        + "last_error = NULL WHERE event_id = ? AND status = 'PROCESSING' AND claim_token = ?",
+                Timestamp.from(completedAt), eventId.toString(), claimToken.toString());
+    }
+
+    public record ConsumptionClaim(State state, UUID claimToken) {
+        public enum State { PROCESSING, COMPLETED, IN_PROGRESS }
+
+        static ConsumptionClaim processing(UUID token) {
+            return new ConsumptionClaim(State.PROCESSING, token);
+        }
+
+        static ConsumptionClaim completed() {
+            return new ConsumptionClaim(State.COMPLETED, null);
+        }
+
+        static ConsumptionClaim inProgress() {
+            return new ConsumptionClaim(State.IN_PROGRESS, null);
+        }
+
+        public boolean isProcessing() {
+            return state == State.PROCESSING;
+        }
+
+        public boolean isCompleted() {
+            return state == State.COMPLETED;
+        }
+    }
+
+    private record ConsumptionRow(String status, Instant leaseUntil, String claimToken) {
     }
 
     /** Small database fixture helpers used by lease integration tests. */
