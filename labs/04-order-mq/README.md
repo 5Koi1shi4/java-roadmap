@@ -83,7 +83,7 @@ $env:Path = "$env:JAVA_HOME\bin;$env:Path"
 ./mvnw.cmd verify
 ```
 
-已验证证据（提交 `d7c52ea`）：46 个 Surefire 单元测试、21 个 Failsafe/Testcontainers 集成测试，0 failures、0 errors、0 skipped，Maven `BUILD SUCCESS`。集成测试使用一对共享容器，但每个测试在 `@BeforeEach` 清空数据库并同步 purge 五个队列，保证事件、订单和队列隔离；单元测试则用固定时钟和 mock 快速覆盖边界。
+已验证证据（提交 `ad55717`）：59 个 Surefire 单元测试、26 个 Failsafe/Testcontainers 集成测试，0 failures、0 errors、0 skipped，Maven `BUILD SUCCESS`。集成测试使用一对共享容器，但每个测试在 `@BeforeEach` 清空数据库并同步 purge 五个队列，保证事件、订单和队列隔离；单元测试则用固定时钟和 mock 快速覆盖边界。
 
 ## 代码导航
 
