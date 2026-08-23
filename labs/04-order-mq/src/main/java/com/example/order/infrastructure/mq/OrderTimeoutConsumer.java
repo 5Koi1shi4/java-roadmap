@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -25,6 +26,7 @@ public class OrderTimeoutConsumer {
     private final Clock clock;
     private final Duration leaseDuration;
 
+    @Autowired
     public OrderTimeoutConsumer(JdbcOrderRepository repository, OrderService orderService,
                                 FailureClassifier failureClassifier, ObjectMapper objectMapper) {
         this(repository, orderService, failureClassifier, objectMapper, Clock.systemUTC(), Duration.ofSeconds(30));
@@ -50,13 +52,14 @@ public class OrderTimeoutConsumer {
     }
 
     /** Converts the wire payload at the message boundary; malformed JSON is permanent. */
-    @RabbitListener(queues = RabbitTopologyConfiguration.TIMEOUT_QUEUE_1M)
+    @RabbitListener(queues = RabbitTopologyConfiguration.CANCEL_QUEUE)
     @Transactional
     public void consume(Message message) {
         try {
             OrderTimeoutEvent event = objectMapper.readValue(message.getBody(), OrderTimeoutEvent.class);
+            message.getMessageProperties().setHeader("event-id", event.eventId().toString());
             int retryCount = retryCount(message);
-            if (retryCount > 3) {
+            if (retryCount < 0 || retryCount > 3) {
                 throw new NonRetryableMessageException("retry count exceeds maximum of 3");
             }
             handle(event);

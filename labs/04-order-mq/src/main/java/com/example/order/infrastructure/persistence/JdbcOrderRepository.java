@@ -11,6 +11,8 @@ import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.PreparedStatement;
 import java.sql.Statement;
@@ -224,8 +226,22 @@ public class JdbcOrderRepository {
     public int completeConsumption(UUID eventId, UUID claimToken, Instant completedAt) {
         return jdbcTemplate.update(
                 "UPDATE consumed_message SET status = 'COMPLETED', lease_until = NULL, completed_at = ?, "
-                        + "last_error = NULL WHERE event_id = ? AND status = 'PROCESSING' AND claim_token = ?",
+                        + "failure_category = NULL, last_error = NULL WHERE event_id = ? "
+                        + "AND status = 'PROCESSING' AND claim_token = ?",
                 Timestamp.from(completedAt), eventId.toString(), claimToken.toString());
+    }
+
+    /** Persists the terminal failure independently of the rolled-back listener transaction. */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public int recordConsumptionFailure(UUID eventId, String category, String message, Instant failedAt) {
+        return jdbcTemplate.update(
+                "INSERT INTO consumed_message "
+                        + "(event_id, status, failure_category, last_error, completed_at) "
+                        + "VALUES (?, 'FAILED', ?, ?, ?) "
+                        + "ON DUPLICATE KEY UPDATE status = 'FAILED', lease_until = NULL, claim_token = NULL, "
+                        + "failure_category = VALUES(failure_category), last_error = VALUES(last_error), "
+                        + "completed_at = VALUES(completed_at)",
+                eventId.toString(), category, message, Timestamp.from(failedAt));
     }
 
     public record ConsumptionClaim(State state, UUID claimToken) {

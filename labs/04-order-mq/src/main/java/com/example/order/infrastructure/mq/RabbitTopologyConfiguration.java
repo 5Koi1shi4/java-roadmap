@@ -10,14 +10,23 @@ import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFacto
 import org.springframework.amqp.rabbit.connection.ConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.retry.MessageRecoverer;
+import org.springframework.amqp.AmqpException;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.retry.support.RetrySynchronizationManager;
 import org.springframework.amqp.rabbit.config.RetryInterceptorBuilder;
 import org.springframework.retry.interceptor.RetryOperationsInterceptor;
 import org.springframework.retry.policy.SimpleRetryPolicy;
+import org.springframework.retry.backoff.FixedBackOffPolicy;
+import com.example.order.infrastructure.persistence.JdbcOrderRepository;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.time.Instant;
+import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
 
 /** Rabbit topology and listener retry policy for timeout events. */
 @Configuration
@@ -35,6 +44,11 @@ public class RabbitTopologyConfiguration {
     @Bean
     public DirectExchange orderTimeoutExchange() {
         return new DirectExchange(TIMEOUT_EXCHANGE, true, false);
+    }
+
+    @Bean
+    public FailureClassifier failureClassifier() {
+        return new FailureClassifier();
     }
 
     @Bean
@@ -102,26 +116,46 @@ public class RabbitTopologyConfiguration {
     public RetryOperationsInterceptor timeoutRetryInterceptor(MessageRecoverer timeoutMessageRecoverer) {
         SimpleRetryPolicy policy = new SimpleRetryPolicy(
                 3, Map.of(RetryableMessageException.class, true), true);
+        FixedBackOffPolicy backOff = new FixedBackOffPolicy();
+        backOff.setBackOffPeriod(1_000L);
         return RetryInterceptorBuilder.stateless()
                 .retryPolicy(policy)
-                .backOffOptions(1_000L, 1.0, 1_000L)
+                .backOffPolicy(backOff)
                 .recoverer(timeoutMessageRecoverer)
                 .build();
     }
 
     @Bean
     public MessageRecoverer timeoutMessageRecoverer(RabbitTemplate rabbitTemplate,
-                                                     FailureClassifier classifier) {
+                                                     FailureClassifier classifier,
+                                                     JdbcOrderRepository repository,
+                                                     ObjectMapper objectMapper) {
         return (message, failure) -> {
             MessageProperties properties = new MessageProperties();
-            properties.setHeaders(message.getMessageProperties().getHeaders());
+            Map<String, Object> headers = new HashMap<>(message.getMessageProperties().getHeaders());
+            headers.remove("x-retry-count");
+            headers.remove("retry-count");
+            properties.setHeaders(headers);
             properties.setContentType(message.getMessageProperties().getContentType());
-            properties.setHeader("failure-category", classifier.classify(failure).name());
-            properties.setHeader("failure-message", messageOf(failure));
-            Object retryCount = message.getMessageProperties().getHeaders().get("x-retry-count");
-            properties.setHeader("x-retry-count", retryCount == null ? 3 : retryCount);
-            rabbitTemplate.send("", MANUAL_QUEUE,
-                    new Message(message.getBody(), properties));
+            FailureClassifier.Category category = classifier.classify(failure);
+            String failureMessage = messageOf(failure);
+            properties.setHeader("failure-category", category.name());
+            properties.setHeader("failure-message", failureMessage);
+            int attempts = RetrySynchronizationManager.getContext() == null
+                    ? 1 : RetrySynchronizationManager.getContext().getRetryCount() + 1;
+            properties.setHeader("x-retry-count", attempts);
+            UUID eventId = eventId(message, objectMapper);
+            if (eventId != null) {
+                repository.recordConsumptionFailure(eventId, category.name(), failureMessage, Instant.now());
+            }
+            Message outbound = new Message(message.getBody(), properties);
+            Boolean confirmed = rabbitTemplate.invoke(operations -> {
+                operations.send("", MANUAL_QUEUE, outbound);
+                return operations.waitForConfirms(10_000L);
+            });
+            if (!Boolean.TRUE.equals(confirmed)) {
+                throw new AmqpException("manual queue publisher confirm nack");
+            }
         };
     }
 
@@ -130,8 +164,27 @@ public class RabbitTopologyConfiguration {
             ConnectionFactory connectionFactory, RetryOperationsInterceptor timeoutRetryInterceptor) {
         SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
         factory.setConnectionFactory(connectionFactory);
+        factory.setDefaultRequeueRejected(false);
         factory.setAdviceChain(timeoutRetryInterceptor);
         return factory;
+    }
+
+    private static UUID eventId(Message message, ObjectMapper objectMapper) {
+        Object header = message.getMessageProperties().getHeaders().get("event-id");
+        if (header != null) {
+            try {
+                return UUID.fromString(header.toString());
+            } catch (IllegalArgumentException ignored) {
+                return null;
+            }
+        }
+        try {
+            JsonNode node = objectMapper.readTree(message.getBody());
+            JsonNode value = node.get("eventId");
+            return value == null ? null : UUID.fromString(value.asText());
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     private static String messageOf(Throwable failure) {

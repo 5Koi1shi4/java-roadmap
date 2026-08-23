@@ -1,40 +1,102 @@
 package com.example.order.integration;
 
+import com.example.order.OrderMqApplication;
+import com.example.order.application.CreateOrderCommand;
 import com.example.order.application.OrderService;
 import com.example.order.application.OrderTimeoutEvent;
+import com.example.order.infrastructure.mq.RabbitTopologyConfiguration;
 import com.example.order.infrastructure.mq.OrderTimeoutConsumer;
 import com.example.order.infrastructure.persistence.JdbcOrderRepository;
-import org.mockito.Mockito;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.amqp.rabbit.core.RabbitAdmin;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.testcontainers.containers.MySQLContainer;
+import org.testcontainers.containers.RabbitMQContainer;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.time.Instant;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.verify;
 
+@Testcontainers
+@SpringBootTest(classes = OrderMqApplication.class, webEnvironment = WebEnvironment.NONE)
 class OrderTimeoutIT {
+    @Container
+    static MySQLContainer<?> mysql = new MySQLContainer<>("mysql:8.4")
+            .withUsername("root")
+            .withPassword("test");
+
+    @Container
+    static RabbitMQContainer rabbit = new RabbitMQContainer("rabbitmq:3.13-management")
+            .withUser("order_mq", "test")
+            .withVhost("/");
+
+    @Autowired
+    OrderService orderService;
+
+    @Autowired
+    OrderTimeoutConsumer consumer;
+
+    @Autowired
+    JdbcOrderRepository repository;
+
+    @Autowired
+    JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    RabbitAdmin rabbitAdmin;
+
+    @DynamicPropertySource
+    static void properties(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.url", mysql::getJdbcUrl);
+        registry.add("spring.datasource.username", mysql::getUsername);
+        registry.add("spring.datasource.password", mysql::getPassword);
+        registry.add("spring.rabbitmq.host", rabbit::getHost);
+        registry.add("spring.rabbitmq.port", rabbit::getAmqpPort);
+        registry.add("spring.rabbitmq.username", () -> "order_mq");
+        registry.add("spring.rabbitmq.password", () -> "test");
+    }
+
+    @BeforeEach
+    void cleanDatabase() {
+        jdbcTemplate.update("DELETE FROM consumed_message");
+        jdbcTemplate.update("DELETE FROM outbox_event");
+        jdbcTemplate.update("DELETE FROM orders");
+        jdbcTemplate.update("UPDATE order_stock SET available = 10 WHERE product_id = 1");
+    }
+
     @Test
-    void duplicateCompletedEventDoesNotReleaseStockAgain() {
+    void duplicateEventIdCancelsAndReleasesStockOnlyOnce() {
+        long orderId = orderService.createOrder(new CreateOrderCommand(1, 1));
         OrderTimeoutEvent event = new OrderTimeoutEvent(
-                UUID.randomUUID(), "ORDER_TIMEOUT", 1, Instant.parse("2026-08-23T08:00:00Z"), 1);
-        JdbcOrderRepository repository = Mockito.mock(JdbcOrderRepository.class);
-        OrderService service = Mockito.mock(OrderService.class);
-        UUID claimToken = UUID.randomUUID();
-        Mockito.when(repository.beginConsumption(Mockito.eq(event.eventId()), Mockito.any(), Mockito.any()))
-                .thenReturn(new JdbcOrderRepository.ConsumptionClaim(
-                        JdbcOrderRepository.ConsumptionClaim.State.PROCESSING, claimToken))
-                .thenReturn(new JdbcOrderRepository.ConsumptionClaim(
-                        JdbcOrderRepository.ConsumptionClaim.State.COMPLETED, null));
-        Mockito.when(repository.completeConsumption(Mockito.eq(event.eventId()), Mockito.eq(claimToken), Mockito.any()))
-                .thenReturn(1);
+                UUID.randomUUID(), "ORDER_TIMEOUT", orderId, Instant.now(), 1);
 
-        OrderTimeoutConsumer consumer = new OrderTimeoutConsumer(repository, service);
         consumer.handle(event);
         consumer.handle(event);
 
-        assertThat(event.schemaVersion()).isEqualTo(1);
-        verify(service).cancelExpired(event);
-        verify(service, Mockito.times(1)).cancelExpired(event);
+        assertThat(jdbcTemplate.queryForObject("SELECT status FROM orders WHERE id = ?", String.class, orderId))
+                .isEqualTo("CANCELLED");
+        assertThat(jdbcTemplate.queryForObject("SELECT available FROM order_stock WHERE product_id = 1", Integer.class))
+                .isEqualTo(10);
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT status FROM consumed_message WHERE event_id = ?", String.class, event.eventId().toString()))
+                .isEqualTo("COMPLETED");
+    }
+
+    @Test
+    void declaresTtlBucketsAndDeadLetterDestination() {
+        assertThat(rabbitAdmin.getQueueProperties(RabbitTopologyConfiguration.TIMEOUT_QUEUE_10S)).isNotNull();
+        assertThat(rabbitAdmin.getQueueProperties(RabbitTopologyConfiguration.TIMEOUT_QUEUE_1M)).isNotNull();
+        assertThat(rabbitAdmin.getQueueProperties(RabbitTopologyConfiguration.TIMEOUT_QUEUE_5M)).isNotNull();
+        assertThat(rabbitAdmin.getQueueProperties(RabbitTopologyConfiguration.CANCEL_QUEUE)).isNotNull();
+        assertThat(rabbitAdmin.getQueueProperties(RabbitTopologyConfiguration.MANUAL_QUEUE)).isNotNull();
     }
 }
