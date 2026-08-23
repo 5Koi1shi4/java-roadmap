@@ -67,9 +67,9 @@ class OrderPersistenceIT {
                 .isEqualTo(8);
         String payload = jdbcTemplate.queryForObject("SELECT payload FROM outbox_event WHERE aggregate_id = ?", String.class, orderId);
         JsonNode json = objectMapper.readTree(payload);
-        assertThat(json.fieldNames()).toIterable().containsExactlyInAnyOrder("eventId", "eventType", "orderId", "occurredAt", "version");
+        assertThat(json.fieldNames()).toIterable().containsExactlyInAnyOrder("eventId", "eventType", "orderId", "occurredAt", "schemaVersion");
         assertThat(json.get("eventType").asText()).isEqualTo("ORDER_TIMEOUT");
-        assertThat(json.get("version").asInt()).isEqualTo(1);
+        assertThat(json.get("schemaVersion").asInt()).isEqualTo(1);
         assertThat(jdbcTemplate.queryForObject("SELECT status FROM outbox_event WHERE aggregate_id = ?", String.class, orderId))
                 .isEqualTo("NEW");
     }

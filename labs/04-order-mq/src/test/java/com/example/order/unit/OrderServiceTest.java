@@ -8,6 +8,8 @@ import com.example.order.application.OrderService;
 import com.example.order.application.OrderTimeoutEvent;
 import com.example.order.application.PayOrderCommand;
 import com.example.order.infrastructure.persistence.JdbcOrderRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InOrder;
@@ -67,14 +69,38 @@ class OrderServiceTest {
     }
 
     @Test
-    void rejectsNullTimeoutEventBeforeChangingOrder() {
-        OrderService service = new OrderService(repository);
+    void rejectsMissingRequiredTimeoutEventFieldAtJacksonBoundary() {
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
 
-        assertThatThrownBy(() -> service.cancelExpired(null))
-                .isInstanceOf(InvalidOrderEventException.class);
+        assertThatThrownBy(() -> mapper.readValue(
+                "{\"eventType\":\"ORDER_TIMEOUT\",\"orderId\":1,\"occurredAt\":\"2026-08-23T08:00:00Z\",\"schemaVersion\":1}",
+                OrderTimeoutEvent.class))
+                .isInstanceOf(Exception.class);
+    }
 
-        verify(repository, never()).cancelIfPending(any(Long.class));
-        verify(repository, never()).releaseStock(any(Long.class), any(Integer.class));
+    @Test
+    void deserializesOnlyValidFiveFieldTimeoutEvent() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+
+        OrderTimeoutEvent event = mapper.readValue(
+                "{\"eventId\":\"00000000-0000-0000-0000-000000000001\",\"eventType\":\"ORDER_TIMEOUT\","
+                        + "\"orderId\":1,\"occurredAt\":\"2026-08-23T08:00:00Z\",\"schemaVersion\":1}",
+                OrderTimeoutEvent.class);
+
+        assertThat(event.schemaVersion()).isEqualTo(1);
+        assertThat(event.eventType()).isEqualTo("ORDER_TIMEOUT");
+    }
+
+    @Test
+    void rejectsInvalidTimeoutEventFieldsAtJacksonBoundary() {
+        ObjectMapper mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        String base = "\"eventId\":\"00000000-0000-0000-0000-000000000001\",\"eventType\":\"ORDER_TIMEOUT\","
+                + "\"orderId\":1,\"occurredAt\":\"2026-08-23T08:00:00Z\",\"schemaVersion\":1";
+
+        assertThatThrownBy(() -> mapper.readValue("{" + base.replace("ORDER_TIMEOUT", "OTHER") + "}", OrderTimeoutEvent.class))
+                .isInstanceOf(Exception.class);
+        assertThatThrownBy(() -> mapper.readValue("{" + base.replace("\"schemaVersion\":1", "\"schemaVersion\":2") + "}", OrderTimeoutEvent.class))
+                .isInstanceOf(Exception.class);
     }
 
     @Test

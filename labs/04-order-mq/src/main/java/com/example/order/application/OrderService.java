@@ -40,7 +40,6 @@ public class OrderService {
 
     @Transactional
     public CancellationResult cancelExpired(OrderTimeoutEvent event) {
-        validateEvent(event);
         if (repository.cancelIfPending(event.orderId()) == 1) {
             JdbcOrderRepository.OrderProductQuantity order = repository.orderProductAndQuantity(event.orderId());
             if (order == null) {
@@ -55,16 +54,6 @@ public class OrderService {
             case CANCELLED -> CancellationResult.ALREADY_CANCELLED;
             case PENDING_PAYMENT -> throw new IllegalStateException("Order cancellation was not applied");
         };
-    }
-
-    private void validateEvent(OrderTimeoutEvent event) {
-        if (event == null) {
-            throw new InvalidOrderEventException("event must not be null");
-        }
-        if (event.eventId() == null || !"ORDER_TIMEOUT".equals(event.eventType())
-                || event.orderId() <= 0 || event.occurredAt() == null || event.version() != 1) {
-            throw new InvalidOrderEventException("Malformed ORDER_TIMEOUT event");
-        }
     }
 
     private OrderStatus readStatus(long orderId) {

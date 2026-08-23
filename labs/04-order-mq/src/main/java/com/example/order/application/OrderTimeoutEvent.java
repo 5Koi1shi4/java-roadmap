@@ -2,9 +2,11 @@ package com.example.order.application;
 
 import java.time.Instant;
 import java.util.UUID;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 
 /** Stable five-field payload sent through the timeout messaging pipeline. */
-public record OrderTimeoutEvent(UUID eventId, String eventType, long orderId, Instant occurredAt, int version) {
+@JsonIgnoreProperties(ignoreUnknown = false)
+public record OrderTimeoutEvent(UUID eventId, String eventType, long orderId, Instant occurredAt, int schemaVersion) {
     public OrderTimeoutEvent {
         if (eventId == null) {
             throw new InvalidOrderEventException("eventId must not be null");
@@ -18,13 +20,13 @@ public record OrderTimeoutEvent(UUID eventId, String eventType, long orderId, In
         if (occurredAt == null) {
             throw new InvalidOrderEventException("occurredAt must not be null");
         }
-        if (version != 1) {
-            throw new InvalidOrderEventException("version must be 1");
+        if (schemaVersion != 1) {
+            throw new InvalidOrderEventException("schemaVersion must be 1");
         }
     }
 
-    public OrderTimeoutEvent(String eventId, String eventType, long orderId, Instant occurredAt, int version) {
-        this(parseEventId(eventId), eventType, orderId, occurredAt, version);
+    public OrderTimeoutEvent(String eventId, String eventType, long orderId, Instant occurredAt, int schemaVersion) {
+        this(parseEventId(eventId), eventType, orderId, occurredAt, schemaVersion);
     }
 
     private static UUID parseEventId(String value) {

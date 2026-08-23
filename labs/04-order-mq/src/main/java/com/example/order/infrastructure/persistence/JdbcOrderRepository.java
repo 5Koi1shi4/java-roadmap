@@ -107,9 +107,9 @@ public class JdbcOrderRepository {
 
     public List<StoredOutbox> outboxForOrder(long orderId) {
         return jdbcTemplate.query(
-                "SELECT event_type, status, JSON_UNQUOTE(JSON_EXTRACT(payload, '$.version')) AS version "
+                "SELECT event_type, status, JSON_UNQUOTE(JSON_EXTRACT(payload, '$.schemaVersion')) AS schemaVersion "
                         + "FROM outbox_event WHERE aggregate_id = ? ORDER BY id",
-                (rs, rowNum) -> new StoredOutbox(rs.getString("event_type"), rs.getString("status"), rs.getInt("version")),
+                (rs, rowNum) -> new StoredOutbox(rs.getString("event_type"), rs.getString("status"), rs.getInt("schemaVersion")),
                 orderId);
     }
 
