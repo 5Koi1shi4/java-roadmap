@@ -53,6 +53,7 @@ class ReliableMessagingFlowIT {
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
         SharedContainers.registerProperties(registry);
+        registry.add("order.timeout.routing-key", () -> "order.timeout.10s");
     }
 
     @BeforeEach
@@ -62,14 +63,11 @@ class ReliableMessagingFlowIT {
     }
 
     @Test
-    void publishesTimeoutAndEventuallyCancelsOnlyPendingOrder() throws Exception {
+    void publishesTimeoutAndEventuallyCancelsOnlyPendingOrder() {
         long orderId = service.createOrder(new CreateOrderCommand(1, 1));
         dispatcher.dispatchOnce();
-        String payload = payloadFor(orderId);
 
         assertThat(statusOfOutbox(orderId)).isEqualTo("PUBLISHED");
-        rabbitTemplate.convertAndSend(RabbitTopologyConfiguration.TIMEOUT_EXCHANGE,
-                "order.timeout.10s", payload);
 
         Awaitility.await().atMost(Duration.ofSeconds(25)).untilAsserted(() ->
                 assertThat(statusOf(orderId)).isEqualTo("CANCELLED"));
@@ -81,9 +79,6 @@ class ReliableMessagingFlowIT {
         long orderId = service.createOrder(new CreateOrderCommand(1, 1));
         service.pay(new PayOrderCommand(orderId));
         dispatcher.dispatchOnce();
-
-        rabbitTemplate.convertAndSend(RabbitTopologyConfiguration.TIMEOUT_EXCHANGE,
-                "order.timeout.10s", payloadFor(orderId));
 
         Awaitility.await().atMost(Duration.ofSeconds(25)).untilAsserted(() ->
                 assertThat(jdbcTemplate.queryForObject(
@@ -97,13 +92,10 @@ class ReliableMessagingFlowIT {
     void duplicateEventIdReleasesStockOnlyOnce() throws Exception {
         long orderId = service.createOrder(new CreateOrderCommand(1, 1));
         dispatcher.dispatchOnce();
-        String payload = payloadFor(orderId);
         String eventId = eventIdFor(orderId);
-
-        rabbitTemplate.convertAndSend(RabbitTopologyConfiguration.TIMEOUT_EXCHANGE,
-                "order.timeout.10s", payload);
-        rabbitTemplate.convertAndSend(RabbitTopologyConfiguration.TIMEOUT_EXCHANGE,
-                "order.timeout.10s", payload);
+        jdbcTemplate.update("UPDATE outbox_event SET status = 'NEW', published_at = NULL "
+                        + "WHERE aggregate_id = ?", orderId);
+        dispatcher.dispatchOnce();
 
         Awaitility.await().atMost(Duration.ofSeconds(25)).untilAsserted(() ->
                 assertThat(statusOf(orderId)).isEqualTo("CANCELLED"));

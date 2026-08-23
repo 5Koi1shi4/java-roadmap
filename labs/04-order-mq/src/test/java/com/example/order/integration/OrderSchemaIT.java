@@ -5,6 +5,7 @@ import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -17,6 +18,9 @@ class OrderSchemaIT {
     @Autowired
     JdbcTemplate jdbcTemplate;
 
+    @Autowired
+    RabbitAdmin rabbitAdmin;
+
     @DynamicPropertySource
     static void mysqlProperties(DynamicPropertyRegistry registry) {
         SharedContainers.registerProperties(registry);
@@ -25,6 +29,7 @@ class OrderSchemaIT {
     @BeforeEach
     void isolate() {
         SharedContainers.cleanDatabase(jdbcTemplate);
+        SharedContainers.purgeQueues(rabbitAdmin);
     }
 
     @Test
