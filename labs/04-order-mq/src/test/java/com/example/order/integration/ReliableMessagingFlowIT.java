@@ -23,6 +23,7 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.annotation.DirtiesContext;
 
 import java.nio.charset.StandardCharsets;
+import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
@@ -112,8 +113,8 @@ class ReliableMessagingFlowIT {
                 new com.example.order.application.OrderTimeoutEvent(
                         eventId, "ORDER_TIMEOUT", orderId, Instant.now(), 1));
         jdbcTemplate.update("INSERT INTO consumed_message (event_id, status, lease_until, claim_token) "
-                        + "VALUES (?, 'PROCESSING', DATE_ADD(UTC_TIMESTAMP(6), INTERVAL 1 HOUR), ?)",
-                eventId.toString(), UUID.randomUUID().toString());
+                        + "VALUES (?, 'PROCESSING', ?, ?)", eventId.toString(),
+                Timestamp.from(Instant.now().plus(Duration.ofHours(1))), UUID.randomUUID().toString());
 
         rabbitTemplate.convertAndSend("", RabbitTopologyConfiguration.CANCEL_QUEUE,
                 new Message(payload.getBytes(StandardCharsets.UTF_8), new MessageProperties()));

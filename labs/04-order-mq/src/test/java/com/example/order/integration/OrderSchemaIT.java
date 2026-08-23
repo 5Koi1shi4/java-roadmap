@@ -1,6 +1,8 @@
 package com.example.order.integration;
 
 import com.example.order.infrastructure.mq.RabbitTopologyConfiguration;
+import com.example.order.infrastructure.persistence.JdbcOrderRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -10,6 +12,8 @@ import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
@@ -71,6 +75,11 @@ class OrderSchemaIT {
     }
 
     @EnableAutoConfiguration
+    @Import(RabbitTopologyConfiguration.class)
     static class TestApplication {
+        @Bean
+        JdbcOrderRepository jdbcOrderRepository(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper) {
+            return new JdbcOrderRepository(jdbcTemplate, objectMapper);
+        }
     }
 }
