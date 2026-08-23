@@ -128,7 +128,7 @@ public class JdbcOrderRepository {
         }
         List<Long> candidates = jdbcTemplate.query(
                 "SELECT id FROM outbox_event "
-                        + "WHERE status = 'NEW' OR (status = 'PUBLISHING' AND lease_until < ?) "
+                        + "WHERE status = 'NEW' OR (status = 'PUBLISHING' AND lease_until <= ?) "
                         + "ORDER BY created_at, id LIMIT ?",
                 (rs, rowNum) -> rs.getLong("id"), Timestamp.from(now), limit);
         List<com.example.order.infrastructure.mq.OutboxEvent> claimed = new ArrayList<>();
@@ -137,7 +137,7 @@ public class JdbcOrderRepository {
             int updated = jdbcTemplate.update(
                     "UPDATE outbox_event SET status = 'PUBLISHING', lease_until = ?, claim_token = ?, "
                             + "publish_attempts = publish_attempts + 1 "
-                            + "WHERE id = ? AND (status = 'NEW' OR (status = 'PUBLISHING' AND lease_until < ?))",
+                            + "WHERE id = ? AND (status = 'NEW' OR (status = 'PUBLISHING' AND lease_until <= ?))",
                     Timestamp.from(leaseUntil), claimToken.toString(), id, Timestamp.from(now));
             if (updated == 1) {
                 claimed.add(findOutboxEvent(id));
@@ -151,7 +151,7 @@ public class JdbcOrderRepository {
         return jdbcTemplate.update(
                 "UPDATE outbox_event SET status = 'PUBLISHING', lease_until = ?, claim_token = ?, "
                         + "publish_attempts = publish_attempts + 1 "
-                        + "WHERE event_id = ? AND (status = 'NEW' OR (status = 'PUBLISHING' AND lease_until < ?))",
+                        + "WHERE event_id = ? AND (status = 'NEW' OR (status = 'PUBLISHING' AND lease_until <= ?))",
                 Timestamp.from(leaseUntil), claimToken.toString(), eventId.toString(), Timestamp.from(now)) == 1;
     }
 
@@ -213,7 +213,7 @@ public class JdbcOrderRepository {
         }
         if (!"PROCESSING".equals(existing.status())
                 || existing.leaseUntil() == null
-                || !existing.leaseUntil().isBefore(now)) {
+                || existing.leaseUntil().isAfter(now)) {
             return ConsumptionClaim.inProgress();
         }
 
@@ -221,7 +221,7 @@ public class JdbcOrderRepository {
         int takenOver = jdbcTemplate.update(
                 "UPDATE consumed_message SET status = 'PROCESSING', lease_until = ?, claim_token = ?, "
                         + "failure_category = NULL, last_error = NULL, completed_at = NULL "
-                        + "WHERE event_id = ? AND status = 'PROCESSING' AND lease_until < ?",
+                        + "WHERE event_id = ? AND status = 'PROCESSING' AND lease_until <= ?",
                 Timestamp.from(leaseUntil), takeoverToken.toString(), eventId.toString(), Timestamp.from(now));
         return takenOver == 1 ? ConsumptionClaim.processing(takeoverToken) : ConsumptionClaim.inProgress();
     }
@@ -293,12 +293,12 @@ public class JdbcOrderRepository {
         jdbcTemplate.update(
                 "UPDATE manual_failure SET manual_delivery_status = 'GIVE_UP', "
                         + "claim_token = NULL, lease_until = NULL, updated_at = ? "
-                        + "WHERE manual_delivery_status = 'PUBLISHING' AND attempts >= 3 AND lease_until < ?",
+                        + "WHERE manual_delivery_status = 'PUBLISHING' AND attempts >= 3 AND lease_until <= ?",
                 Timestamp.from(now), Timestamp.from(now));
         List<Long> candidates = jdbcTemplate.query(
                 "SELECT id FROM manual_failure "
                         + "WHERE attempts < 3 AND (manual_delivery_status = 'PENDING' "
-                        + "OR (manual_delivery_status = 'PUBLISHING' AND lease_until < ?)) "
+                        + "OR (manual_delivery_status = 'PUBLISHING' AND lease_until <= ?)) "
                         + "ORDER BY id LIMIT ?",
                 (rs, rowNum) -> rs.getLong("id"), Timestamp.from(now), bounded);
         List<ManualFailure> claimed = new ArrayList<>();
@@ -308,7 +308,7 @@ public class JdbcOrderRepository {
                     "UPDATE manual_failure SET manual_delivery_status = 'PUBLISHING', "
                             + "claim_token = ?, lease_until = ?, attempts = attempts + 1, updated_at = ? "
                             + "WHERE id = ? AND attempts < 3 AND (manual_delivery_status = 'PENDING' "
-                            + "OR (manual_delivery_status = 'PUBLISHING' AND lease_until < ?))",
+                            + "OR (manual_delivery_status = 'PUBLISHING' AND lease_until <= ?))",
                     claimToken.toString(), Timestamp.from(leaseUntil), Timestamp.from(now), id,
                     Timestamp.from(now));
             if (updated == 1) {

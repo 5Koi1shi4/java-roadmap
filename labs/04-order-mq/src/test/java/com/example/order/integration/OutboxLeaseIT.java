@@ -68,6 +68,76 @@ class OutboxLeaseIT {
     }
 
     @Test
+    void publishingEventAtLeaseExpiryCanBeClaimedByNextDispatcher() {
+        UUID eventId = UUID.randomUUID();
+        Instant now = Instant.parse("2026-08-23T00:00:00Z");
+        repository.insertOutbox(eventId, "NEW");
+        repository.forcePublishing(eventId, now);
+
+        assertThat(repository.claim(eventId, now, now.plusSeconds(30))).isTrue();
+    }
+
+    @Test
+    void batchDispatcherClaimsPublishingEventAtLeaseExpiry() {
+        UUID eventId = UUID.randomUUID();
+        Instant now = Instant.parse("2026-08-23T00:00:00Z");
+        repository.insertOutbox(eventId, "NEW");
+        repository.forcePublishing(eventId, now);
+
+        assertThat(repository.claimPublishable(now, now.plusSeconds(30), 1))
+                .extracting(OutboxEvent::eventId)
+                .containsExactly(eventId);
+    }
+
+    @Test
+    void processingMessageAtLeaseExpiryCanBeTakenOver() {
+        UUID eventId = UUID.randomUUID();
+        Instant now = Instant.parse("2026-08-23T00:00:00Z");
+        UUID previousToken = UUID.randomUUID();
+        jdbcTemplate.update(
+                "INSERT INTO consumed_message (event_id, status, lease_until, claim_token) VALUES (?, 'PROCESSING', ?, ?)",
+                eventId.toString(), java.sql.Timestamp.from(now), previousToken.toString());
+
+        JdbcOrderRepository.ConsumptionClaim claim = repository.beginConsumption(
+                eventId, now, now.plusSeconds(30));
+
+        assertThat(claim.isProcessing()).isTrue();
+        assertThat(claim.claimToken()).isNotEqualTo(previousToken);
+    }
+
+    @Test
+    void publishingManualFailureAtLeaseExpiryCanBeReclaimed() {
+        UUID eventId = UUID.randomUUID();
+        Instant now = Instant.parse("2026-08-23T00:00:00Z");
+        long id = repository.insertManualFailure(eventId, "{}", "RETRYABLE", "failed", 3, now);
+        jdbcTemplate.update(
+                "UPDATE manual_failure SET manual_delivery_status = 'PUBLISHING', attempts = 1, lease_until = ? WHERE id = ?",
+                java.sql.Timestamp.from(now), id);
+
+        List<JdbcOrderRepository.ManualFailure> claimed = repository.claimManualFailures(
+                now, now.plusSeconds(30), 1);
+
+        assertThat(claimed).hasSize(1);
+        assertThat(claimed.get(0).id()).isEqualTo(id);
+        assertThat(claimed.get(0).attempts()).isEqualTo(2);
+    }
+
+    @Test
+    void exhaustedPublishingManualFailureAtLeaseExpiryIsGivenUp() {
+        UUID eventId = UUID.randomUUID();
+        Instant now = Instant.parse("2026-08-23T00:00:00Z");
+        long id = repository.insertManualFailure(eventId, "{}", "RETRYABLE", "failed", 3, now);
+        jdbcTemplate.update(
+                "UPDATE manual_failure SET manual_delivery_status = 'PUBLISHING', attempts = 3, lease_until = ? WHERE id = ?",
+                java.sql.Timestamp.from(now), id);
+
+        assertThat(repository.claimManualFailures(now, now.plusSeconds(30), 1)).isEmpty();
+        assertThat(jdbcTemplate.queryForObject(
+                "SELECT manual_delivery_status FROM manual_failure WHERE id = ?", String.class, id))
+                .isEqualTo("GIVE_UP");
+    }
+
+    @Test
     void lateAckFromPreviousOwnerCannotCompleteNewLease() {
         UUID eventId = UUID.randomUUID();
         Instant now = Instant.parse("2026-08-23T00:00:00Z");
