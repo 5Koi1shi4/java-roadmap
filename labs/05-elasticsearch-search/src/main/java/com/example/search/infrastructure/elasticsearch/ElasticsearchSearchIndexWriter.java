@@ -9,6 +9,7 @@ import com.example.search.application.sync.IndexMutation;
 import com.example.search.application.sync.IndexWriteResult;
 import com.example.search.application.sync.SearchIndexWriter;
 import com.example.search.application.sync.SyncFailureClassifier;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -19,6 +20,7 @@ public class ElasticsearchSearchIndexWriter implements SearchIndexWriter {
     private final ElasticsearchClient client;
     private final SyncFailureClassifier failureClassifier;
 
+    @Autowired
     public ElasticsearchSearchIndexWriter(ElasticsearchClient client) {
         this(client, new SyncFailureClassifier());
     }

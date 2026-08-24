@@ -8,6 +8,7 @@ import co.elastic.clients.elasticsearch.core.bulk.OperationType;
 import com.example.search.application.sync.SearchIndexWriter;
 import com.example.search.application.sync.SyncFailureClassifier;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import com.example.search.application.sync.IndexMutation;
 import com.example.search.application.sync.IndexWriteResult;
 import org.junit.jupiter.api.Test;
@@ -62,6 +63,18 @@ class ElasticsearchSearchIndexWriterTest {
         assertThat(writer.bulkWrite("products-write", java.util.List.of(MUTATION)))
                 .singleElement().extracting(IndexWriteResult::outcome)
                 .isEqualTo(IndexWriteResult.Outcome.PERMANENT_FAILURE);
+    }
+
+    @Test
+    void canBeInstantiatedBySpringWithOnlyTheProductionConstructor() {
+        try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
+            context.registerBean(ElasticsearchClient.class, () -> mock(ElasticsearchClient.class));
+            context.register(ElasticsearchSearchIndexWriter.class);
+
+            context.refresh();
+
+            assertThat(context.getBean(ElasticsearchSearchIndexWriter.class)).isNotNull();
+        }
     }
 
     private static BulkResponseItem item(int status, ErrorCause cause) {
