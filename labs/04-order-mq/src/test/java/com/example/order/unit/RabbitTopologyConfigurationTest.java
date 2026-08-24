@@ -115,7 +115,7 @@ class RabbitTopologyConfigurationTest {
     void durableFailureIsPersistedBeforeManualPublishAttempt() {
         RabbitTemplate template = mock(RabbitTemplate.class);
         JdbcOrderRepository repository = mock(JdbcOrderRepository.class);
-        when(repository.insertManualFailure(any(), any(), any(), any(), any(Integer.class), any()))
+        when(repository.insertManualFailureAndRecordConsumptionFailure(any(), any(), any(), any(), any(Integer.class), any()))
                 .thenReturn(42L);
         when(template.invoke(any())).thenReturn(false);
         Message message = new Message(
@@ -128,7 +128,7 @@ class RabbitTopologyConfigurationTest {
                 () -> recoverer.recover(message, new RuntimeException("manual down")))
                 .isInstanceOf(AmqpRejectAndDontRequeueException.class);
         org.mockito.InOrder order = inOrder(repository, template);
-        order.verify(repository).insertManualFailure(any(), any(), any(), any(), any(Integer.class), any());
+        order.verify(repository).insertManualFailureAndRecordConsumptionFailure(any(), any(), any(), any(), any(Integer.class), any());
         order.verify(template).invoke(any());
         verify(repository, never()).markManualDelivered(any(Long.class), any());
     }
@@ -206,7 +206,7 @@ class RabbitTopologyConfigurationTest {
     void databaseFailureFallsBackToConfirmedManualPublish() {
         RabbitTemplate template = mock(RabbitTemplate.class);
         JdbcOrderRepository repository = mock(JdbcOrderRepository.class);
-        when(repository.insertManualFailure(any(), any(), any(), any(), any(Integer.class), any()))
+        when(repository.insertManualFailureAndRecordConsumptionFailure(any(), any(), any(), any(), any(Integer.class), any()))
                 .thenThrow(new RuntimeException("database unavailable"));
         when(template.invoke(any())).thenReturn(true);
         Message message = new Message("{broken-json".getBytes(), new MessageProperties());
@@ -222,7 +222,7 @@ class RabbitTopologyConfigurationTest {
     void databaseFailureAndManualPublishFailureRequestsImmediateRequeue() {
         RabbitTemplate template = mock(RabbitTemplate.class);
         JdbcOrderRepository repository = mock(JdbcOrderRepository.class);
-        when(repository.insertManualFailure(any(), any(), any(), any(), any(Integer.class), any()))
+        when(repository.insertManualFailureAndRecordConsumptionFailure(any(), any(), any(), any(), any(Integer.class), any()))
                 .thenThrow(new RuntimeException("database unavailable"));
         when(template.invoke(any())).thenThrow(new RuntimeException("broker unavailable"));
         Message message = new Message("{broken-json".getBytes(), new MessageProperties());
@@ -237,7 +237,7 @@ class RabbitTopologyConfigurationTest {
     void databaseSuccessAndManualPublishFailureLeavesPendingWithoutRequeue() {
         RabbitTemplate template = mock(RabbitTemplate.class);
         JdbcOrderRepository repository = mock(JdbcOrderRepository.class);
-        when(repository.insertManualFailure(any(), any(), any(), any(), any(Integer.class), any()))
+        when(repository.insertManualFailureAndRecordConsumptionFailure(any(), any(), any(), any(), any(Integer.class), any()))
                 .thenReturn(42L);
         when(template.invoke(any())).thenReturn(false);
         Message message = new Message("{broken-json".getBytes(), new MessageProperties());

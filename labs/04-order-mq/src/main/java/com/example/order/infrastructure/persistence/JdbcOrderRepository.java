@@ -238,6 +238,21 @@ public class JdbcOrderRepository {
     /** Persists the terminal failure independently of the rolled-back listener transaction. */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public int recordConsumptionFailure(UUID eventId, String category, String message, Instant failedAt) {
+        return recordConsumptionFailureRow(eventId, category, message, failedAt);
+    }
+
+    /** Persists the manual copy and terminal consumption failure in one independent transaction. */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public long insertManualFailureAndRecordConsumptionFailure(UUID eventId, String payload, String category,
+                                                               String message, int retryCount, Instant createdAt) {
+        long failureId = insertManualFailureRow(eventId, payload, category, message, retryCount, createdAt);
+        if (eventId != null) {
+            recordConsumptionFailureRow(eventId, category, message, createdAt);
+        }
+        return failureId;
+    }
+
+    private int recordConsumptionFailureRow(UUID eventId, String category, String message, Instant failedAt) {
         return jdbcTemplate.update(
                 "INSERT INTO consumed_message "
                         + "(event_id, status, failure_category, last_error, completed_at) "
@@ -254,6 +269,11 @@ public class JdbcOrderRepository {
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public long insertManualFailure(UUID eventId, String payload, String category,
                                     String message, int retryCount, Instant createdAt) {
+        return insertManualFailureRow(eventId, payload, category, message, retryCount, createdAt);
+    }
+
+    private long insertManualFailureRow(UUID eventId, String payload, String category,
+                                        String message, int retryCount, Instant createdAt) {
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbcTemplate.update(connection -> {
             PreparedStatement statement = connection.prepareStatement(

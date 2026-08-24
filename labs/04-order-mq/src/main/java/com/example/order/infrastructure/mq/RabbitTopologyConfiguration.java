@@ -172,7 +172,7 @@ public class RabbitTopologyConfiguration {
             long failureId = 0L;
             RuntimeException databaseFailure = null;
             try {
-                failureId = repository.insertManualFailure(
+                failureId = repository.insertManualFailureAndRecordConsumptionFailure(
                         eventId, payload, category.name(), failureMessage, attempts, Instant.now());
             } catch (RuntimeException exception) {
                 // The database is the preferred durable copy, but it is not the only safe path.
@@ -202,9 +202,6 @@ public class RabbitTopologyConfiguration {
                 return;
             }
             repository.markManualDelivered(failureId, Instant.now());
-            if (eventId != null) {
-                repository.recordConsumptionFailure(eventId, category.name(), failureMessage, Instant.now());
-            }
         };
     }
 
