@@ -41,7 +41,7 @@
 覆盖 Cache Aside、正/负缓存、事务提交后失效、热点 Key 重建锁、Redisson、Actuator、k6、Prometheus 与 Grafana。
 
 - 入口：[learning/redis-cache](https://github.com/5Koi1shi4/java-roadmap/tree/learning/redis-cache/labs/02-redis-cache)
-- 验证：在 JDK 17 与 Docker Desktop 下执行 `mvnw.cmd verify`；已验收 24 个单元测试和 22 个 Testcontainers 集成测试。
+- 验证：在 JDK 17 与 Docker Desktop 下执行 `mvnw.cmd verify`；已验收 25 个单元测试和 23 个 Testcontainers 集成测试，0 failures、0 errors、0 skipped。
 
 ### 实验三：秒杀、库存与接口幂等
 
@@ -55,7 +55,7 @@
 覆盖订单状态条件更新、事务内 Outbox、RabbitMQ publisher confirm、租约接管、TTL 分桶、DLX、消费幂等、异常分类和有限重试。
 
 - 入口：[feat/order-mq-reliable-messaging](https://github.com/5Koi1shi4/java-roadmap/tree/feat/order-mq-reliable-messaging/labs/04-order-mq)
-- 验证：在 JDK 17 与 Docker Desktop 下执行 `mvnw.cmd verify`；已验收 59 个 Surefire 单元测试和 26 个 Failsafe/Testcontainers 集成测试，0 failures、0 errors、0 skipped。
+- 验证：在 JDK 17 与 Docker Desktop 下执行 `mvnw.cmd verify`；已验收 59 个 Surefire 单元测试和 27 个 Failsafe/Testcontainers 集成测试，0 failures、0 errors、0 skipped。
 
 ## 目录导航
 
