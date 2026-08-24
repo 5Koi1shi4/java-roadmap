@@ -53,7 +53,7 @@ public class ElasticsearchSearchIndexWriter implements SearchIndexWriter {
         }
     }
 
-    private static IndexWriteResult mapItem(IndexMutation mutation, BulkResponseItem item) {
+    static IndexWriteResult mapItem(IndexMutation mutation, BulkResponseItem item) {
         if (item.status() >= 200 && item.status() < 300) {
             return new IndexWriteResult(mutation.productId(), mutation.sourceVersion(),
                     IndexWriteResult.Outcome.APPLIED, item.result());
