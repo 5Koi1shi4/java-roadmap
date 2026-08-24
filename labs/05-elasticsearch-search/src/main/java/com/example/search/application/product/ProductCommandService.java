@@ -5,6 +5,7 @@ import com.example.search.application.sync.SearchCoordinationRepository;
 import com.example.search.application.sync.SearchOutboxRepository;
 import com.example.search.domain.Product;
 import com.example.search.domain.ProductSearchSnapshot;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -18,6 +19,7 @@ public class ProductCommandService {
     private final SearchOutboxRepository outboxRepository;
     private final Clock clock;
 
+    @Autowired
     public ProductCommandService(ProductRepository productRepository,
                                  SearchCoordinationRepository coordinationRepository,
                                  SearchOutboxRepository outboxRepository) {
