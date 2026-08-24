@@ -153,6 +153,7 @@ public class SearchRebuildPreparer {
                     jobs.find(jobId).map(RebuildJob::importedCount).orElse(imported));
         } catch (RuntimeException failure) {
             writeTx(() -> {
+                coordination.lockExclusive();
                 jobs.markFailed(jobId, owner, reason(failure));
                 return null;
             });
@@ -170,6 +171,7 @@ public class SearchRebuildPreparer {
             while (!page.isEmpty()) {
                 List<IndexMutation> mutations = page.stream()
                         .map(ProductSearchSnapshot::from).map(IndexMutation::from).toList();
+                renewOrThrow(jobId, owner);
                 verifyWrites(target, mutations);
                 imported += page.size();
                 lastId = page.get(page.size() - 1).id();
@@ -189,6 +191,7 @@ public class SearchRebuildPreparer {
             if (page.isEmpty()) break;
             List<IndexMutation> mutations = page.stream().map(SearchOutboxEvent::snapshot)
                     .map(IndexMutation::from).toList();
+            renewOrThrow(jobId, owner);
             verifyWrites(target, mutations);
             total += page.size();
             long pageLast = page.get(page.size() - 1).id();
