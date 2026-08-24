@@ -89,8 +89,8 @@ class RebuildPreparationIT extends SharedSearchContainers {
                 + "FROM search_rebuild_job WHERE job_id=?", prepared.jobId().toString());
         assertThat(job).containsEntry("status", "RUNNING").containsEntry("phase", "CATCH_UP")
                 .containsEntry("start_watermark", prepared.startWatermark())
-                .containsEntry("final_watermark", prepared.preparedWatermark())
-                .containsEntry("lease_valid", true);
+                .containsEntry("final_watermark", prepared.preparedWatermark());
+        assertThat(((Number) job.get("lease_valid")).intValue()).isEqualTo(1);
     }
 
     @Test
