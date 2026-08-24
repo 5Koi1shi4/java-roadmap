@@ -13,8 +13,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Timestamp;
 import java.time.Duration;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -71,10 +72,12 @@ public class JdbcSearchOutboxRepository implements SearchOutboxRepository {
                 throw new IllegalStateException("outbox claim lost for id " + id);
             }
             SearchOutboxEvent event = findById(id);
-            Timestamp lease = jdbc.queryForObject("SELECT lease_until FROM search_outbox WHERE id=?", Timestamp.class, id);
+            LocalDateTime lease = jdbc.queryForObject(
+                    "SELECT lease_until FROM search_outbox WHERE id=?",
+                    (rs, rowNum) -> rs.getObject("lease_until", LocalDateTime.class), id);
             claimed.add(new ClaimedOutboxEvent(event.id(), event.eventId(), event.productId(), event.productVersion(),
                     event.eventType(), event.snapshot(), event.attemptCount(), owner, token,
-                    lease.toInstant()));
+                    lease.toInstant(ZoneOffset.UTC)));
         }
         return claimed;
     }
