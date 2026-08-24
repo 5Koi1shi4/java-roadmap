@@ -147,7 +147,7 @@ class ProductPersistenceIT extends SharedMySqlContainer {
         assertThat(payload.get("description").asText()).isEqualTo("教材");
         assertThat(payload.get("categoryCode").asText()).isEqualTo("BOOK");
         assertThat(payload.get("categoryName").asText()).isEqualTo("图书");
-        assertThat(payload.get("price").asText()).isEqualTo("10.00");
+        assertThat(payload.get("price").decimalValue()).isEqualByComparingTo(new BigDecimal("10.00"));
         assertThat(payload.get("status").asText()).isEqualTo(status);
         assertThat(payload.get("createdAt").asText()).isNotBlank();
         assertThat(payload.get("updatedAt").asText()).isNotBlank();
