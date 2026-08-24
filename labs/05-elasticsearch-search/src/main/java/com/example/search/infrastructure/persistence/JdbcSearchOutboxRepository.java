@@ -15,7 +15,6 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -38,10 +37,8 @@ public class JdbcSearchOutboxRepository implements SearchOutboxRepository {
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("could not serialize search snapshot", e);
         }
-        Instant createdAt = snapshot.updatedAt();
-        jdbc.update("INSERT INTO search_outbox(event_id, product_id, product_version, event_type, payload, status, available_at, created_at) VALUES (?, ?, ?, ?, ?, 'NEW', ?, ?)",
-                UUID.randomUUID().toString(), snapshot.productId(), snapshot.sourceVersion(), eventType.name(), payload,
-                Timestamp.from(createdAt), Timestamp.from(createdAt));
+        jdbc.update("INSERT INTO search_outbox(event_id, product_id, product_version, event_type, payload, status, available_at, created_at) VALUES (?, ?, ?, ?, ?, 'NEW', UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))",
+                UUID.randomUUID().toString(), snapshot.productId(), snapshot.sourceVersion(), eventType.name(), payload);
     }
 
     @Override

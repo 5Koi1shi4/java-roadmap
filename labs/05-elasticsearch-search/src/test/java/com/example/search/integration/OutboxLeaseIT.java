@@ -16,6 +16,7 @@ import javax.sql.DataSource;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -52,6 +53,25 @@ class OutboxLeaseIT extends SharedMySqlContainer {
         });
         assertThat(outbox.complete(firstClaim.eventId(), firstClaim.claimToken())).isFalse();
         assertThat(outbox.complete(second.get(0).eventId(), second.get(0).claimToken())).isTrue();
+    }
+
+    @Test
+    void newlyAppendedOutboxIsAvailableAccordingToDatabaseClock() {
+        products.create(new CreateProductCommand(new ProductDetails(
+                "书", null, "教材", "BOOK", "图书", new BigDecimal("10.00"), ProductStatus.ON_SALE)));
+
+        Map<String, Object> timing = jdbc.queryForMap(
+                "SELECT available_at, UTC_TIMESTAMP(6) AS db_now, @@session.time_zone AS session_time_zone, "
+                        + "TIMESTAMPDIFF(MICROSECOND, available_at, UTC_TIMESTAMP(6)) AS delta_micros, "
+                        + "(available_at <= UTC_TIMESTAMP(6)) AS available_now "
+                        + "FROM search_outbox ORDER BY id DESC LIMIT 1");
+        String evidence = "available_at=" + timing.get("available_at")
+                + ", db_now=" + timing.get("db_now")
+                + ", session_time_zone=" + timing.get("session_time_zone")
+                + ", delta_micros=" + timing.get("delta_micros");
+
+        assertThat(((Number) timing.get("available_now")).intValue()).as(evidence).isEqualTo(1);
+        assertThat(((Number) timing.get("delta_micros")).longValue()).as(evidence).isGreaterThanOrEqualTo(0L);
     }
 
     @Test
