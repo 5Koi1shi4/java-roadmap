@@ -4,6 +4,7 @@ import com.example.search.application.product.CreateProductCommand;
 import com.example.search.application.product.ProductCommandService;
 import com.example.search.application.product.ProductView;
 import com.example.search.application.product.UpdateProductCommand;
+import com.example.search.application.sync.ClaimedOutboxEvent;
 import com.example.search.application.sync.OutboxClaimService;
 import com.example.search.domain.ProductDetails;
 import com.example.search.domain.ProductStatus;
@@ -16,6 +17,11 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import javax.sql.DataSource;
 import java.math.BigDecimal;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.stream.Collectors;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -53,17 +59,42 @@ class DatabaseLockOrderIT extends SharedMySqlContainer {
                 jdbc.update("UPDATE search_coordination SET dispatcher_paused = NOT dispatcher_paused WHERE id = 1");
                 return null;
             }));
-            Future<?> claim = executor.submit(() -> transactionTemplate.execute(status -> {
+            Future<List<ClaimedOutboxEvent>> claim = executor.submit(() -> transactionTemplate.execute(status -> {
                 await(start);
-                outbox.claim("node-a", 50);
-                return null;
+                return outbox.claim("node-a", 50);
             }));
 
             productWrite.get(5, TimeUnit.SECONDS);
             pauseUpdate.get(5, TimeUnit.SECONDS);
-            claim.get(5, TimeUnit.SECONDS);
+            List<ClaimedOutboxEvent> claimed = claim.get(5, TimeUnit.SECONDS);
+            assertThat(productWrite.isDone()).isTrue();
+            assertThat(pauseUpdate.isDone()).isTrue();
+            assertThat(claim.isDone()).isTrue();
             assertThat(jdbc.queryForObject("SELECT version FROM product WHERE id=?", Long.class, product.id()))
                     .isEqualTo(2L);
+            assertThat(jdbc.queryForObject("SELECT dispatcher_paused FROM search_coordination WHERE id=1", Boolean.class))
+                    .isTrue();
+
+            Set<UUID> claimedIds = claimed.stream().map(ClaimedOutboxEvent::eventId).collect(Collectors.toSet());
+            List<Map<String, Object>> rows = jdbc.queryForList(
+                    "SELECT event_id, status, owner, claim_token, attempt_count, lease_until FROM search_outbox ORDER BY id");
+            assertThat(rows).hasSize(2);
+            for (Map<String, Object> row : rows) {
+                UUID eventId = UUID.fromString((String) row.get("event_id"));
+                if (claimedIds.contains(eventId)) {
+                    assertThat(row.get("status")).isEqualTo("PROCESSING");
+                    assertThat(row.get("owner")).isEqualTo("node-a");
+                    assertThat(row.get("claim_token")).isNotNull();
+                    assertThat(row.get("attempt_count")).isEqualTo(1);
+                    assertThat(row.get("lease_until")).isNotNull();
+                } else {
+                    assertThat(row.get("status")).isEqualTo("NEW");
+                    assertThat(row.get("owner")).isNull();
+                    assertThat(row.get("claim_token")).isNull();
+                    assertThat(row.get("attempt_count")).isEqualTo(0);
+                    assertThat(row.get("lease_until")).isNull();
+                }
+            }
         } finally {
             executor.shutdownNow();
         }
