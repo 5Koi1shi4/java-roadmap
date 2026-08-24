@@ -16,6 +16,12 @@ public class JdbcSearchCoordinationRepository implements SearchCoordinationRepos
     }
 
     @Override
+    public void lockExclusive() {
+        jdbc.queryForObject("SELECT id FROM search_coordination WHERE id = 1 FOR UPDATE",
+                Integer.class);
+    }
+
+    @Override
     public boolean lockSharedAndReadDispatcherPaused() {
         Boolean paused = jdbc.queryForObject(
                 "SELECT dispatcher_paused FROM search_coordination WHERE id = 1 FOR SHARE",
