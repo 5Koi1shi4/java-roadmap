@@ -1,0 +1,28 @@
+spring:
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3311/product_search}
+    username: ${DB_USERNAME:product_search}
+    password: ${DB_PASSWORD:}
+  elasticsearch:
+    uris: ${ELASTICSEARCH_URIS:http://localhost:9200}
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+server:
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+search:
+  batch-size: 50
+  lease-duration: 30s
+  request-timeout: 10s
+  dispatch-delay: 1s
+  maintenance:
+    enabled: false
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics
