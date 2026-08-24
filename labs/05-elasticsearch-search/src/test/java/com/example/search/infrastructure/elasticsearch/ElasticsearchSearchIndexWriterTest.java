@@ -1,8 +1,13 @@
 package com.example.search.infrastructure.elasticsearch;
 
 import co.elastic.clients.elasticsearch._types.ErrorCause;
+import co.elastic.clients.elasticsearch.ElasticsearchClient;
+import co.elastic.clients.elasticsearch.core.BulkRequest;
 import co.elastic.clients.elasticsearch.core.bulk.BulkResponseItem;
 import co.elastic.clients.elasticsearch.core.bulk.OperationType;
+import com.example.search.application.sync.SearchIndexWriter;
+import com.example.search.application.sync.SyncFailureClassifier;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.example.search.application.sync.IndexMutation;
 import com.example.search.application.sync.IndexWriteResult;
 import org.junit.jupiter.api.Test;
@@ -10,6 +15,9 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class ElasticsearchSearchIndexWriterTest {
     private static final IndexMutation MUTATION = IndexMutation.upsert(7L, 3L,
@@ -43,6 +51,17 @@ class ElasticsearchSearchIndexWriterTest {
         assertThat(ElasticsearchSearchIndexWriter.mapItem(MUTATION,
                 item(400, ErrorCause.of(e -> e.type("mapper_parsing_exception").reason("bad"))))
                 .outcome()).isEqualTo(IndexWriteResult.Outcome.PERMANENT_FAILURE);
+    }
+
+    @Test
+    void classifiesSerializationIOExceptionAsPermanentInsteadOfRetryable() throws Exception {
+        ElasticsearchClient client = mock(ElasticsearchClient.class);
+        when(client.bulk(any(BulkRequest.class))).thenThrow(new JsonProcessingException("serialization failed") { });
+        SearchIndexWriter writer = new ElasticsearchSearchIndexWriter(client, new SyncFailureClassifier());
+
+        assertThat(writer.bulkWrite("products-write", java.util.List.of(MUTATION)))
+                .singleElement().extracting(IndexWriteResult::outcome)
+                .isEqualTo(IndexWriteResult.Outcome.PERMANENT_FAILURE);
     }
 
     private static BulkResponseItem item(int status, ErrorCause cause) {

@@ -1,7 +1,6 @@
 package com.example.search.infrastructure.elasticsearch;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
-import co.elastic.clients.elasticsearch._types.ElasticsearchException;
 import co.elastic.clients.elasticsearch._types.VersionType;
 import co.elastic.clients.elasticsearch.core.BulkResponse;
 import co.elastic.clients.elasticsearch.core.bulk.BulkOperation;
@@ -9,18 +8,24 @@ import co.elastic.clients.elasticsearch.core.bulk.BulkResponseItem;
 import com.example.search.application.sync.IndexMutation;
 import com.example.search.application.sync.IndexWriteResult;
 import com.example.search.application.sync.SearchIndexWriter;
+import com.example.search.application.sync.SyncFailureClassifier;
 import org.springframework.stereotype.Component;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
 @Component
 public class ElasticsearchSearchIndexWriter implements SearchIndexWriter {
     private final ElasticsearchClient client;
+    private final SyncFailureClassifier failureClassifier;
 
     public ElasticsearchSearchIndexWriter(ElasticsearchClient client) {
+        this(client, new SyncFailureClassifier());
+    }
+
+    public ElasticsearchSearchIndexWriter(ElasticsearchClient client, SyncFailureClassifier failureClassifier) {
         this.client = client;
+        this.failureClassifier = failureClassifier;
     }
 
     @Override
@@ -41,15 +46,11 @@ public class ElasticsearchSearchIndexWriter implements SearchIndexWriter {
                 results.add(mapItem(mutations.get(i), response.items().get(i)));
             }
             return results;
-        } catch (ElasticsearchException e) {
-            IndexWriteResult.Outcome outcome = retryableStatus(e.status())
-                    ? IndexWriteResult.Outcome.RETRYABLE_FAILURE
-                    : IndexWriteResult.Outcome.PERMANENT_FAILURE;
+        } catch (Exception e) {
+            IndexWriteResult.Outcome outcome = failureClassifier.classify(e);
+            String reason = failureClassifier.reason(e);
             return mutations.stream().map(m -> new IndexWriteResult(m.productId(), m.sourceVersion(), outcome,
-                    e.getMessage())).toList();
-        } catch (IOException e) {
-            return mutations.stream().map(m -> new IndexWriteResult(m.productId(), m.sourceVersion(),
-                    IndexWriteResult.Outcome.RETRYABLE_FAILURE, e.getMessage())).toList();
+                    reason)).toList();
         }
     }
 

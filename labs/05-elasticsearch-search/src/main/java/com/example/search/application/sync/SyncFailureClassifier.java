@@ -1,6 +1,7 @@
 package com.example.search.application.sync;
 
 import co.elastic.clients.elasticsearch._types.ElasticsearchException;
+import com.fasterxml.jackson.core.JsonProcessingException;
 
 import java.io.IOException;
 import java.net.ConnectException;
@@ -11,9 +12,13 @@ import java.net.UnknownHostException;
 import java.net.http.HttpTimeoutException;
 import java.util.Locale;
 import java.util.concurrent.TimeoutException;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** Classifies failures that happen outside an individual bulk item. */
 public final class SyncFailureClassifier {
+    private static final Pattern HTTP_STATUS = Pattern.compile(
+            "(?i)(?:http(?:\\s+status|\\s+code)?|response\\s+status|status(?:\\s+code)?)\\s*[:=]?\\s*(429|[45]\\d{2})\\b");
     public IndexWriteResult.Outcome classify(Throwable failure) {
         if (failure == null) {
             return IndexWriteResult.Outcome.PERMANENT_FAILURE;
@@ -47,8 +52,14 @@ public final class SyncFailureClassifier {
         if (failure == null) {
             return "unknown synchronization failure";
         }
-        String message = failure.getMessage();
-        if (message == null || message.isBlank()) {
+        String message = null;
+        for (Throwable current = failure; current != null; current = current.getCause()) {
+            if (current.getMessage() != null && !current.getMessage().isBlank()) {
+                message = current.getMessage();
+                break;
+            }
+        }
+        if (message == null) {
             message = failure.getClass().getSimpleName();
         }
         return sanitizeReason(message);
@@ -68,7 +79,11 @@ public final class SyncFailureClassifier {
         String lowerMessage = message == null ? "" : message.toLowerCase(Locale.ROOT);
         return failure instanceof IllegalArgumentException
                 || failure instanceof URISyntaxException
+                || failure instanceof JsonProcessingException
                 || name.contains("jsonprocess")
+                || name.contains("jsonmapping")
+                || name.contains("jsonparsing")
+                || name.contains("jsonp")
                 || name.contains("serialization")
                 || lowerMessage.contains("mapper_parsing")
                 || lowerMessage.contains("strict_dynamic_mapping")
@@ -99,7 +114,7 @@ public final class SyncFailureClassifier {
 
     private static Integer statusInMessage(String message) {
         if (message == null) return null;
-        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("\\b([245]\\d\\d)\\b").matcher(message);
+        Matcher matcher = HTTP_STATUS.matcher(message);
         return matcher.find() ? Integer.valueOf(matcher.group(1)) : null;
     }
 }

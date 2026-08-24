@@ -1,6 +1,7 @@
 package com.example.search.application.sync;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -27,10 +28,22 @@ public class OutboxDispatcher {
     private final SearchSyncMetrics metrics;
     private final String owner;
 
-    @Autowired
     public OutboxDispatcher(OutboxClaimService claims, SearchIndexWriter writer) {
         this(claims, writer, new RetrySchedule(), new SyncFailureClassifier(), new NoopMetrics(),
                 "search-dispatcher-" + UUID.randomUUID());
+    }
+
+    @Autowired
+    public OutboxDispatcher(OutboxClaimService claims, SearchIndexWriter writer,
+                            ObjectProvider<SearchSyncMetrics> metricsProvider) {
+        this(claims, writer, new RetrySchedule(), new SyncFailureClassifier(),
+                resolveMetrics(metricsProvider), "search-dispatcher-" + UUID.randomUUID());
+    }
+
+    public OutboxDispatcher(OutboxClaimService claims, SearchIndexWriter writer,
+                            ObjectProvider<SearchSyncMetrics> metricsProvider, String owner) {
+        this(claims, writer, new RetrySchedule(), new SyncFailureClassifier(),
+                resolveMetrics(metricsProvider), owner);
     }
 
     public OutboxDispatcher(OutboxClaimService claims, SearchIndexWriter writer, SearchSyncMetrics metrics) {
@@ -66,9 +79,16 @@ public class OutboxDispatcher {
 
         Map<MutationKey, ArrayDeque<IndexWriteResult>> writes = new HashMap<>();
         Map<MutationKey, String> conversionFailures = new HashMap<>();
+        Map<MutationKey, Integer> keyCounts = new HashMap<>();
+        for (ClaimedOutboxEvent event : claimed) {
+            keyCounts.merge(new MutationKey(event.productId(), event.productVersion()), 1, Integer::sum);
+        }
         List<IndexMutation> mutations = new ArrayList<>();
         for (ClaimedOutboxEvent event : claimed) {
             MutationKey key = new MutationKey(event.productId(), event.productVersion());
+            if (keyCounts.get(key) > 1) {
+                continue;
+            }
             try {
                 mutations.add(IndexMutation.from(event.snapshot()));
             } catch (RuntimeException exception) {
@@ -101,7 +121,9 @@ public class OutboxDispatcher {
         Counters counters = new Counters();
         for (ClaimedOutboxEvent event : claimed) {
             MutationKey key = new MutationKey(event.productId(), event.productVersion());
-            String conversionFailure = conversionFailures.get(key);
+            String conversionFailure = keyCounts.get(key) > 1
+                    ? "ambiguous product version in claimed outbox batch"
+                    : conversionFailures.get(key);
             IndexWriteResult result = conversionFailure == null && writes.containsKey(key)
                     ? writes.get(key).pollFirst()
                     : null;
@@ -117,6 +139,12 @@ public class OutboxDispatcher {
         counters.recordMetrics(metrics, elapsed);
         return new DispatchSummary(claimed.size(), counters.completed, counters.rescheduled,
                 counters.failed, counters.fenced);
+    }
+
+    private static SearchSyncMetrics resolveMetrics(ObjectProvider<SearchSyncMetrics> provider) {
+        if (provider == null) return new NoopMetrics();
+        SearchSyncMetrics metrics = provider.getIfAvailable();
+        return metrics == null ? new NoopMetrics() : metrics;
     }
 
     private void applyResult(ClaimedOutboxEvent event, IndexWriteResult result, Counters counters) {
