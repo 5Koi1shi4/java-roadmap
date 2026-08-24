@@ -43,6 +43,21 @@ public class JdbcSearchOutboxRepository implements SearchOutboxRepository {
     }
 
     @Override
+    public long highWatermark() {
+        Long value = jdbc.queryForObject("SELECT COALESCE(MAX(id), 0) FROM search_outbox", Long.class);
+        return value == null ? 0L : value;
+    }
+
+    @Override
+    public List<SearchOutboxEvent> eventsBetween(long exclusiveStart, long inclusiveEnd, int size) {
+        if (exclusiveStart < 0 || inclusiveEnd < exclusiveStart) throw new IllegalArgumentException("invalid watermark range");
+        if (size < 1 || size > 500) throw new IllegalArgumentException("size must be between 1 and 500");
+        return jdbc.query("SELECT id, event_id, product_id, product_version, event_type, payload, attempt_count "
+                        + "FROM search_outbox WHERE id > ? AND id <= ? ORDER BY id LIMIT ?", this::mapEvent,
+                exclusiveStart, inclusiveEnd, size);
+    }
+
+    @Override
     @Transactional
     public List<ClaimedOutboxEvent> claim(String owner, int limit) {
         if (owner == null || owner.isBlank() || owner.length() > 128) {

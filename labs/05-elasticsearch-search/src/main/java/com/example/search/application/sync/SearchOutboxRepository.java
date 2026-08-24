@@ -9,6 +9,14 @@ import java.util.UUID;
 public interface SearchOutboxRepository {
     void append(ProductSearchSnapshot snapshot, OutboxEventType eventType);
 
+    default long highWatermark() {
+        throw new UnsupportedOperationException("outbox watermark is not implemented");
+    }
+
+    default List<SearchOutboxEvent> eventsBetween(long exclusiveStart, long inclusiveEnd, int size) {
+        throw new UnsupportedOperationException("outbox replay is not implemented");
+    }
+
     default List<ClaimedOutboxEvent> claim(String owner, int limit) {
         throw new UnsupportedOperationException("outbox claiming is not implemented");
     }

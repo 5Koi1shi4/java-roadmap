@@ -25,9 +25,14 @@ public class ElasticsearchIndexManager {
 
     public String createPhysicalIndex(UUID jobId) {
         if (jobId == null) throw new IllegalArgumentException("jobId is required");
-        String name = "products-v" + jobId.toString().replace("-", "");
+        String name = physicalIndexName(jobId);
         create(name);
         return name;
+    }
+
+    public String physicalIndexName(UUID jobId) {
+        if (jobId == null) throw new IllegalArgumentException("jobId is required");
+        return "products-v" + jobId.toString().replace("-", "");
     }
 
     public String createBootstrapIndex() {

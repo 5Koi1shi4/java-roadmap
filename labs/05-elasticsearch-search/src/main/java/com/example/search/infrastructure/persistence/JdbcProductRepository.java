@@ -13,6 +13,7 @@ import java.sql.PreparedStatement;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Optional;
+import java.util.List;
 
 @Repository
 public class JdbcProductRepository implements ProductRepository {
@@ -59,6 +60,14 @@ public class JdbcProductRepository implements ProductRepository {
     public Optional<Product> findById(long id) {
         return jdbc.query("SELECT id, name, subtitle, description, category_code, category_name, price, status, version, created_at, updated_at FROM product WHERE id=?",
                 rs -> rs.next() ? Optional.of(map(rs)) : Optional.empty(), id);
+    }
+
+    @Override
+    public List<Product> findPageAfter(long lastId, int size) {
+        if (lastId < 0) throw new IllegalArgumentException("lastId must not be negative");
+        if (size < 1 || size > 500) throw new IllegalArgumentException("size must be between 1 and 500");
+        return jdbc.query("SELECT id, name, subtitle, description, category_code, category_name, price, status, version, created_at, updated_at "
+                        + "FROM product WHERE id > ? ORDER BY id LIMIT ?", (rs, rowNum) -> map(rs), lastId, size);
     }
 
     private Product map(java.sql.ResultSet rs) throws java.sql.SQLException {
