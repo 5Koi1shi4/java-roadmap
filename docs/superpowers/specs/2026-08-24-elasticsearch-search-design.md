@@ -15,6 +15,16 @@
 
 本实验不复用前四个实验的代码、数据库或运行环境，只复用已经验证过的分层、条件领取、租约和 token fencing 思路。阶段五不引入 Kafka、Debezium、自动补全、同义词或面向客户端的深分页。
 
+### 1.1 实施优先级
+
+实施顺序按风险而不是按接口数量安排：
+
+1. **P0 并发正确性**：先用真实 MySQL 测试钉住 Outbox 条件领取、租约接管、claim token fencing、固定锁顺序、高水位重放和最终切换窗口，再扩展应用功能。
+2. **P1 搜索主线**：完成 SmartCN、多字段权重、过滤、稳定排序、分页、高亮和聚合，并以真实中文 HTTP 行为作为实验的主要展示结果。
+3. **P2 必要支撑**：只实现可靠同步、重建、检查和修复所需的最小运维接口与指标，不建设通用任务平台、管理后台、鉴权系统或自动索引生命周期平台。
+
+并发控制的目标不是宣称端到端 exactly-once。数据库领取和状态提交必须严格互斥；Elasticsearch 请求采用至少一次语义，进程在“ES 成功、数据库完成前”崩溃时允许再次发送相同请求，但重复请求必须幂等且不得导致文档复活、版本回退或 Outbox 状态被旧 owner 覆盖。
+
 ## 2. 仓库与技术基线
 
 - 分支：`learning/elasticsearch-search`
@@ -92,6 +102,14 @@ HTTP 商品变更
 `search_rebuild_job` 持久化任务 ID、目标物理索引、状态 `PENDING/RUNNING/COMPLETED/FAILED`、租约、起止高水位、导入数量、校验结果和长度受限的失败原因。
 
 `search_coordination` 保存单例协调行和 dispatcher pause 标志。商品变更事务在修改商品前对该行取得共享锁；重建最终切换使用排他锁形成有界写入窗口。Outbox 领取事务必须先读取 pause 标志，为 `true` 时不得领取新事件。
+
+所有需要数据库行锁的路径遵循固定顺序：
+
+```text
+search_coordination → search_rebuild_job → product → search_outbox
+```
+
+路径可以跳过无关表，但不得反向加锁。商品变更取得 coordination 共享锁后再锁商品并插入 Outbox；dispatcher 在同一短事务中取得 coordination 共享锁、检查 pause 标志并领取 Outbox；重建最终切换取得 coordination 排他锁后再更新任务、读取商品和 Outbox 高水位。租约与 `available_at` 判断统一使用 MySQL 时间。
 
 ## 5. Elasticsearch 索引模型
 
@@ -178,6 +196,8 @@ NEW → PROCESSING → COMPLETED
 
 租约过期后其他实例可以接管。旧 owner 的迟到成功、失败或超时结果影响行数必须为 0，不能覆盖新 owner。领取和状态修改均使用数据库时间判断租约，避免实例时钟漂移决定所有权。
 
+claim token 只约束数据库所有权，不能撤销已经发往 Elasticsearch 的请求。旧 owner 即使在失去租约后迟到写入 Elasticsearch，也只能提交自身商品版本；外部版本拒绝其覆盖更新状态，数据库 token 条件则拒绝其完成或重排 Outbox。这两个约束共同保证最终状态单调前进。
+
 ### 7.2 Elasticsearch 写入
 
 每个 bulk item 使用商品业务版本作为 Elasticsearch 外部版本，并采用允许相同版本重复执行但拒绝旧版本覆盖新版本的语义。相同版本的重复 UPSERT、重复 tombstone 和重放修复均为幂等成功；低于索引当前版本的事件视为已经被新状态超越，不再重试。
@@ -246,6 +266,7 @@ Actuator/Micrometer 暴露：
 - 两个实例不会同时完成同一事件。
 - 过期租约可接管，旧 owner 的迟到结果不能覆盖新 owner。
 - 逻辑删除生成递增版本和唯一 tombstone 事件。
+- 两条独立数据库连接按固定顺序竞争 coordination、商品与 Outbox 锁，不出现反向加锁或死锁；pause 标志与领取处于同一事务观察点。
 
 ### 11.3 MySQL、Elasticsearch 与真实 HTTP 集成测试
 
@@ -258,6 +279,8 @@ Actuator/Micrometer 暴露：
 - bulk 部分失败只重试失败项。
 - 重建期间并发修改不会遗漏或版本回退，读写别名原子切换。
 - 一致性检查识别缺失、落后和多余文档，指定修复后重新一致。
+- 在同一组真实容器中连续完成 3 次“并发商品变更 + 全量重建 + 别名切换”，每次都通过全量一致性检查。
+- 在同一组真实容器中连续完成 2 次“Elasticsearch 中断 + Outbox 积压 + 服务恢复 + 自动追平”，确认无跳过、无状态回退且资源可重复使用。
 
 Testcontainers 测试必须真实启动 MySQL 8 与安装对应版本 `analysis-smartcn` 的 Elasticsearch 8.18.8 镜像。Docker 不可用或外部协作测试被跳过不算完整验收。
 
