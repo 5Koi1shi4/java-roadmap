@@ -2,9 +2,8 @@ package com.example.search.integration;
 
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.annotation.DirtiesContext;
 import org.testcontainers.containers.MySQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -12,14 +11,19 @@ import java.sql.SQLException;
 import java.sql.Statement;
 
 /** Shared real MySQL service for integration tests in this experiment. */
-@Testcontainers
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 public abstract class SharedMySqlContainer {
 
-    @Container
-    static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.4")
-            .withDatabaseName("product_search")
-            .withUsername("product_search")
-            .withPassword("product_search");
+    static final MySQLContainer<?> MYSQL;
+
+    static {
+        MYSQL = new MySQLContainer<>("mysql:8.4")
+                .withDatabaseName("product_search")
+                .withUsername("product_search")
+                .withPassword("product_search");
+        MYSQL.start();
+        Runtime.getRuntime().addShutdownHook(new Thread(MYSQL::stop, "shared-mysql-container-shutdown"));
+    }
 
     @DynamicPropertySource
     static void registerDataSourceProperties(DynamicPropertyRegistry registry) {
