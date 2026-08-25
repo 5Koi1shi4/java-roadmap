@@ -43,10 +43,14 @@ class ElasticsearchIndexIT extends SharedSearchContainers {
     }
 
     @Test
-    void installsSmartCnAndRejectsUnknownFields() {
+    void installsSmartCnAndRejectsUnknownFields() throws Exception {
         assertThat(manager.pluginNames()).contains("analysis-smartcn");
         String index = manager.createPhysicalIndex(java.util.UUID.randomUUID());
         indexesCreatedByTest.add(index);
+        var analysis = client.indices().analyze(a -> a.index(index).analyzer("smartcn").text("并发编程实战"));
+        assertThat(analysis.tokens()).extracting(token -> token.token())
+                .contains("并发", "编程")
+                .doesNotContain("并", "发", "编", "程");
         assertThatThrownBy(() -> client.index(i -> i.index(index).id("raw")
                         .document(java.util.Map.of("productId", 1, "unknown", true))))
                 .hasMessageContaining("strict_dynamic_mapping_exception");

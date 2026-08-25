@@ -22,7 +22,11 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import javax.sql.DataSource;
 import java.math.BigDecimal;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
+
+import org.springframework.web.util.UriComponentsBuilder;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -49,21 +53,39 @@ class ProductSearchHttpIT extends SharedSearchContainers {
     @Test
     void searchesSmartCnWithWeightedNameHighlightFiltersSortAndBuckets() throws Exception {
         String suffix = Long.toString(System.nanoTime());
-        ProductView nameMatch = createAndSync("Java 并发编程 " + suffix, "后端教材", "BOOK", "图书", "20.00", "ON_SALE");
-        createAndSync("闲置台灯 " + suffix, "适合阅读 Java 教材", "LIFE", "生活", "10.00", "ON_SALE");
-        createAndSync("下架 Java " + suffix, "不可售", "BOOK", "图书", "5.00", "OFF_SHELF");
+        ProductView nameMatch = createAndSync("Java并发编程实战 " + suffix, "后端教材", "BOOK", "图书", "20.00", "ON_SALE",
+                "面向工程师的Java开发教材");
+        ProductView descriptionMatch = createAndSync("后端学习套装 " + suffix, "配套教材", "BOOK", "图书", "25.00", "ON_SALE",
+                "并发编程实践教材");
+        createAndSync("闲置台灯 " + suffix, "阅读灯具", "LIFE", "生活", "20.00", "ON_SALE",
+                "并发编程阅读灯");
+        createAndSync("下架并发编程 " + suffix, "不可售", "BOOK", "图书", "15.00", "OFF_SHELF",
+                "并发编程旧教材");
+        createAndSync("并发编程高价套装 " + suffix, "超出价格范围", "BOOK", "图书", "40.00", "ON_SALE",
+                "并发编程高级教材");
 
-        ResponseEntity<String> response = rest.getForEntity(
-                "/api/products/search?q=Java&categoryCode=BOOK&minPrice=10&maxPrice=30&size=10", String.class);
+        URI searchUri = UriComponentsBuilder.fromPath("/api/products/search")
+                .queryParam("q", "并发编程")
+                .queryParam("categoryCode", "BOOK")
+                .queryParam("minPrice", "10")
+                .queryParam("maxPrice", "30")
+                .queryParam("size", "10")
+                .build()
+                .encode(StandardCharsets.UTF_8)
+                .toUri();
+        ResponseEntity<String> response = rest.getForEntity(searchUri, String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(response.getHeaders().getContentType().toString()).isEqualTo("application/json;charset=UTF-8");
         JsonNode body = objectMapper.readTree(response.getBody());
         assertThat(body.at("/items/0/id").asLong()).isEqualTo(nameMatch.id());
-        assertThat(body.at("/items/0/name").asText()).contains("Java 并发编程");
-        assertThat(response.getBody()).contains("<em>Java</em>", "categoryCode", "categoryName");
+        assertThat(body.at("/items/0/name").asText()).contains("Java并发编程实战");
+        assertThat(body.at("/items/1/id").asLong()).isEqualTo(descriptionMatch.id());
+        assertThat(body.at("/items/0/highlights/name").toString()).contains("<em>", "并发");
+        assertThat(response.getBody()).contains("categoryCode", "categoryName");
         assertThat(body.at("/categories/0/code").asText()).isEqualTo("BOOK");
-        assertThat(body.at("/total").asLong()).isEqualTo(1L);
+        assertThat(body.at("/categories/0/count").asLong()).isEqualTo(2L);
+        assertThat(body.at("/total").asLong()).isEqualTo(2L);
     }
 
     @Test
@@ -157,8 +179,13 @@ class ProductSearchHttpIT extends SharedSearchContainers {
 
     private ProductView createAndSync(String name, String subtitle, String categoryCode, String categoryName,
                                       String price, String status) {
+        return createAndSync(name, subtitle, categoryCode, categoryName, price, status, "商品描述 " + name);
+    }
+
+    private ProductView createAndSync(String name, String subtitle, String categoryCode, String categoryName,
+                                      String price, String status, String description) {
         ProductView product = products.create(new CreateProductCommand(new ProductDetails(name, subtitle,
-                "商品描述 " + name, categoryCode, categoryName, new BigDecimal(price), ProductStatus.valueOf(status))));
+                description, categoryCode, categoryName, new BigDecimal(price), ProductStatus.valueOf(status))));
         assertThat(dispatcher.dispatchOnce()).isEqualTo(new DispatchSummary(1, 1, 0, 0, 0));
         indexes.refresh("products-write");
         return product;
