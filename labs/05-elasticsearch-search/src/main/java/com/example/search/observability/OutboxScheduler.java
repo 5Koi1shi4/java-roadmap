@@ -3,11 +3,13 @@ package com.example.search.observability;
 import com.example.search.application.sync.OutboxDispatcher;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 @Component
+@ConditionalOnProperty(prefix = "search.scheduling", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class OutboxScheduler {
     private final OutboxDispatcher dispatcher;
     private final AtomicBoolean searchStartupReady;

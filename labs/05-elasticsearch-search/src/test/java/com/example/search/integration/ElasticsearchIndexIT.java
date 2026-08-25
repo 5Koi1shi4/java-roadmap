@@ -2,6 +2,7 @@ package com.example.search.integration;
 
 import com.example.search.infrastructure.elasticsearch.ElasticsearchIndexManager;
 import com.example.search.application.maintenance.SearchIndexBootstrap;
+import com.example.search.application.maintenance.SplitAliasException;
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch.indices.update_aliases.Action;
 import org.junit.jupiter.api.Test;
@@ -99,7 +100,7 @@ class ElasticsearchIndexIT extends SharedSearchContainers {
                 Action.of(a -> a.add(x -> x.index(second).alias("products-read"))),
                 Action.of(a -> a.add(x -> x.index(first).alias("products-write")))));
 
-        assertThatThrownBy(bootstrap::ensureInitialized).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(bootstrap::ensureInitialized).isInstanceOf(SplitAliasException.class);
         assertThat(client.indices().getAlias(g -> g.name("products-read")).result()).containsKeys(first, second);
     }
 }

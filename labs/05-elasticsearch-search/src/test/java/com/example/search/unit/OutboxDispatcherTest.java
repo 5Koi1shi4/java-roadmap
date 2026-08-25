@@ -40,6 +40,15 @@ class OutboxDispatcherTest {
     private final SearchSyncMetrics metrics = mock(SearchSyncMetrics.class);
 
     @Test
+    void usesConfiguredClaimBatchSize() {
+        when(claims.claim("test-node", 7)).thenReturn(List.of());
+
+        new OutboxDispatcher(claims, writer, metrics, "test-node", 7).dispatchOnce();
+
+        verify(claims).claim("test-node", 7);
+    }
+
+    @Test
     void completesSuccessfulItemsAndRetriesOnlyTransientFailures() {
         ClaimedOutboxEvent eventA = event(1, 1);
         ClaimedOutboxEvent eventB = event(2, 1);

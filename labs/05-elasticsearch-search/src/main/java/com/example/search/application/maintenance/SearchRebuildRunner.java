@@ -84,7 +84,9 @@ public class SearchRebuildRunner {
                     cleanupFailure(jobId, job.owner(), reason(failure));
                 } catch (RuntimeException ignored) { }
             }
-            metrics.recordRebuild(false, Duration.between(started, Instant.now()), 0);
+            long differences = failure instanceof RebuildValidationException validation
+                    ? validation.differenceCount() : 0;
+            metrics.recordRebuild(false, Duration.between(started, Instant.now()), differences);
             throw failure;
         }
     }

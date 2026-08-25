@@ -10,8 +10,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class SearchPropertiesTest {
     @Test
-    void exposesSafeDefaults() {
-        SearchProperties properties = new SearchProperties();
+    void acceptsSafeDefaultValues() {
+        SearchProperties properties = new SearchProperties(50, Duration.ofSeconds(30),
+                Duration.ofSeconds(10), Duration.ofSeconds(1), new SearchProperties.Maintenance(false));
 
         assertThat(properties.batchSize()).isEqualTo(50);
         assertThat(properties.leaseDuration()).isEqualTo(Duration.ofSeconds(30));

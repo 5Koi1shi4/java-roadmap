@@ -1,17 +1,17 @@
 package com.example.search.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.DefaultValue;
 
 import java.time.Duration;
 import java.util.Objects;
 
 @ConfigurationProperties("search")
-public record SearchProperties(int batchSize, Duration leaseDuration, Duration requestTimeout,
-                               Duration dispatchDelay, Maintenance maintenance) {
-    public SearchProperties() {
-        this(50, Duration.ofSeconds(30), Duration.ofSeconds(10), Duration.ofSeconds(1),
-                new Maintenance(false));
-    }
+public record SearchProperties(@DefaultValue("50") int batchSize,
+                               @DefaultValue("30s") Duration leaseDuration,
+                               @DefaultValue("10s") Duration requestTimeout,
+                               @DefaultValue("1s") Duration dispatchDelay,
+                               @DefaultValue Maintenance maintenance) {
 
     public SearchProperties {
         if (batchSize < 1 || batchSize > 50) {
@@ -34,5 +34,5 @@ public record SearchProperties(int batchSize, Duration leaseDuration, Duration r
         return value;
     }
 
-    public record Maintenance(boolean enabled) { }
+    public record Maintenance(@DefaultValue("false") boolean enabled) { }
 }

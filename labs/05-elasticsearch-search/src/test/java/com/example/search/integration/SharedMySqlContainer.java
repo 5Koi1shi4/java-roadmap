@@ -3,6 +3,7 @@ package com.example.search.integration;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.annotation.DirtiesContext;
+import org.springframework.test.context.TestPropertySource;
 import org.testcontainers.containers.MySQLContainer;
 
 import javax.sql.DataSource;
@@ -12,6 +13,7 @@ import java.sql.Statement;
 
 /** Shared real MySQL service for integration tests in this experiment. */
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
+@TestPropertySource(properties = {"search.startup.enabled=false", "search.scheduling.enabled=false"})
 public abstract class SharedMySqlContainer {
 
     static final MySQLContainer<?> MYSQL;

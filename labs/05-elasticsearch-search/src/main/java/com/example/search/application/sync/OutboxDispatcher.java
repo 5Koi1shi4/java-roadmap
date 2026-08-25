@@ -1,5 +1,6 @@
 package com.example.search.application.sync;
 
+import com.example.search.config.SearchProperties;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
@@ -18,7 +19,7 @@ import java.util.UUID;
 /** Delivers claimed outbox rows while fencing every result with its claim token. */
 @Service
 public class OutboxDispatcher {
-    private static final int CLAIM_LIMIT = 50;
+    private static final int DEFAULT_CLAIM_LIMIT = 50;
     private static final String TARGET = "products-write";
 
     private final OutboxClaimService claims;
@@ -27,38 +28,56 @@ public class OutboxDispatcher {
     private final SyncFailureClassifier failureClassifier;
     private final SearchSyncMetrics metrics;
     private final String owner;
+    private final int claimLimit;
 
     public OutboxDispatcher(OutboxClaimService claims, SearchIndexWriter writer) {
         this(claims, writer, new RetrySchedule(), new SyncFailureClassifier(), new NoopMetrics(),
-                "search-dispatcher-" + UUID.randomUUID());
+                "search-dispatcher-" + UUID.randomUUID(), DEFAULT_CLAIM_LIMIT);
     }
 
     @Autowired
     public OutboxDispatcher(OutboxClaimService claims, SearchIndexWriter writer,
+                            ObjectProvider<SearchSyncMetrics> metricsProvider, SearchProperties properties) {
+        this(claims, writer, new RetrySchedule(), new SyncFailureClassifier(),
+                resolveMetrics(metricsProvider), "search-dispatcher-" + UUID.randomUUID(), properties.batchSize());
+    }
+
+    public OutboxDispatcher(OutboxClaimService claims, SearchIndexWriter writer,
                             ObjectProvider<SearchSyncMetrics> metricsProvider) {
         this(claims, writer, new RetrySchedule(), new SyncFailureClassifier(),
-                resolveMetrics(metricsProvider), "search-dispatcher-" + UUID.randomUUID());
+                resolveMetrics(metricsProvider), "search-dispatcher-" + UUID.randomUUID(), DEFAULT_CLAIM_LIMIT);
     }
 
     public OutboxDispatcher(OutboxClaimService claims, SearchIndexWriter writer,
                             ObjectProvider<SearchSyncMetrics> metricsProvider, String owner) {
         this(claims, writer, new RetrySchedule(), new SyncFailureClassifier(),
-                resolveMetrics(metricsProvider), owner);
+                resolveMetrics(metricsProvider), owner, DEFAULT_CLAIM_LIMIT);
     }
 
     public OutboxDispatcher(OutboxClaimService claims, SearchIndexWriter writer, SearchSyncMetrics metrics) {
         this(claims, writer, new RetrySchedule(), new SyncFailureClassifier(), metrics,
-                "search-dispatcher-" + UUID.randomUUID());
+                "search-dispatcher-" + UUID.randomUUID(), DEFAULT_CLAIM_LIMIT);
     }
 
     public OutboxDispatcher(OutboxClaimService claims, SearchIndexWriter writer,
                             SearchSyncMetrics metrics, String owner) {
-        this(claims, writer, new RetrySchedule(), new SyncFailureClassifier(), metrics, owner);
+        this(claims, writer, new RetrySchedule(), new SyncFailureClassifier(), metrics, owner, DEFAULT_CLAIM_LIMIT);
+    }
+
+    public OutboxDispatcher(OutboxClaimService claims, SearchIndexWriter writer,
+                            SearchSyncMetrics metrics, String owner, int claimLimit) {
+        this(claims, writer, new RetrySchedule(), new SyncFailureClassifier(), metrics, owner, claimLimit);
     }
 
     public OutboxDispatcher(OutboxClaimService claims, SearchIndexWriter writer,
                             RetrySchedule retrySchedule, SyncFailureClassifier failureClassifier,
                             SearchSyncMetrics metrics, String owner) {
+        this(claims, writer, retrySchedule, failureClassifier, metrics, owner, DEFAULT_CLAIM_LIMIT);
+    }
+
+    public OutboxDispatcher(OutboxClaimService claims, SearchIndexWriter writer,
+                            RetrySchedule retrySchedule, SyncFailureClassifier failureClassifier,
+                            SearchSyncMetrics metrics, String owner, int claimLimit) {
         this.claims = Objects.requireNonNull(claims, "claims is required");
         this.writer = Objects.requireNonNull(writer, "writer is required");
         this.retrySchedule = Objects.requireNonNull(retrySchedule, "retrySchedule is required");
@@ -68,11 +87,15 @@ public class OutboxDispatcher {
             throw new IllegalArgumentException("owner must contain 1 to 128 characters");
         }
         this.owner = owner;
+        if (claimLimit < 1 || claimLimit > 50) {
+            throw new IllegalArgumentException("claim limit must be between 1 and 50");
+        }
+        this.claimLimit = claimLimit;
     }
 
     public DispatchSummary dispatchOnce() {
         Instant started = Instant.now();
-        List<ClaimedOutboxEvent> claimed = claims.claim(owner, CLAIM_LIMIT);
+        List<ClaimedOutboxEvent> claimed = claims.claim(owner, claimLimit);
         if (claimed.isEmpty()) {
             return new DispatchSummary(0, 0, 0, 0, 0);
         }

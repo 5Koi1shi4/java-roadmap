@@ -102,7 +102,9 @@ public class SearchRebuildCutover {
                 indexes.refresh(prepared.targetIndex());
                 RebuildValidation result = validator.validate(prepared.targetIndex(), finalWatermark);
                 if (!result.consistent()) {
-                    throw new RebuildValidationException("rebuild validation differed in " + result.differenceCount() + " products");
+                    throw new RebuildValidationException(
+                            "rebuild validation differed in " + result.differenceCount() + " products",
+                            result.differenceCount());
                 }
                 if (!jobs.fenceCutover(prepared.jobId(), owner)) {
                     throw new RebuildLeaseLostException("rebuild lease lost immediately before alias swap");

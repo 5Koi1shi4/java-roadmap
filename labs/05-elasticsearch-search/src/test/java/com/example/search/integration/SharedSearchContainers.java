@@ -2,6 +2,7 @@ package com.example.search.integration;
 
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.TestPropertySource;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.Network;
 import org.testcontainers.containers.ToxiproxyContainer;
@@ -11,6 +12,7 @@ import org.testcontainers.images.builder.ImageFromDockerfile;
 import java.nio.file.Path;
 
 /** Shared real Elasticsearch service built from the SmartCN Dockerfile. */
+@TestPropertySource(properties = {"search.startup.enabled=true", "search.scheduling.enabled=false"})
 public abstract class SharedSearchContainers extends SharedMySqlContainer {
     static final GenericContainer<?> ELASTICSEARCH;
     static final ToxiproxyContainer TOXIPROXY;

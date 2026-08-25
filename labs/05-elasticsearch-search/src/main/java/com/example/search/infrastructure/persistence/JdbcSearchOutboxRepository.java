@@ -6,10 +6,12 @@ import com.example.search.application.sync.SearchOutboxEvent;
 import com.example.search.application.sync.SearchOutboxRepository;
 import com.example.search.application.sync.OutboxStatus;
 import com.example.search.domain.ProductSearchSnapshot;
+import com.example.search.config.SearchProperties;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.ResultSet;
@@ -25,10 +27,21 @@ import java.util.UUID;
 public class JdbcSearchOutboxRepository implements SearchOutboxRepository {
     private final JdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
+    private final long leaseMicros;
 
     public JdbcSearchOutboxRepository(JdbcTemplate jdbc, ObjectMapper objectMapper) {
+        this(jdbc, objectMapper, Duration.ofSeconds(30));
+    }
+
+    @Autowired
+    public JdbcSearchOutboxRepository(JdbcTemplate jdbc, ObjectMapper objectMapper, SearchProperties properties) {
+        this(jdbc, objectMapper, properties.leaseDuration());
+    }
+
+    public JdbcSearchOutboxRepository(JdbcTemplate jdbc, ObjectMapper objectMapper, Duration leaseDuration) {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
+        this.leaseMicros = toMicros(leaseDuration);
     }
 
     @Override
@@ -81,9 +94,9 @@ public class JdbcSearchOutboxRepository implements SearchOutboxRepository {
             UUID token = UUID.randomUUID();
             int changed = jdbc.update(
                     "UPDATE search_outbox SET status='PROCESSING', owner=?, claim_token=?, "
-                            + "lease_until=TIMESTAMPADD(SECOND, 30, UTC_TIMESTAMP(6)), "
+                            + "lease_until=TIMESTAMPADD(MICROSECOND, ?, UTC_TIMESTAMP(6)), "
                             + "attempt_count=attempt_count+1 WHERE id=?",
-                    owner, token.toString(), id);
+                    owner, token.toString(), leaseMicros, id);
             if (changed != 1) {
                 throw new IllegalStateException("outbox claim lost for id " + id);
             }
