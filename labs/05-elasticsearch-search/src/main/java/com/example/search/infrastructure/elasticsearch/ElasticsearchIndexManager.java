@@ -4,6 +4,7 @@ import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch._types.mapping.DynamicMapping;
 import co.elastic.clients.elasticsearch.indices.update_aliases.Action;
 import com.example.search.application.maintenance.AliasTargets;
+import com.example.search.application.maintenance.SplitAliasException;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -65,6 +66,25 @@ public class ElasticsearchIndexManager {
         }
     }
 
+    /** Atomically replaces both aliases, refusing to repair a split or unexpected source. */
+    public void swapReadWriteAliases(String expectedOld, String target) {
+        requireName(expectedOld);
+        requireName(target);
+        AliasTargets current = aliasTargets();
+        if (!expectedOld.equals(current.read()) || !expectedOld.equals(current.write())) {
+            throw new SplitAliasException("read/write aliases are not both bound to expected old index");
+        }
+        try {
+            client.indices().updateAliases(u -> u.actions(
+                    Action.of(a -> a.remove(r -> r.index(expectedOld).alias(READ_ALIAS))),
+                    Action.of(a -> a.remove(r -> r.index(expectedOld).alias(WRITE_ALIAS))),
+                    Action.of(a -> a.add(a1 -> a1.index(target).alias(READ_ALIAS))),
+                    Action.of(a -> a.add(a1 -> a1.index(target).alias(WRITE_ALIAS)))));
+        } catch (IOException e) {
+            throw new IllegalStateException("could not atomically swap search aliases", e);
+        }
+    }
+
     public Set<String> pluginNames() {
         try {
             Set<String> names = new HashSet<>();
@@ -121,7 +141,7 @@ public class ElasticsearchIndexManager {
     private String aliasTarget(String alias) {
         try {
             var result = client.indices().getAlias(g -> g.name(alias)).result();
-            if (result.size() > 1) throw new IllegalStateException("alias " + alias + " points to multiple indices");
+            if (result.size() > 1) throw new SplitAliasException("alias " + alias + " points to multiple indices");
             return result.keySet().stream().findFirst().orElse(null);
         } catch (co.elastic.clients.elasticsearch._types.ElasticsearchException e) {
             if (e.status() == 404) return null;

@@ -124,6 +124,13 @@ public class JdbcSearchOutboxRepository implements SearchOutboxRepository {
                 normalizeReason(reason), eventId.toString(), token.toString()) == 1;
     }
 
+    @Override
+    public boolean hasUnexpiredProcessing() {
+        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM search_outbox "
+                + "WHERE status='PROCESSING' AND lease_until > UTC_TIMESTAMP(6)", Integer.class);
+        return count != null && count > 0;
+    }
+
     private SearchOutboxEvent findById(long id) {
         return jdbc.queryForObject(
                 "SELECT id, event_id, product_id, product_version, event_type, payload, attempt_count "

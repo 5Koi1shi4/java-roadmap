@@ -17,4 +17,11 @@ public interface RebuildJobRepository {
     boolean addImportedCount(UUID jobId, String owner, long delta);
     boolean renewLease(UUID jobId, String owner, Instant leaseUntil);
     boolean markFailed(UUID jobId, String owner, String reason);
+
+    default boolean markCutover(UUID jobId, String owner) { return false; }
+    default boolean markCompleted(UUID jobId, String owner) { return false; }
+    default boolean markCompleted(UUID jobId, String owner, long finalWatermark, long differenceCount) {
+        return markCompleted(jobId, owner);
+    }
+    default java.util.List<RebuildJob> findInterrupted() { return java.util.List.of(); }
 }

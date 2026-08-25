@@ -16,10 +16,16 @@ public interface SearchCoordinationRepository {
     default Optional<UUID> activeRebuildId() {
         throw new UnsupportedOperationException("rebuild coordination is not implemented");
     }
+    default void setDispatcherPaused(boolean paused) {
+        throw new UnsupportedOperationException("dispatcher pause is not implemented");
+    }
     default void setActiveRebuildId(UUID jobId) {
         throw new UnsupportedOperationException("rebuild coordination is not implemented");
     }
     default boolean clearActiveRebuildId(UUID jobId) {
         throw new UnsupportedOperationException("rebuild coordination is not implemented");
+    }
+    default boolean clearActiveRebuildId(UUID jobId, String owner) {
+        return clearActiveRebuildId(jobId);
     }
 }

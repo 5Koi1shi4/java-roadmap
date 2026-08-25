@@ -94,6 +94,35 @@ public class JdbcRebuildJobRepository implements RebuildJobRepository {
                         + "WHERE job_id=? AND status IN ('PENDING','RUNNING') AND owner=?", normalize(reason), jobId.toString(), owner) == 1;
     }
 
+    @Override
+    public boolean markCutover(UUID jobId, String owner) {
+        return jdbc.update("UPDATE search_rebuild_job SET phase='CUTOVER' "
+                        + "WHERE job_id=? AND status='RUNNING' AND owner=? AND lease_until > UTC_TIMESTAMP(6)",
+                jobId.toString(), owner) == 1;
+    }
+
+    @Override
+    public boolean markCompleted(UUID jobId, String owner) {
+        return jdbc.update("UPDATE search_rebuild_job SET status='COMPLETED', phase='FINISHED', completed_at=UTC_TIMESTAMP(6) "
+                        + "WHERE job_id=? AND status='RUNNING' AND phase='CUTOVER' AND owner=?", jobId.toString(), owner) == 1;
+    }
+
+    @Override
+    public boolean markCompleted(UUID jobId, String owner, long finalWatermark, long differenceCount) {
+        if (finalWatermark < 0 || differenceCount < 0) throw new IllegalArgumentException("watermark and difference count must not be negative");
+        return jdbc.update("UPDATE search_rebuild_job SET status='COMPLETED', phase='FINISHED', "
+                        + "final_watermark=?, difference_count=?, completed_at=UTC_TIMESTAMP(6) "
+                        + "WHERE job_id=? AND status='RUNNING' AND phase='CUTOVER' AND owner=?",
+                finalWatermark, differenceCount, jobId.toString(), owner) == 1;
+    }
+
+    @Override
+    public java.util.List<RebuildJob> findInterrupted() {
+        return jdbc.query("SELECT job_id, target_index, status, phase, owner, lease_until, start_watermark, final_watermark, "
+                        + "imported_count, difference_count, last_error, created_at, completed_at "
+                        + "FROM search_rebuild_job WHERE status='RUNNING' OR phase='CUTOVER'", (rs, row) -> map(rs));
+    }
+
     private Optional<RebuildJob> query(UUID jobId, String suffix) {
         return jdbc.query("SELECT job_id, target_index, status, phase, owner, lease_until, start_watermark, final_watermark, "
                         + "imported_count, difference_count, last_error, created_at, completed_at FROM search_rebuild_job WHERE job_id=?" + suffix,

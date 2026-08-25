@@ -32,4 +32,8 @@ public interface SearchOutboxRepository {
     default boolean fail(UUID eventId, UUID token, String reason) {
         throw new UnsupportedOperationException("outbox failure is not implemented");
     }
+
+    default boolean hasUnexpiredProcessing() {
+        throw new UnsupportedOperationException("outbox drain is not implemented");
+    }
 }
