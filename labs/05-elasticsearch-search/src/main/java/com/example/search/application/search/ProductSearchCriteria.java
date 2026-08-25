@@ -54,8 +54,8 @@ public final class ProductSearchCriteria {
 
     private static String normalize(String value) {
         if (value == null) return null;
-        String normalized = value.trim();
-        if (normalized.isEmpty()) return null;
+        String normalized = value.strip();
+        if (normalized.isBlank()) return null;
         if (normalized.codePointCount(0, normalized.length()) > 100) {
             throw new IllegalArgumentException("keyword must be at most 100 Unicode code points");
         }

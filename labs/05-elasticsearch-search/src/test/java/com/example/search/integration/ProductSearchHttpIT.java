@@ -74,9 +74,12 @@ class ProductSearchHttpIT extends SharedSearchContainers {
         ResponseEntity<String> asc = rest.getForEntity("/api/products/search?sort=priceAsc&size=10", String.class);
         ResponseEntity<String> desc = rest.getForEntity("/api/products/search?sort=priceDesc&size=10", String.class);
         ResponseEntity<String> newest = rest.getForEntity("/api/products/search?sort=newest&size=10", String.class);
+        ResponseEntity<String> noKeywordRelevance = rest.getForEntity(
+                "/api/products/search?sort=relevance&size=10", String.class);
         assertThat(objectMapper.readTree(asc.getBody()).at("/items/0/name").asText()).startsWith("低价");
         assertThat(objectMapper.readTree(desc.getBody()).at("/items/0/name").asText()).startsWith("高价");
         assertThat(objectMapper.readTree(newest.getBody()).at("/items/0/id").asLong()).isEqualTo(high.id());
+        assertThat(objectMapper.readTree(noKeywordRelevance.getBody()).at("/items/0/id").asLong()).isEqualTo(high.id());
 
         ProductView tieA = createAndSync("同价一 " + suffix, null, "TIE", "同价", "30.00", "ON_SALE");
         ProductView tieB = createAndSync("同价二 " + suffix, null, "TIE", "同价", "30.00", "ON_SALE");
@@ -90,6 +93,10 @@ class ProductSearchHttpIT extends SharedSearchContainers {
         ResponseEntity<String> bad = rest.getForEntity("/api/products/search?size=0", String.class);
         assertThat(bad.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(bad.getBody()).doesNotContain("jdbc", "elasticsearch", "Exception", "at ");
+        assertThat(rest.getForEntity("/api/products/search?page=x", String.class).getStatusCode())
+                .isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(rest.getForEntity("/api/products/search?minPrice=x", String.class).getStatusCode())
+                .isEqualTo(HttpStatus.BAD_REQUEST);
     }
 
     @Test
@@ -105,12 +112,47 @@ class ProductSearchHttpIT extends SharedSearchContainers {
         ResponseEntity<String> conflict = rest.exchange("/api/products/" + id, HttpMethod.PUT,
                 new HttpEntity<>("{\"expectedVersion\":99,\"name\":\"改名\",\"description\":\"描述\",\"categoryCode\":\"BOOK\",\"categoryName\":\"图书\",\"price\":\"10.00\",\"status\":\"ON_SALE\"}", headers), String.class);
         assertThat(conflict.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        ResponseEntity<String> updated = rest.exchange("/api/products/" + id, HttpMethod.PUT,
+                new HttpEntity<>("{\"expectedVersion\":1,\"name\":\"改名\",\"description\":\"描述\",\"categoryCode\":\"BOOK\",\"categoryName\":\"图书\",\"price\":\"10.00\",\"status\":\"ON_SALE\"}", headers), String.class);
+        assertThat(updated.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(objectMapper.readTree(updated.getBody()).get("version").asLong()).isEqualTo(2L);
+        dispatcher.dispatchOnce();
+        indexes.refresh("products-write");
+        assertThat(objectMapper.readTree(rest.getForObject("/api/products/search?q=改名", String.class))
+                .at("/total").asLong()).isEqualTo(1L);
+
+        assertThat(rest.exchange("/api/products/" + id, HttpMethod.DELETE, HttpEntity.EMPTY, String.class)
+                .getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(rest.getForEntity("/api/products/not-a-number", String.class).getStatusCode())
+                .isEqualTo(HttpStatus.BAD_REQUEST);
+        ResponseEntity<Void> deleted = rest.exchange("/api/products/" + id + "?expectedVersion=2",
+                HttpMethod.DELETE, HttpEntity.EMPTY, Void.class);
+        assertThat(deleted.getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
+        dispatcher.dispatchOnce();
+        indexes.refresh("products-write");
+        assertThat(objectMapper.readTree(rest.getForObject("/api/products/search?q=改名", String.class))
+                .at("/total").asLong()).isZero();
+
         ResponseEntity<String> missing = rest.getForEntity("/api/products/999999999", String.class);
         assertThat(missing.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
         ResponseEntity<String> unknown = rest.postForEntity("/api/products",
                 new HttpEntity<>("{\"name\":\"x\",\"description\":\"d\",\"categoryCode\":\"B\",\"categoryName\":\"书\",\"price\":\"1.00\",\"status\":\"ON_SALE\",\"unexpected\":true}", headers), String.class);
         assertThat(unknown.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(unknown.getBody()).doesNotContain("unexpected", "stackTrace");
+    }
+
+    @Test
+    void malformedSearchDocumentReturnsSafe503() throws Exception {
+        ProductView product = createAndSync("异常文档", null, "BOOK", "图书", "10.00", "ON_SALE");
+        client.update(u -> u.index("products-write").id(Long.toString(product.id()))
+                .script(s -> s.source("ctx._source.remove('productId')")), Map.class);
+        indexes.refresh("products-write");
+
+        ResponseEntity<String> response = rest.getForEntity("/api/products/search?q=异常文档", String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(response.getBody()).contains("SEARCH_UNAVAILABLE");
+        assertThat(response.getBody()).doesNotContain("productId", "elasticsearch", "Exception", "at ");
     }
 
     private ProductView createAndSync(String name, String subtitle, String categoryCode, String categoryName,

@@ -19,6 +19,7 @@ class ProductSearchCriteriaTest {
         assertThat(criteria.categoryCode()).contains("BOOK");
         assertThat(criteria.sort()).isEqualTo(ProductSort.PRICE_ASC);
         assertThat(criteria.offset()).isEqualTo(50);
+        assertThat(ProductSearchCriteria.of("　", null, null, null, 0, 10, "relevance").keyword()).isEmpty();
     }
 
     @Test

@@ -53,8 +53,6 @@ public class ElasticsearchProductSearchGateway implements ProductSearchGateway {
                     .toList();
             return new ProductSearchResult(items, response.hits().total() == null ? items.size()
                     : response.hits().total().value(), categories(response.aggregations().get("categories")));
-        } catch (IllegalArgumentException e) {
-            throw e;
         } catch (IOException | RuntimeException e) {
             throw new SearchUnavailableException(e);
         }
