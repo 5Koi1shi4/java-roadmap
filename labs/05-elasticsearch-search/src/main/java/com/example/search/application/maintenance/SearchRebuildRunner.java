@@ -1,13 +1,17 @@
 package com.example.search.application.maintenance;
 
 import com.example.search.application.sync.SearchCoordinationRepository;
+import com.example.search.application.sync.SearchSyncMetrics;
 import com.example.search.infrastructure.elasticsearch.ElasticsearchIndexManager;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.function.Supplier;
@@ -21,17 +25,34 @@ public class SearchRebuildRunner {
     private final RebuildJobRepository jobs;
     private final ElasticsearchIndexManager indexes;
     private final PlatformTransactionManager transactionManager;
+    private final SearchSyncMetrics metrics;
 
     @Autowired
     public SearchRebuildRunner(SearchRebuildPreparer preparer, SearchRebuildCutover cutover,
                                SearchCoordinationRepository coordination, RebuildJobRepository jobs,
+                               ElasticsearchIndexManager indexes, PlatformTransactionManager transactionManager,
+                               ObjectProvider<SearchSyncMetrics> metricsProvider) {
+        this(preparer, cutover, coordination, jobs, indexes, transactionManager,
+                metricsProvider.getIfAvailable(SearchSyncMetrics::noop));
+    }
+
+    public SearchRebuildRunner(SearchRebuildPreparer preparer, SearchRebuildCutover cutover,
+                               SearchCoordinationRepository coordination, RebuildJobRepository jobs,
                                ElasticsearchIndexManager indexes, PlatformTransactionManager transactionManager) {
+        this(preparer, cutover, coordination, jobs, indexes, transactionManager, SearchSyncMetrics.noop());
+    }
+
+    public SearchRebuildRunner(SearchRebuildPreparer preparer, SearchRebuildCutover cutover,
+                               SearchCoordinationRepository coordination, RebuildJobRepository jobs,
+                               ElasticsearchIndexManager indexes, PlatformTransactionManager transactionManager,
+                               SearchSyncMetrics metrics) {
         this.preparer = Objects.requireNonNull(preparer, "preparer is required");
         this.cutover = Objects.requireNonNull(cutover, "cutover is required");
         this.coordination = Objects.requireNonNull(coordination, "coordination is required");
         this.jobs = Objects.requireNonNull(jobs, "jobs is required");
         this.indexes = Objects.requireNonNull(indexes, "indexes is required");
         this.transactionManager = transactionManager;
+        this.metrics = Objects.requireNonNull(metrics, "metrics is required");
     }
 
     public SearchRebuildRunner(SearchRebuildPreparer preparer, SearchRebuildCutover cutover,
@@ -43,9 +64,12 @@ public class SearchRebuildRunner {
     public RebuildJob run(UUID jobId) {
         if (jobId == null) throw new IllegalArgumentException("jobId is required");
         RebuildJob job = jobs.find(jobId).orElseThrow(() -> new IllegalArgumentException("unknown rebuild job"));
+        Instant started = Instant.now();
         try {
             PreparedRebuild prepared = preparer.prepare(jobId);
-            return cutover.cutover(prepared);
+            RebuildJob completed = cutover.cutover(prepared);
+            metrics.recordRebuild(true, Duration.between(started, Instant.now()), completed.differenceCount());
+            return completed;
         } catch (RuntimeException failure) {
             boolean split = false;
             try {
@@ -60,6 +84,7 @@ public class SearchRebuildRunner {
                     cleanupFailure(jobId, job.owner(), reason(failure));
                 } catch (RuntimeException ignored) { }
             }
+            metrics.recordRebuild(false, Duration.between(started, Instant.now()), 0);
             throw failure;
         }
     }

@@ -4,6 +4,7 @@ import com.example.search.application.sync.OutboxEventType;
 import com.example.search.application.sync.ClaimedOutboxEvent;
 import com.example.search.application.sync.SearchOutboxEvent;
 import com.example.search.application.sync.SearchOutboxRepository;
+import com.example.search.application.sync.OutboxStatus;
 import com.example.search.domain.ProductSearchSnapshot;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -152,6 +153,22 @@ public class JdbcSearchOutboxRepository implements SearchOutboxRepository {
         return jdbc.update("UPDATE search_outbox SET status='NEW', owner=NULL, claim_token=NULL, lease_until=NULL, "
                         + "available_at=UTC_TIMESTAMP(6), attempt_count=0, completed_at=NULL "
                         + "WHERE event_id=? AND status='FAILED'", eventId.toString()) == 1;
+    }
+
+    @Override
+    public long countByStatus(OutboxStatus status) {
+        if (status == null) throw new IllegalArgumentException("status is required");
+        Long count = jdbc.queryForObject("SELECT COUNT(*) FROM search_outbox WHERE status=?",
+                Long.class, status.name());
+        return count == null ? 0L : count;
+    }
+
+    @Override
+    public double oldestUnfinishedAgeSeconds() {
+        Double age = jdbc.queryForObject("SELECT COALESCE(TIMESTAMPDIFF(MICROSECOND, MIN(created_at), "
+                        + "UTC_TIMESTAMP(6)) / 1000000.0, 0) FROM search_outbox WHERE status <> 'COMPLETED'",
+                Double.class);
+        return age == null ? 0.0 : Math.max(0.0, age);
     }
 
     private SearchOutboxEvent findById(long id) {

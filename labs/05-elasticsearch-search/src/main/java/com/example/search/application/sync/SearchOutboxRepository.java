@@ -46,4 +46,12 @@ public interface SearchOutboxRepository {
     default boolean retryFailed(UUID eventId) {
         throw new UnsupportedOperationException("outbox retry is not implemented");
     }
+
+    default long countByStatus(OutboxStatus status) {
+        throw new UnsupportedOperationException("outbox status metrics are not implemented");
+    }
+
+    default double oldestUnfinishedAgeSeconds() {
+        throw new UnsupportedOperationException("outbox age metrics are not implemented");
+    }
 }
