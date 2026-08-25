@@ -110,6 +110,87 @@ class SearchMaintenanceIT extends SharedSearchContainers {
     }
 
     @Test
+    void scansSecondPagesCapsMissingAndStaleSamplesAndTreatsDeletedResidualAsOrphan() throws Exception {
+        java.util.List<ProductView> seeded = new java.util.ArrayList<>();
+        for (int i = 0; i < 501; i++) seeded.add(products.create(new CreateProductCommand(details("分页-" + i))));
+        for (int i = 0; i < 11; i++) dispatcher.dispatchOnce();
+        ProductView deleted = seeded.get(500);
+        products.delete(deleted.id(), deleted.version());
+        dispatcher.dispatchOnce();
+
+        for (int i = 0; i < 21; i++) {
+            ProductView product = seeded.get(i);
+            client.delete(d -> d.index("products-write").id(Long.toString(product.id()))
+                    .version(product.version()).versionType(VersionType.ExternalGte));
+        }
+        for (int i = 21; i < 42; i++) {
+            ProductView product = seeded.get(i);
+            client.update(u -> u.index("products-write").id(Long.toString(product.id()))
+                    .script(s -> s.source("ctx._source.sourceVersion = 2")), Map.class);
+        }
+        client.index(i -> i.index("products-write").id(Long.toString(deleted.id()))
+                .version(2L).versionType(VersionType.ExternalGte).document(orphan(deleted.id())));
+        indexes.refresh("products-write");
+
+        ConsistencyReport report = consistency.check();
+
+        assertThat(report.missingCount()).isEqualTo(21);
+        assertThat(report.staleCount()).isEqualTo(21);
+        assertThat(report.orphanCount()).isEqualTo(1);
+        assertThat(report.missingProductIds()).hasSize(20);
+        assertThat(report.staleProductIds()).hasSize(20);
+        assertThat(report.orphanProductIds()).containsExactly(deleted.id());
+    }
+
+    @Test
+    void repairFencesOldClaimTokenAndDoesNotDuplicateUniqueEvent() {
+        ProductView product = products.create(new CreateProductCommand(details("并发修复")));
+        var oldClaim = claims.claim("old-owner", 1).get(0);
+        assertThatThrownBy(() -> consistency.retryFailed(oldClaim.eventId()))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        consistency.repairProduct(product.id());
+
+        assertThat(claims.complete(oldClaim.eventId(), oldClaim.claimToken())).isFalse();
+        assertThat(claims.reschedule(oldClaim.eventId(), oldClaim.claimToken(), java.time.Duration.ZERO, "late")).isFalse();
+        assertThat(claims.fail(oldClaim.eventId(), oldClaim.claimToken(), "late")).isFalse();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM search_outbox WHERE product_id=? AND product_version=?",
+                Integer.class, product.id(), product.version())).isEqualTo(1);
+        assertThatThrownBy(() -> consistency.retryFailed(oldClaim.eventId())).isInstanceOf(IllegalArgumentException.class);
+
+        var currentClaim = claims.claim("current-owner", 1).get(0);
+        assertThat(claims.complete(currentClaim.eventId(), currentClaim.claimToken())).isTrue();
+        assertThatThrownBy(() -> consistency.retryFailed(currentClaim.eventId()))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        jdbc.update("DELETE FROM search_outbox WHERE product_id=?", product.id());
+        consistency.repairProduct(product.id());
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM search_outbox WHERE product_id=?", Integer.class, product.id()))
+                .isEqualTo(1);
+    }
+
+    @Test
+    void rebuildEndpointReturnsClaimedJobAndAllowsNonBlockingStatusRead() throws Exception {
+        long startedAt = System.nanoTime();
+        ResponseEntity<String> started = rest.postForEntity("/api/admin/search/rebuilds", null, String.class);
+        long elapsedMillis = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt);
+        assertThat(started.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        assertThat(elapsedMillis).isLessThan(5_000);
+        String jobId = new com.fasterxml.jackson.databind.ObjectMapper().readTree(started.getBody()).get("jobId").asText();
+        ResponseEntity<String> immediate = rest.getForEntity("/api/admin/search/rebuilds/" + jobId, String.class);
+        assertThat(immediate.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(immediate.getBody()).containsAnyOf("RUNNING", "COMPLETED", "FAILED").doesNotContain("PENDING");
+
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(30);
+        String body = immediate.getBody();
+        while (!body.contains("COMPLETED") && !body.contains("FAILED") && System.nanoTime() < deadline) {
+            Thread.sleep(20);
+            body = rest.getForObject("/api/admin/search/rebuilds/" + jobId, String.class);
+        }
+        assertThat(body).contains("COMPLETED");
+    }
+
+    @Test
     void enabledMaintenanceApiUsesFixedSafeRoutes() {
         ResponseEntity<String> check = rest.postForEntity("/api/admin/search/consistency-checks", null, String.class);
         assertThat(check.getStatusCode()).isEqualTo(HttpStatus.OK);

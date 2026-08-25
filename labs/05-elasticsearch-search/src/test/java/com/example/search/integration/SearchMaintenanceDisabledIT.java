@@ -15,9 +15,10 @@ class SearchMaintenanceDisabledIT extends SharedSearchContainers {
 
     @Test
     void maintenanceRoutesAreAbsentWhenDisabled() {
-        assertThat(rest.postForEntity("/api/admin/search/consistency-checks", null, String.class).getStatusCode())
-                .isEqualTo(HttpStatus.NOT_FOUND);
-        assertThat(rest.postForEntity("/api/admin/search/products/1/repair", null, String.class).getStatusCode())
-                .isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(rest.postForEntity("/api/admin/search/rebuilds", null, String.class).getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(rest.getForEntity("/api/admin/search/rebuilds/" + java.util.UUID.randomUUID(), String.class).getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(rest.postForEntity("/api/admin/search/consistency-checks", null, String.class).getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(rest.postForEntity("/api/admin/search/products/1/repair", null, String.class).getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(rest.postForEntity("/api/admin/search/outbox/" + java.util.UUID.randomUUID() + "/retry", null, String.class).getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
     }
 }
