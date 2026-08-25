@@ -5,11 +5,16 @@ import com.example.search.application.maintenance.RebuildJobRepository;
 import com.example.search.infrastructure.elasticsearch.ElasticsearchIndexManager;
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch.indices.update_aliases.Action;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 
+import javax.sql.DataSource;
+import java.util.LinkedHashSet;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -21,12 +26,29 @@ class RebuildRecoveryIT extends SharedSearchContainers {
     @Autowired ElasticsearchIndexManager indexes;
     @Autowired ElasticsearchClient client;
     @Autowired RebuildJobRepository jobs;
+    @Autowired DataSource dataSource;
+    private final Set<String> createdIndices = new LinkedHashSet<>();
+
+    @BeforeEach
+    void resetRecoveryState() throws Exception {
+        clearTables(dataSource);
+        setAliases("products-vbootstrap", "products-vbootstrap");
+    }
+
+    @AfterEach
+    void removeCreatedIndices() throws Exception {
+        setAliases("products-vbootstrap", "products-vbootstrap");
+        for (String index : createdIndices) {
+            client.indices().delete(delete -> delete.index(index));
+        }
+        createdIndices.clear();
+    }
 
     @Test
     void bothAliasesTargetCompletesAndUnpauses() throws Exception {
         UUID job = seedCutoverJob();
         String target = jdbc.queryForObject("SELECT target_index FROM search_rebuild_job WHERE job_id=?", String.class, job.toString());
-        indexes.createPhysicalIndex(job);
+        createPhysicalIndex(job);
         setAliases(target, target);
 
         recovery.recoverInterruptedCutover();
@@ -51,7 +73,7 @@ class RebuildRecoveryIT extends SharedSearchContainers {
     @Test
     void splitAliasesFailButRemainPausedAndActive() throws Exception {
         UUID job = seedCutoverJob();
-        indexes.createPhysicalIndex(job);
+        createPhysicalIndex(job);
         String target = jdbc.queryForObject("SELECT target_index FROM search_rebuild_job WHERE job_id=?", String.class, job.toString());
         setAliases("products-vbootstrap", target);
 
@@ -67,7 +89,7 @@ class RebuildRecoveryIT extends SharedSearchContainers {
     void unknownUnifiedAliasFailsButRemainsPausedAndActive() throws Exception {
         UUID job = seedCutoverJob();
         UUID unknown = UUID.randomUUID();
-        indexes.createPhysicalIndex(unknown);
+        createPhysicalIndex(unknown);
         setAliases(indexes.physicalIndexName(unknown), indexes.physicalIndexName(unknown));
 
         recovery.recoverInterruptedCutover();
@@ -96,6 +118,12 @@ class RebuildRecoveryIT extends SharedSearchContainers {
                 job.toString(), indexes.physicalIndexName(job), "products-vbootstrap");
         jdbc.update("UPDATE search_coordination SET dispatcher_paused=TRUE, active_rebuild_id=? WHERE id=1", job.toString());
         return job;
+    }
+
+    private String createPhysicalIndex(UUID jobId) {
+        String index = indexes.createPhysicalIndex(jobId);
+        createdIndices.add(index);
+        return index;
     }
 
     private void setAliases(String read, String write) throws Exception {
