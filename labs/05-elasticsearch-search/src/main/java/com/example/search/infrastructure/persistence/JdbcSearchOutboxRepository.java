@@ -131,6 +131,29 @@ public class JdbcSearchOutboxRepository implements SearchOutboxRepository {
         return count != null && count > 0;
     }
 
+    @Override
+    public void repair(ProductSearchSnapshot snapshot, OutboxEventType eventType) {
+        if (snapshot == null || eventType == null) throw new IllegalArgumentException("snapshot and event type are required");
+        String eventId = jdbc.query("SELECT event_id FROM search_outbox WHERE product_id=? AND product_version=? AND event_type=? FOR UPDATE",
+                rs -> rs.next() ? rs.getString(1) : null,
+                snapshot.productId(), snapshot.sourceVersion(), eventType.name());
+        if (eventId != null) {
+            jdbc.update("UPDATE search_outbox SET status='NEW', owner=NULL, claim_token=NULL, lease_until=NULL, "
+                            + "available_at=UTC_TIMESTAMP(6), attempt_count=0, completed_at=NULL "
+                            + "WHERE event_id=?", eventId);
+            return;
+        }
+        append(snapshot, eventType);
+    }
+
+    @Override
+    public boolean retryFailed(UUID eventId) {
+        if (eventId == null) throw new IllegalArgumentException("eventId is required");
+        return jdbc.update("UPDATE search_outbox SET status='NEW', owner=NULL, claim_token=NULL, lease_until=NULL, "
+                        + "available_at=UTC_TIMESTAMP(6), attempt_count=0, completed_at=NULL "
+                        + "WHERE event_id=? AND status='FAILED'", eventId.toString()) == 1;
+    }
+
     private SearchOutboxEvent findById(long id) {
         return jdbc.queryForObject(
                 "SELECT id, event_id, product_id, product_version, event_type, payload, attempt_count "

@@ -36,4 +36,14 @@ public interface SearchOutboxRepository {
     default boolean hasUnexpiredProcessing() {
         throw new UnsupportedOperationException("outbox drain is not implemented");
     }
+
+    /** Repair an event for the current product snapshot without creating a duplicate unique key. */
+    default void repair(ProductSearchSnapshot snapshot, OutboxEventType eventType) {
+        append(snapshot, eventType);
+    }
+
+    /** Reset only a FAILED event for explicit operator retry. */
+    default boolean retryFailed(UUID eventId) {
+        throw new UnsupportedOperationException("outbox retry is not implemented");
+    }
 }

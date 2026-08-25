@@ -11,6 +11,7 @@ import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.nio.charset.StandardCharsets;
 
@@ -27,6 +28,8 @@ public class ApiExceptionHandler {
     ResponseEntity<ApiError> notFound() { return response(HttpStatus.NOT_FOUND, "PRODUCT_NOT_FOUND", "商品不存在"); }
     @ExceptionHandler(ProductVersionConflictException.class)
     ResponseEntity<ApiError> conflict() { return response(HttpStatus.CONFLICT, "VERSION_CONFLICT", "商品版本冲突"); }
+    @ExceptionHandler(NoResourceFoundException.class)
+    ResponseEntity<ApiError> routeNotFound() { return response(HttpStatus.NOT_FOUND, "NOT_FOUND", "请求路径不存在"); }
     @ExceptionHandler(SearchUnavailableException.class)
     ResponseEntity<ApiError> unavailable() { return response(HttpStatus.SERVICE_UNAVAILABLE, "SEARCH_UNAVAILABLE", "搜索服务暂不可用"); }
     @ExceptionHandler(Exception.class)

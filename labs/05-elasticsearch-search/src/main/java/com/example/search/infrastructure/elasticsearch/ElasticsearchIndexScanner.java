@@ -35,7 +35,8 @@ public class ElasticsearchIndexScanner {
                 SearchResponse<Map> response = client.search(s -> {
                     s.size(batchSize).pit(p -> p.id(currentPit).keepAlive(t -> t.time(PIT_KEEP_ALIVE)))
                             .query(q -> q.matchAll(m -> m))
-                            .sort(sort -> sort.field(f -> f.field("productId").order(SortOrder.Asc)));
+                            .sort(sort -> sort.field(f -> f.field("productId").order(SortOrder.Asc)))
+                            .sort(sort -> sort.field(f -> f.field("_shard_doc").order(SortOrder.Asc)));
                     if (currentAfter != null && !currentAfter.isEmpty()) s.searchAfter(currentAfter);
                     return s;
                 }, Map.class);
