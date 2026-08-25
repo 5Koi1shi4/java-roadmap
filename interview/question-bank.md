@@ -142,13 +142,13 @@
 
 ### 23. Outbox dispatcher 的租约如何避免多个实例重复领取同一批事件？
 
-**回答：** `JdbcSearchOutboxRepository.claim` 用数据库时间筛选 `NEW` 或已过期 `PROCESSING` 行，执行 `FOR UPDATE SKIP LOCKED`，再写入 owner、claim token 和 30 秒 `lease_until`。批量上限由 `OutboxDispatcher` 固定为 50；因此并发实例领取的是互斥行集，崩溃后过期租约仍可接管。
+**回答：** `JdbcSearchOutboxRepository.claim` 用数据库时间筛选 `NEW` 或已过期 `PROCESSING` 行，执行 `FOR UPDATE SKIP LOCKED`，再写入 owner、claim token 和租约。运行默认是 batch 50、lease 30 秒，但二者由 `SearchProperties` 配置；batch 校验为 1–50，lease 必须大于 request timeout。`OutboxDispatcher` 和 `JdbcSearchOutboxRepository` 分别接收这组运行配置，因此并发实例领取的是互斥行集，崩溃后过期租约仍可接管。
 
-**代码证据：** `JdbcSearchOutboxRepository.claim` 的条件 SQL、`OutboxDispatcher` 的 `DEFAULT_CLAIM_LIMIT`；`OutboxLeaseIT.claimsEachEventOnceAndRejectsLateOwner` 与 `twoIndependentTransactionsClaimDisjointEventSets`。
+**代码证据：** `SearchProperties` 的默认值与范围/大小关系校验、`OutboxDispatcher(..., SearchProperties)` 和 `JdbcSearchOutboxRepository(..., SearchProperties)` 的运行接线，以及 `JdbcSearchOutboxRepository.claim` 的条件 SQL；`OutboxLeaseIT.claimsEachEventOnceAndRejectsLateOwner` 与 `twoIndependentTransactionsClaimDisjointEventSets`。
 
 ### 24. claim token fencing 解决了什么迟到写入竞态？
 
-**回答：** 旧 dispatcher 可能在租约过期、事件被新 owner 接管后才收到 Elasticsearch 响应。完成、重试或失败更新必须同时匹配 `event_id` 和旧 `claim_token`；影响行数为 0 就视为 fenced，不能覆盖新 owner 的状态。
+**回答：** 旧 dispatcher 可能在租约过期、事件被新 owner 接管后才收到 Elasticsearch 响应。完成、reschedule（按退避回退重排）或 fail 更新必须同时匹配 `event_id` 和旧 `claim_token`；影响行数为 0 就视为 fenced，不能覆盖新 owner 的状态。这里的 reschedule 是租约失效后的状态回退，不等同于操作员手工 retry。
 
 **代码证据：** `OutboxDispatcher.applyResult`、`JdbcSearchOutboxRepository.complete/reschedule/fail`；`OutboxLeaseIT.oldTokenCannotCompleteRescheduleOrFailConcurrentlyAfterTakeover` 验证旧 token 三类迟到操作都被拒绝。
 
@@ -166,9 +166,9 @@
 
 ### 27. SmartCN 在中文搜索中承担什么职责，如何证明不是只配置了名称？
 
-**回答：** `products-index.json` 为 `name`、`subtitle` 和 `description` 配置 SmartCN analyzer，使中文短语按中文词法分析；索引还使用严格映射拒绝未知字段。真实 Elasticsearch 集成测试创建带插件的容器并执行中文查询，验证分词结果和映射行为。
+**回答：** 运行时由 `ElasticsearchIndexManager.create` 为 `name`、`subtitle` 和 `description` 设置 SmartCN analyzer，使中文短语按中文词法分析；同一处还使用严格 mapping 拒绝未知字段。`products-index.json` 只是契约资源，当前运行时未读取。真实集成测试通过 `_analyze` 断言 `并发`、`编程` 两个 token，且不出现单字 `并`、`发`、`编`、`程`；真实 HTTP 测试再用 UTF-8 URI 查询 `并发编程`，验证名称权重、高亮、`ON_SALE`/分类/价格 filter 和分类聚合。
 
-**代码证据：** `src/main/resources/elasticsearch/products-index.json` 的 `analysis-smartcn` 配置；`ElasticsearchIndexIT.installsSmartCnAndRejectsUnknownFields` 与 `ProductSearchHttpIT.searchesSmartCnWithWeightedNameHighlightFiltersSortAndBuckets`。
+**代码证据：** `ElasticsearchIndexManager.create` 的 `.analyzer("smartcn")` 与 `DynamicMapping.Strict`；`ElasticsearchIndexIT.installsSmartCnAndRejectsUnknownFields` 调用真实 `_analyze`，断言 tokens 包含 `并发`、`编程` 且不含四个单字，并继续验证未知字段被严格 mapping 拒绝。`ProductSearchHttpIT.searchesSmartCnWithWeightedNameHighlightFiltersSortAndBuckets` 通过 UTF-8 URI 查询 `并发编程`，断言名称权重的首项、名称高亮、filter 后总数/结果与分类聚合。
 
 ### 28. 相关性排序和业务 filter 如何同时实现？
 
@@ -178,13 +178,13 @@
 
 ### 29. 在线重建怎样保证别名切换前后读写目标一致？
 
-**回答：** 重建先写入新物理索引并校验快照与 Outbox 补放结果，然后暂停 dispatcher、排空未过期处理中的事件，在最终事务中锁协调行、读取两个别名目标、补放最终水位并再次校验，最后一次 Elasticsearch alias 请求同时切换 `products-read` 和 `products-write`。别名分裂或校验失败时保留旧别名和暂停信号，等待恢复处理。
+**回答：** 重建先写入新物理索引并校验快照与 Outbox 补放结果，然后暂停 dispatcher、排空未过期处理中的事件，在最终事务中锁协调行、读取两个别名目标、补放最终水位并再次校验，最后一次 Elasticsearch alias 请求同时切换 `products-read` 和 `products-write`。普通 validation/replay/refresh 失败发生在 alias 请求前时，任务标记 `FAILED`、清理 active rebuild、解除 paused，两个别名保持旧目标；只有 `SplitAliasException` 或 alias swap 已尝试导致目标不确定时，才保留 pause 与 active 信号交给 recovery。
 
 **代码证据：** `SearchRebuildCutover.cutover`、`RebuildValidator`、`ElasticsearchIndexManager.swapReadWriteAliases`；`RebuildCutoverIT.switchesBothAliasesAtomicallyAfterFinalValidation`、`validationFailureKeepsBothOldAliases` 与 `ElasticsearchIndexIT.rejectsDifferentAliasTargetsWithoutRebinding`。
 
 ### 30. 重建的高水位补放和故障恢复为什么不可省略？
 
-**回答：** 可重复读快照只代表某一时刻的商品表；快照期间提交的商品事件必须记录起始高水位、读取准备阶段高水位，再用 `eventsBetween(start, prepared)` 补放，最终门禁后再补放到 final watermark。若网络中断或 alias 请求在临界点失败，恢复 worker 根据数据库中的阶段和两个别名目标判断“已切换”“未切换”或分裂状态，不能盲目清理现场。
+**回答：** 可重复读快照只代表某一时刻的商品表；快照期间提交的商品事件必须记录起始高水位、读取准备阶段高水位，再用 `eventsBetween(start, prepared)` 补放，最终门禁后再补放到 final watermark。网络失败若发生在 alias 请求前的 replay、refresh 或 validation 阶段，按普通失败释放（`FAILED`、清 active、解除 paused）；只有 alias 请求已尝试、读写目标因此不确定时，recovery worker 才根据数据库阶段和两个别名目标判断“已切换”“未切换”或分裂状态，不能盲目清理现场。
 
 **代码证据：** `SearchRebuildPreparer.prepare/replayCatchUp`、`SearchRebuildCutover`、`SearchRebuildRecovery.recoverInterruptedCutover`；`RebuildPreparationIT.replaysEveryEventAfterSnapshotWatermark`、`RebuildRecoveryIT.splitAliasesFailButRemainPausedAndActive` 和 `RebuildAndRecoveryDrillIT.repeatsThreeRebuildsAndTwoConnectionOutageRecoveriesWithoutRegression`。
 

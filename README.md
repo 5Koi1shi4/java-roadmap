@@ -62,7 +62,7 @@
 覆盖 SmartCN 中文分词、`ON_SALE` 过滤与相关性搜索、MySQL 事务 Outbox、Elasticsearch `external_gte` 版本写入、逻辑删除 tombstone，以及带一致性快照、高水位补放、写入门禁和原子别名切换的在线重建。MySQL 是事实源，搜索索引可从商品表与 Outbox 重新构建；dispatcher 允许至少一次投递，但通过租约和 claim token 防止旧实例覆盖新租约。
 
 - 入口：[learning/elasticsearch-search/labs/05-elasticsearch-search](https://github.com/5Koi1shi4/java-roadmap/tree/learning/elasticsearch-search/labs/05-elasticsearch-search)
-- 验证：在 JDK 17、MySQL 8.4、带 SmartCN 的 Elasticsearch 8.18.8 和 Toxiproxy 2.12.0 下执行 `mvnw.cmd verify`；已验收 44 个 Surefire 测试和 52 个 Failsafe/Testcontainers 集成测试，0 failures、0 errors、0 skipped（验收提交 `f2d10f6c5d3b7a6fd1ca8455187aa5cfa488d612`）。
+- 验证：在 JDK 17、MySQL 8.4、带 SmartCN 的 Elasticsearch 8.18.8 和 Toxiproxy 2.12.0 下执行 `mvnw.cmd verify`；已验收 44 个 Surefire 测试和 52 个 Failsafe/Testcontainers 集成测试，0 failures、0 errors、0 skipped（验收提交 `758ab9fb52c3f8245b9f2aea94c30c3d33c43549`）。
 
 ## 目录导航
 

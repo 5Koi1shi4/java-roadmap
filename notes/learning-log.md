@@ -103,9 +103,9 @@
 - 今日目标：完成阶段五 Elasticsearch 商品搜索实验的真实环境验收，并把可靠同步、在线重建和故障恢复证据沉淀到文档中心。
 - 完成内容：
   - 以 MySQL 商品表为事实源，在同一事务写入不可变 `search_outbox` 事件；搜索侧使用 SmartCN、`ON_SALE` filter、相关性排序和分类聚合。
-  - dispatcher 以 `search_coordination → search_rebuild_job → product → search_outbox` 固定锁顺序领取事件，批量上限 50、租约 30 秒、claim token fencing 和有限退避；索引写入使用 Elasticsearch `external_gte`，允许重复投递但禁止旧版本覆盖。
+  - dispatcher 以 `search_coordination → search_rebuild_job → product → search_outbox` 固定锁顺序领取事件，默认批量 50（可配置 1–50）、默认租约 30 秒（可配置且必须大于 request timeout），并使用 claim token fencing 和有限退避；索引写入使用 Elasticsearch `external_gte`，允许重复投递但禁止旧版本覆盖。
   - 删除通过 `IndexMutation` 写入带版本的 tombstone；在线重建使用可重复读快照、Outbox 高水位补放、短暂写入门禁、最终校验和读写别名原子切换，恢复逻辑对单目标、旧目标和别名分裂分别处理。
-- 测试证据：验收分支 `learning/elasticsearch-search` 的 HEAD 为 `f2d10f6c5d3b7a6fd1ca8455187aa5cfa488d612`。真实 MySQL 8.4、SmartCN Elasticsearch 8.18.8 与 Toxiproxy 2.12.0 环境执行 `mvnw.cmd verify`；Surefire XML 合计 44 tests、0 failures、0 errors、0 skipped，Failsafe XML 合计 52 tests、0 failures、0 errors、0 skipped，Maven BUILD SUCCESS，报告失败扫描无输出。
-- 并发竞态与取舍：商品写入、重建和 dispatcher 共享协调行并遵守固定锁序；`FOR UPDATE SKIP LOCKED`、30 秒租约和 token fencing 让旧 owner 的迟到完成/重试不能修改新租约。采用至少一次 Outbox 投递换取故障后可恢复，重复事件由 `(product_id, product_version, event_type)` 唯一约束、`external_gte` 和幂等完成语义收敛；代价是必须接受短暂重复写入与可观测的积压。
+- 测试证据：验收分支 `learning/elasticsearch-search` 的 HEAD 为 `758ab9fb52c3f8245b9f2aea94c30c3d33c43549`（追加提交 `test(search): verify Chinese SmartCN search`）。真实 MySQL 8.4、SmartCN Elasticsearch 8.18.8 与 Toxiproxy 2.12.0 环境执行 `mvnw.cmd verify`；Surefire XML 合计 44 tests、0 failures、0 errors、0 skipped，Failsafe XML 合计 52 tests、0 failures、0 errors、0 skipped，Maven BUILD SUCCESS，报告失败扫描无输出。
+- 并发竞态与取舍：商品写入、重建和 dispatcher 共享协调行并遵守固定锁序；`FOR UPDATE SKIP LOCKED`、默认 30 秒且可配置（必须大于 request timeout）的租约和 token fencing 让旧 owner 的迟到完成/重排或失败不能修改新租约。采用至少一次 Outbox 投递换取故障后可恢复，重复事件由 `(product_id, product_version, event_type)` 唯一约束、`external_gte` 和幂等完成语义收敛；代价是必须接受短暂重复写入与可观测的积压。
 - 重建与故障演练：`RebuildAndRecoveryDrillIT.repeatsThreeRebuildsAndTwoConnectionOutageRecoveriesWithoutRegression` 连续完成 3 次重建和 2 次 Elasticsearch 网络中断恢复；中断期间搜索返回 503、Outbox 形成积压，恢复后事件全部追平、索引版本一致且搜索恢复 200。
 - 下一步：复查阶段五 README/TROUBLESHOOTING 的手工运维边界，并把高水位、别名分裂恢复和指标告警整理成面试中的故障演练回答。
