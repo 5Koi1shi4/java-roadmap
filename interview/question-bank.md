@@ -126,6 +126,68 @@
 
 **代码证据：** `SharedContainers`、各集成测试的 `@BeforeEach`、`RabbitAdmin.purgeQueue(queue, false)`；`OrderSchemaIT.purgeQueuesCompletesBeforeTheNextMessageIsPublished`、`ReliableMessagingFlowIT` 和 `OutboxDispatcherTest`。
 
+## 实验五：Elasticsearch 商品搜索
+
+### 21. 为什么 MySQL 是事实源，而 Elasticsearch 只能作为可重建索引？
+
+**回答：** 商品写入必须先在 MySQL 事务中提交；Elasticsearch 不可用时，写 API 仍可成功提交商品和 `search_outbox`，但搜索暂时不可用或落后。索引损坏时可以从 `product` 快照和 Outbox 事件重建，因此不能把搜索索引当成唯一事实源。
+
+**代码证据：** `ProductCommandService.create/update/delete` 的 `@Transactional` 编排、`ElasticsearchProductSearchGateway.search` 只读 `products-read`；`ProductPersistenceIT.commitsProductAndOutboxInOneTransaction` 验证商品与事件同事务提交。
+
+### 22. 事务 Outbox 如何避免商品与搜索事件的双写窗口？
+
+**回答：** 创建、更新和逻辑删除先更新 `product`，随后在同一个事务调用 `SearchOutboxRepository.append`；事务提交后由 dispatcher 异步投递。若 Outbox 唯一约束或事务失败，商品变更也回滚，避免出现商品已提交但没有可补偿事件的状态。
+
+**代码证据：** `ProductCommandService`、`JdbcSearchOutboxRepository.append` 的 `INSERT INTO search_outbox`；`V1__search_schema.sql` 的 `uk_search_outbox_product_version_type`；`ProductPersistenceIT.rollsProductUpdateBackWhenOutboxUniqueKeyRejectsEvent`。
+
+### 23. Outbox dispatcher 的租约如何避免多个实例重复领取同一批事件？
+
+**回答：** `JdbcSearchOutboxRepository.claim` 用数据库时间筛选 `NEW` 或已过期 `PROCESSING` 行，执行 `FOR UPDATE SKIP LOCKED`，再写入 owner、claim token 和 30 秒 `lease_until`。批量上限由 `OutboxDispatcher` 固定为 50；因此并发实例领取的是互斥行集，崩溃后过期租约仍可接管。
+
+**代码证据：** `JdbcSearchOutboxRepository.claim` 的条件 SQL、`OutboxDispatcher` 的 `DEFAULT_CLAIM_LIMIT`；`OutboxLeaseIT.claimsEachEventOnceAndRejectsLateOwner` 与 `twoIndependentTransactionsClaimDisjointEventSets`。
+
+### 24. claim token fencing 解决了什么迟到写入竞态？
+
+**回答：** 旧 dispatcher 可能在租约过期、事件被新 owner 接管后才收到 Elasticsearch 响应。完成、重试或失败更新必须同时匹配 `event_id` 和旧 `claim_token`；影响行数为 0 就视为 fenced，不能覆盖新 owner 的状态。
+
+**代码证据：** `OutboxDispatcher.applyResult`、`JdbcSearchOutboxRepository.complete/reschedule/fail`；`OutboxLeaseIT.oldTokenCannotCompleteRescheduleOrFailConcurrentlyAfterTakeover` 验证旧 token 三类迟到操作都被拒绝。
+
+### 25. 为什么索引写入使用 `external_gte`，而不是依赖消息到达顺序？
+
+**回答：** Outbox 是至少一次投递，网络重试和多个 dispatcher 会让旧版本晚到。写入请求携带商品 `sourceVersion`，Elasticsearch 以 `external_gte` 接受相同版本的幂等重复写，但拒绝更旧版本覆盖新版本，从而把数据库版本作为单调顺序依据。
+
+**代码证据：** `ElasticsearchSearchIndexWriter.bulkWrite` 设置 `.version(mutation.sourceVersion()).versionType(VersionType.ExternalGte)`；`ExternalVersionIT.identicalPayloadAtSameSourceVersionIsIdempotentlyApplied` 与 `staleVersionCannotOverwriteOrReviveTombstone`。
+
+### 26. 删除为什么要写 tombstone，而不是直接物理删除索引文档？
+
+**回答：** 直接删除可能被延迟到达的旧 upsert 重新“复活”。`IndexMutation.tombstone` 保留商品 ID、删除版本和 `DELETED` 状态，并通过相同的 external version 规则压住旧事件；公开搜索仍固定过滤 `ON_SALE`，所以删除不会返回。
+
+**代码证据：** `IndexMutation.from/tombstone`、`ProductCommandService.delete`、`ElasticsearchSearchIndexWriter`；`ReliableIndexSyncIT.synchronizesCreateUpdatesAndLogicalDeleteWithMonotonicVersions` 和 `ExternalVersionIT.staleVersionCannotOverwriteOrReviveTombstone`。
+
+### 27. SmartCN 在中文搜索中承担什么职责，如何证明不是只配置了名称？
+
+**回答：** `products-index.json` 为 `name`、`subtitle` 和 `description` 配置 SmartCN analyzer，使中文短语按中文词法分析；索引还使用严格映射拒绝未知字段。真实 Elasticsearch 集成测试创建带插件的容器并执行中文查询，验证分词结果和映射行为。
+
+**代码证据：** `src/main/resources/elasticsearch/products-index.json` 的 `analysis-smartcn` 配置；`ElasticsearchIndexIT.installsSmartCnAndRejectsUnknownFields` 与 `ProductSearchHttpIT.searchesSmartCnWithWeightedNameHighlightFiltersSortAndBuckets`。
+
+### 28. 相关性排序和业务 filter 如何同时实现？
+
+**回答：** 关键词放入 `multi_match`，字段权重为 `name^4`、`subtitle^2`、`description`；业务约束放入 bool query 的 `filter`，固定要求 `status=ON_SALE`，并可叠加分类与价格范围。这样过滤不参与文本相关性评分，排序在相关性相同或无关键词时再使用更新时间和商品 ID 稳定收敛。
+
+**代码证据：** `ElasticsearchProductSearchGateway.query/applySort`；`ProductSearchHttpIT.searchesSmartCnWithWeightedNameHighlightFiltersSortAndBuckets` 与 `appliesStablePriceAndNewestSortsAndRejectsInvalidRequests`。
+
+### 29. 在线重建怎样保证别名切换前后读写目标一致？
+
+**回答：** 重建先写入新物理索引并校验快照与 Outbox 补放结果，然后暂停 dispatcher、排空未过期处理中的事件，在最终事务中锁协调行、读取两个别名目标、补放最终水位并再次校验，最后一次 Elasticsearch alias 请求同时切换 `products-read` 和 `products-write`。别名分裂或校验失败时保留旧别名和暂停信号，等待恢复处理。
+
+**代码证据：** `SearchRebuildCutover.cutover`、`RebuildValidator`、`ElasticsearchIndexManager.swapReadWriteAliases`；`RebuildCutoverIT.switchesBothAliasesAtomicallyAfterFinalValidation`、`validationFailureKeepsBothOldAliases` 与 `ElasticsearchIndexIT.rejectsDifferentAliasTargetsWithoutRebinding`。
+
+### 30. 重建的高水位补放和故障恢复为什么不可省略？
+
+**回答：** 可重复读快照只代表某一时刻的商品表；快照期间提交的商品事件必须记录起始高水位、读取准备阶段高水位，再用 `eventsBetween(start, prepared)` 补放，最终门禁后再补放到 final watermark。若网络中断或 alias 请求在临界点失败，恢复 worker 根据数据库中的阶段和两个别名目标判断“已切换”“未切换”或分裂状态，不能盲目清理现场。
+
+**代码证据：** `SearchRebuildPreparer.prepare/replayCatchUp`、`SearchRebuildCutover`、`SearchRebuildRecovery.recoverInterruptedCutover`；`RebuildPreparationIT.replaysEveryEventAfterSnapshotWatermark`、`RebuildRecoveryIT.splitAliasesFailButRemainPausedAndActive` 和 `RebuildAndRecoveryDrillIT.repeatsThreeRebuildsAndTwoConnectionOutageRecoveriesWithoutRegression`。
+
 ## 技术取舍速记
 
 | 选择                       | 收益                              | 代价                                  |
