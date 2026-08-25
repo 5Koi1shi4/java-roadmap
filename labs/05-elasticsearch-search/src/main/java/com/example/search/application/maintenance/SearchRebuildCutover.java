@@ -17,6 +17,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
 /** Pauses dispatchers, drains claims, and performs one fenced final cutover transaction. */
@@ -63,15 +64,28 @@ public class SearchRebuildCutover {
             failAndRelease(prepared.jobId(), owner, "timed out draining processing outbox", false);
             return jobs.find(prepared.jobId()).orElse(original);
         }
+        AliasTargets sourceAliases = null;
+        AtomicBoolean aliasSwapAttempted = new AtomicBoolean(false);
         try {
+            // Capture and persist the expected source before entering the irreversible phase.
+            // Any ambiguity is unsafe and must remain recoverable under pause.
+            sourceAliases = inspectAliases();
+            if (!sourceAliases.isConfigured() || !Objects.equals(sourceAliases.read(), sourceAliases.write())) {
+                throw new SplitAliasException("read/write aliases are split or not configured");
+            }
             // Persist CUTOVER in its own committed transaction before any alias request. A
             // crash after this point is therefore discoverable by the recovery worker.
-            if (!writeTx(() -> jobs.markCutover(prepared.jobId(), owner))) {
+            String sourceIndex = sourceAliases.read();
+            if (!writeTx(() -> jobs.markCutover(prepared.jobId(), owner, sourceIndex))) {
                 throw new RebuildLeaseLostException("rebuild lease lost before cutover");
             }
             writeTx(() -> {
                 // This is deliberately the first lock in the final window. Product writes and claims take it shared.
                 coordination.lockExclusive();
+                if (!jobs.fenceCutover(prepared.jobId(), owner)
+                        || !coordination.activeRebuildId().filter(prepared.jobId()::equals).isPresent()) {
+                    throw new RebuildLeaseLostException("rebuild lease or active rebuild fencing failed");
+                }
                 RebuildJob locked = jobs.findForUpdate(prepared.jobId())
                         .orElseThrow(() -> new IllegalStateException("rebuild job disappeared"));
                 if (locked.status() != RebuildStatus.RUNNING || !owner.equals(locked.owner())
@@ -79,8 +93,9 @@ public class SearchRebuildCutover {
                     throw new RebuildLeaseLostException("rebuild owner or status changed");
                 }
                 AliasTargets aliases = inspectAliases();
-                if (!aliases.isConfigured() || !Objects.equals(aliases.read(), aliases.write())) {
-                    throw new SplitAliasException("read/write aliases are split or not configured");
+                if (!aliases.isConfigured() || !Objects.equals(aliases.read(), aliases.write())
+                        || !Objects.equals(locked.sourceIndex(), aliases.read())) {
+                    throw new SplitAliasException("read/write aliases no longer match the fenced source index");
                 }
                 long finalWatermark = outbox.highWatermark();
                 replay(prepared.preparedWatermark(), finalWatermark, prepared.targetIndex());
@@ -89,6 +104,10 @@ public class SearchRebuildCutover {
                 if (!result.consistent()) {
                     throw new RebuildValidationException("rebuild validation differed in " + result.differenceCount() + " products");
                 }
+                if (!jobs.fenceCutover(prepared.jobId(), owner)) {
+                    throw new RebuildLeaseLostException("rebuild lease lost immediately before alias swap");
+                }
+                aliasSwapAttempted.set(true);
                 indexes.swapReadWriteAliases(aliases.read(), prepared.targetIndex());
                 if (!jobs.markCompleted(prepared.jobId(), owner, finalWatermark, result.differenceCount())
                         || !coordination.clearActiveRebuildId(prepared.jobId(), owner)) {
@@ -99,8 +118,8 @@ public class SearchRebuildCutover {
             pauseDispatchers(false);
             return jobs.find(prepared.jobId()).orElseThrow();
         } catch (RuntimeException failure) {
-            boolean split = failure instanceof SplitAliasException;
-            failAndRelease(prepared.jobId(), owner, reason(failure), split);
+            boolean preserveCutover = aliasSwapAttempted.get() || failure instanceof SplitAliasException;
+            failAndRelease(prepared.jobId(), owner, reason(failure), preserveCutover);
             throw failure;
         }
     }
@@ -153,13 +172,22 @@ public class SearchRebuildCutover {
         writeTx(() -> { coordination.setDispatcherPaused(paused); return null; });
     }
 
-    private void failAndRelease(UUID jobId, String owner, String reason, boolean split) {
+    private void failAndRelease(UUID jobId, String owner, String reason, boolean preserveCutover) {
         try {
             writeTx(() -> {
                 coordination.lockExclusive();
-                jobs.markFailed(jobId, owner, reason);
-                if (!split) {
-                    coordination.clearActiveRebuildId(jobId, owner);
+                if (preserveCutover) {
+                    // Once an alias request was attempted, the database and Elasticsearch may
+                    // disagree. Keep both durable safety signals for recovery; never classify it
+                    // as an ordinary failed rebuild or release the dispatcher lock.
+                    coordination.setDispatcherPaused(true);
+                } else {
+                    if (!jobs.markFailed(jobId, owner, reason)) {
+                        throw new IllegalStateException("could not mark rebuild failed");
+                    }
+                    if (!coordination.clearActiveRebuildId(jobId, owner)) {
+                        throw new IllegalStateException("could not clear active rebuild");
+                    }
                     coordination.setDispatcherPaused(false);
                 }
                 return null;

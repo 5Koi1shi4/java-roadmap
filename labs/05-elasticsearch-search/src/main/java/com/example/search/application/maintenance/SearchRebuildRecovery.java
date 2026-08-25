@@ -43,7 +43,7 @@ public class SearchRebuildRecovery {
         AliasTargets aliases;
         try {
             aliases = indexes.aliasTargets();
-        } catch (SplitAliasException | IllegalStateException split) {
+        } catch (RuntimeException split) {
             markSplit(job, split.getMessage());
             return;
         }
@@ -51,20 +51,32 @@ public class SearchRebuildRecovery {
                 && job.targetIndex().equals(aliases.write());
         // Only a configured, single physical alias target is safe to classify as the old side.
         // Missing aliases are an unsafe/unknown state and must retain the pause signal.
-        boolean old = !target && aliases.read() != null && aliases.read().equals(aliases.write());
+        boolean old = !target && job.sourceIndex() != null && aliases.isConfigured()
+                && job.sourceIndex().equals(aliases.read()) && job.sourceIndex().equals(aliases.write());
         if (target) {
             writeTx(() -> {
                 coordination.lockExclusive();
-                jobs.markCompleted(job.jobId(), job.owner());
-                coordination.clearActiveRebuildId(job.jobId(), job.owner());
+                if (!jobs.renewCutoverLeaseForRecovery(job.jobId(), job.owner())) {
+                    throw new IllegalStateException("could not renew interrupted cutover lease");
+                }
+                if (!jobs.markCompleted(job.jobId(), job.owner())) {
+                    throw new IllegalStateException("could not mark recovered rebuild completed");
+                }
+                if (!coordination.clearActiveRebuildId(job.jobId(), job.owner())) {
+                    throw new IllegalStateException("could not clear recovered active rebuild");
+                }
                 coordination.setDispatcherPaused(false);
                 return null;
             });
         } else if (old) {
             writeTx(() -> {
                 coordination.lockExclusive();
-                jobs.markFailed(job.jobId(), job.owner(), "rebuild interrupted before alias cutover");
-                coordination.clearActiveRebuildId(job.jobId(), job.owner());
+                if (!jobs.markFailed(job.jobId(), job.owner(), "rebuild interrupted before alias cutover")) {
+                    throw new IllegalStateException("could not mark recovered rebuild failed");
+                }
+                if (!coordination.clearActiveRebuildId(job.jobId(), job.owner())) {
+                    throw new IllegalStateException("could not clear recovered active rebuild");
+                }
                 coordination.setDispatcherPaused(false);
                 return null;
             });
@@ -76,7 +88,9 @@ public class SearchRebuildRecovery {
     private void markSplit(RebuildJob job, String reason) {
         writeTx(() -> {
             coordination.lockExclusive();
-            jobs.markFailed(job.jobId(), job.owner(), reason == null ? "split aliases" : reason);
+            if (!jobs.markFailed(job.jobId(), job.owner(), reason == null ? "split aliases" : reason)) {
+                throw new IllegalStateException("could not record unsafe cutover state");
+            }
             // Keep pause and active_rebuild_id as durable safety signals for operator intervention.
             coordination.setDispatcherPaused(true);
             return null;

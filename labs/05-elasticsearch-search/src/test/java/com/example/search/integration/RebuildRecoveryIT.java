@@ -1,6 +1,7 @@
 package com.example.search.integration;
 
 import com.example.search.application.maintenance.SearchRebuildRecovery;
+import com.example.search.application.maintenance.RebuildJobRepository;
 import com.example.search.infrastructure.elasticsearch.ElasticsearchIndexManager;
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch.indices.update_aliases.Action;
@@ -19,6 +20,7 @@ class RebuildRecoveryIT extends SharedSearchContainers {
     @Autowired JdbcTemplate jdbc;
     @Autowired ElasticsearchIndexManager indexes;
     @Autowired ElasticsearchClient client;
+    @Autowired RebuildJobRepository jobs;
 
     @Test
     void bothAliasesTargetCompletesAndUnpauses() throws Exception {
@@ -61,11 +63,37 @@ class RebuildRecoveryIT extends SharedSearchContainers {
         assertThat(jdbc.queryForObject("SELECT active_rebuild_id FROM search_coordination WHERE id=1", String.class)).isEqualTo(job.toString());
     }
 
+    @Test
+    void unknownUnifiedAliasFailsButRemainsPausedAndActive() throws Exception {
+        UUID job = seedCutoverJob();
+        UUID unknown = UUID.randomUUID();
+        indexes.createPhysicalIndex(unknown);
+        setAliases(indexes.physicalIndexName(unknown), indexes.physicalIndexName(unknown));
+
+        recovery.recoverInterruptedCutover();
+
+        assertThat(jdbc.queryForObject("SELECT status FROM search_rebuild_job WHERE job_id=?", String.class, job.toString()))
+                .isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT dispatcher_paused FROM search_coordination WHERE id=1", Boolean.class)).isTrue();
+        assertThat(jdbc.queryForObject("SELECT active_rebuild_id FROM search_coordination WHERE id=1", String.class)).isEqualTo(job.toString());
+    }
+
+    @Test
+    void databaseFenceRejectsExpiredLeaseAndWrongActiveJob() {
+        UUID job = seedCutoverJob();
+        jdbc.update("UPDATE search_rebuild_job SET lease_until=TIMESTAMPADD(SECOND,-1,UTC_TIMESTAMP(6)) WHERE job_id=?", job.toString());
+        assertThat(jobs.fenceCutover(job, "recovery-it")).isFalse();
+
+        jdbc.update("UPDATE search_rebuild_job SET lease_until=TIMESTAMPADD(SECOND,30,UTC_TIMESTAMP(6)) WHERE job_id=?", job.toString());
+        jdbc.update("UPDATE search_coordination SET active_rebuild_id=? WHERE id=1", UUID.randomUUID().toString());
+        assertThat(jobs.fenceCutover(job, "recovery-it")).isFalse();
+    }
+
     private UUID seedCutoverJob() {
         UUID job = UUID.randomUUID();
-        jdbc.update("INSERT INTO search_rebuild_job(job_id,target_index,status,phase,owner,lease_until,created_at) "
-                        + "VALUES (?,?, 'RUNNING','CUTOVER','recovery-it',TIMESTAMPADD(SECOND,-1,UTC_TIMESTAMP(6)),UTC_TIMESTAMP(6))",
-                job.toString(), indexes.physicalIndexName(job));
+        jdbc.update("INSERT INTO search_rebuild_job(job_id,target_index,source_index,status,phase,owner,lease_until,created_at) "
+                        + "VALUES (?,?,?,'RUNNING','CUTOVER','recovery-it',TIMESTAMPADD(SECOND,30,UTC_TIMESTAMP(6)),UTC_TIMESTAMP(6))",
+                job.toString(), indexes.physicalIndexName(job), "products-vbootstrap");
         jdbc.update("UPDATE search_coordination SET dispatcher_paused=TRUE, active_rebuild_id=? WHERE id=1", job.toString());
         return job;
     }

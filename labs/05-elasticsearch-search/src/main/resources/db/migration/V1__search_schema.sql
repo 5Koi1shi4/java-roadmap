@@ -54,6 +54,7 @@ CREATE TABLE search_outbox (
 CREATE TABLE search_rebuild_job (
   job_id CHAR(36) PRIMARY KEY,
   target_index VARCHAR(255) NOT NULL,
+  source_index VARCHAR(255) NULL,
   status VARCHAR(16) NOT NULL,
   phase VARCHAR(32) NOT NULL,
   owner VARCHAR(128) NOT NULL,

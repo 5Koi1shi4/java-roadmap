@@ -19,9 +19,15 @@ public interface RebuildJobRepository {
     boolean markFailed(UUID jobId, String owner, String reason);
 
     default boolean markCutover(UUID jobId, String owner) { return false; }
+    default boolean markCutover(UUID jobId, String owner, String sourceIndex) {
+        return markCutover(jobId, owner);
+    }
+    default boolean fenceCutover(UUID jobId, String owner) { return false; }
     default boolean markCompleted(UUID jobId, String owner) { return false; }
     default boolean markCompleted(UUID jobId, String owner, long finalWatermark, long differenceCount) {
         return markCompleted(jobId, owner);
     }
+    /** Recovery is allowed to renew a durable CUTOVER lease before strict completion fencing. */
+    default boolean renewCutoverLeaseForRecovery(UUID jobId, String owner) { return false; }
     default java.util.List<RebuildJob> findInterrupted() { return java.util.List.of(); }
 }

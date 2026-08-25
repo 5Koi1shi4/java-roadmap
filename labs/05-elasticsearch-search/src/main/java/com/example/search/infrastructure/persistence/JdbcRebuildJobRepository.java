@@ -23,10 +23,10 @@ public class JdbcRebuildJobRepository implements RebuildJobRepository {
 
     @Override
     public void insert(RebuildJob job) {
-        jdbc.update("INSERT INTO search_rebuild_job(job_id, target_index, status, phase, owner, lease_until, "
+        jdbc.update("INSERT INTO search_rebuild_job(job_id, target_index, source_index, status, phase, owner, lease_until, "
                         + "start_watermark, final_watermark, imported_count, difference_count, last_error, created_at) "
-                        + "VALUES (?, ?, ?, ?, ?, TIMESTAMPADD(SECOND, 30, UTC_TIMESTAMP(6)), ?, ?, ?, ?, ?, UTC_TIMESTAMP(6))",
-                job.jobId().toString(), job.targetIndex(), job.status().name(), job.phase().name(), job.owner(),
+                        + "VALUES (?, ?, ?, ?, ?, ?, TIMESTAMPADD(SECOND, 30, UTC_TIMESTAMP(6)), ?, ?, ?, ?, ?, UTC_TIMESTAMP(6))",
+                job.jobId().toString(), job.targetIndex(), job.sourceIndex(), job.status().name(), job.phase().name(), job.owner(),
                 nullable(job.startWatermark()), nullable(job.finalWatermark()), job.importedCount(),
                 job.differenceCount(), job.lastError());
     }
@@ -96,35 +96,60 @@ public class JdbcRebuildJobRepository implements RebuildJobRepository {
 
     @Override
     public boolean markCutover(UUID jobId, String owner) {
-        return jdbc.update("UPDATE search_rebuild_job SET phase='CUTOVER' "
-                        + "WHERE job_id=? AND status='RUNNING' AND owner=? AND lease_until > UTC_TIMESTAMP(6)",
-                jobId.toString(), owner) == 1;
+        return markCutover(jobId, owner, null);
+    }
+
+    @Override
+    public boolean markCutover(UUID jobId, String owner, String sourceIndex) {
+        return jdbc.update("UPDATE search_rebuild_job j JOIN search_coordination c ON c.active_rebuild_id=j.job_id "
+                        + "SET j.phase='CUTOVER', j.source_index=?, j.lease_until=TIMESTAMPADD(SECOND, 30, UTC_TIMESTAMP(6)) "
+                        + "WHERE c.id=1 AND j.job_id=? AND j.status='RUNNING' AND j.owner=? "
+                        + "AND j.lease_until > UTC_TIMESTAMP(6)", sourceIndex, jobId.toString(), owner) == 1;
+    }
+
+    @Override
+    public boolean fenceCutover(UUID jobId, String owner) {
+        return jdbc.update("UPDATE search_rebuild_job j JOIN search_coordination c ON c.active_rebuild_id=j.job_id "
+                        + "SET j.lease_until=TIMESTAMPADD(SECOND, 30, UTC_TIMESTAMP(6)) "
+                        + "WHERE c.id=1 AND j.job_id=? AND j.status='RUNNING' AND j.phase='CUTOVER' "
+                        + "AND j.owner=? AND j.lease_until > UTC_TIMESTAMP(6)", jobId.toString(), owner) == 1;
     }
 
     @Override
     public boolean markCompleted(UUID jobId, String owner) {
         return jdbc.update("UPDATE search_rebuild_job SET status='COMPLETED', phase='FINISHED', completed_at=UTC_TIMESTAMP(6) "
-                        + "WHERE job_id=? AND status='RUNNING' AND phase='CUTOVER' AND owner=?", jobId.toString(), owner) == 1;
+                        + "WHERE job_id=? AND status='RUNNING' AND phase='CUTOVER' AND owner=? "
+                        + "AND lease_until > UTC_TIMESTAMP(6)", jobId.toString(), owner) == 1;
     }
 
     @Override
     public boolean markCompleted(UUID jobId, String owner, long finalWatermark, long differenceCount) {
         if (finalWatermark < 0 || differenceCount < 0) throw new IllegalArgumentException("watermark and difference count must not be negative");
-        return jdbc.update("UPDATE search_rebuild_job SET status='COMPLETED', phase='FINISHED', "
-                        + "final_watermark=?, difference_count=?, completed_at=UTC_TIMESTAMP(6) "
-                        + "WHERE job_id=? AND status='RUNNING' AND phase='CUTOVER' AND owner=?",
+        return jdbc.update("UPDATE search_rebuild_job j JOIN search_coordination c ON c.active_rebuild_id=j.job_id "
+                        + "SET j.status='COMPLETED', j.phase='FINISHED', "
+                        + "j.final_watermark=?, j.difference_count=?, j.completed_at=UTC_TIMESTAMP(6) "
+                        + "WHERE c.id=1 AND j.job_id=? AND j.status='RUNNING' AND j.phase='CUTOVER' AND j.owner=? "
+                        + "AND j.lease_until > UTC_TIMESTAMP(6)",
                 finalWatermark, differenceCount, jobId.toString(), owner) == 1;
     }
 
     @Override
+    public boolean renewCutoverLeaseForRecovery(UUID jobId, String owner) {
+        return jdbc.update("UPDATE search_rebuild_job j JOIN search_coordination c ON c.active_rebuild_id=j.job_id "
+                        + "SET j.lease_until=TIMESTAMPADD(SECOND, 30, UTC_TIMESTAMP(6)) "
+                        + "WHERE c.id=1 AND j.job_id=? AND j.status='RUNNING' AND j.phase='CUTOVER' AND j.owner=?",
+                jobId.toString(), owner) == 1;
+    }
+
+    @Override
     public java.util.List<RebuildJob> findInterrupted() {
-        return jdbc.query("SELECT job_id, target_index, status, phase, owner, lease_until, start_watermark, final_watermark, "
+        return jdbc.query("SELECT job_id, target_index, source_index, status, phase, owner, lease_until, start_watermark, final_watermark, "
                         + "imported_count, difference_count, last_error, created_at, completed_at "
-                        + "FROM search_rebuild_job WHERE status='RUNNING' OR phase='CUTOVER'", (rs, row) -> map(rs));
+                        + "FROM search_rebuild_job WHERE status='RUNNING' OR (phase='CUTOVER' AND status <> 'FAILED')", (rs, row) -> map(rs));
     }
 
     private Optional<RebuildJob> query(UUID jobId, String suffix) {
-        return jdbc.query("SELECT job_id, target_index, status, phase, owner, lease_until, start_watermark, final_watermark, "
+        return jdbc.query("SELECT job_id, target_index, source_index, status, phase, owner, lease_until, start_watermark, final_watermark, "
                         + "imported_count, difference_count, last_error, created_at, completed_at FROM search_rebuild_job WHERE job_id=?" + suffix,
                 rs -> rs.next() ? Optional.of(map(rs)) : Optional.empty(), jobId.toString());
     }
@@ -136,7 +161,8 @@ public class JdbcRebuildJobRepository implements RebuildJobRepository {
                 rs.getString("owner"), utcInstant(rs, "lease_until"),
                 nullableLong(rs, "start_watermark"), nullableLong(rs, "final_watermark"),
                 rs.getLong("imported_count"), rs.getLong("difference_count"), rs.getString("last_error"),
-                utcInstant(rs, "created_at"), completed == null ? null : completed.toInstant(ZoneOffset.UTC));
+                utcInstant(rs, "created_at"), completed == null ? null : completed.toInstant(ZoneOffset.UTC),
+                rs.getString("source_index"));
     }
 
     private static Instant utcInstant(ResultSet rs, String column) throws SQLException {
