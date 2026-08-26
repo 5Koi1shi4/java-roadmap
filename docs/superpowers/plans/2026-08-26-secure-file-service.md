@@ -95,13 +95,15 @@ void createsFileSecurityTablesAndClaimIndexes() {
 }
 ```
 
-- [ ] **Step 3: 运行测试确认实验尚不存在**
+- [ ] **Step 3: 创建最小测试骨架并确认数据库架构测试因表缺失而失败**
+
+先创建 `pom.xml`、Maven Wrapper、`SharedMySqlContainer` 和 `FileSchemaIT`，但暂不创建 Flyway 迁移。`pom.xml` 此时已经包含 Task 1 列出的完整依赖和 Failsafe 配置。
 
 Run: `.\mvnw.cmd -Dit.test=FileSchemaIT verify`
 
-Expected: FAIL，提示 `pom.xml`、wrapper 或测试类不存在；不能把 Docker 跳过当作预期失败。
+Expected: FAIL，`FileSchemaIT` 已真实启动 MySQL 8.4，并因 `upload_session` 等目标表不存在而断言失败；不能以编译错误、Wrapper 缺失或 Docker 跳过作为预期失败。
 
-- [ ] **Step 4: 创建 Maven、Wrapper、应用和 Compose 基线**
+- [ ] **Step 4: 补齐应用和 Compose 基线**
 
 `pom.xml` 固定属性：
 
@@ -602,6 +604,7 @@ git commit -m "feat: persist upload sessions and blob leases"
 - Create: `labs/06-file-service/src/main/java/com/example/files/application/cleanup/CleanupTaskRepository.java`
 - Create: `labs/06-file-service/src/main/java/com/example/files/infrastructure/persistence/JdbcCleanupTaskRepository.java`
 - Test: `labs/06-file-service/src/test/java/com/example/files/unit/UploadServiceTest.java`
+- Test: `labs/06-file-service/src/test/java/com/example/files/integration/UploadTransactionBoundaryIT.java`
 - Test: `labs/06-file-service/src/test/java/com/example/files/integration/ConcurrentDeduplicationIT.java`
 - Test: `labs/06-file-service/src/test/java/com/example/files/integration/StagingRecoveryIT.java`
 
@@ -614,12 +617,11 @@ git commit -m "feat: persist upload sessions and blob leases"
 ```java
 @Test
 void neverRunsStorageIoInsideTransaction() {
-    service.upload(command(pdfBytes()));
-    inOrder.verify(sessions).begin(any());
-    inOrder.verify(storage).writeTemporary(anyString(), any(), eq(MAX_BYTES));
-    inOrder.verify(transactions).reserve(any());
-    inOrder.verify(storage).commit(anyString(), anyString());
-    inOrder.verify(transactions).finalizeUpload(any(), any(), anyLong());
+    TransactionRecordingStorage storage = new TransactionRecordingStorage(realLocalStorage);
+    uploadServiceUsing(storage).upload(command(pdfBytes()));
+    assertThat(storage.transactionActiveDuringWrite()).isFalse();
+    assertThat(storage.transactionActiveDuringCommit()).isFalse();
+    assertThat(storage.transactionActiveDuringDelete()).isFalse();
 }
 
 @Test
@@ -633,7 +635,7 @@ void concurrentSameContentCreatesOneBlobAndSeparateLogicalFiles() throws Excepti
 
 - [ ] **Step 2: 运行测试确认上传服务不存在**
 
-Run: `.\mvnw.cmd -Dtest=UploadServiceTest -Dit.test=ConcurrentDeduplicationIT,StagingRecoveryIT verify`
+Run: `.\mvnw.cmd -Dtest=UploadServiceTest -Dit.test=UploadTransactionBoundaryIT,ConcurrentDeduplicationIT,StagingRecoveryIT verify`
 
 Expected: FAIL，编译器报告 `UploadService` 和恢复服务不存在。
 
@@ -674,12 +676,12 @@ try {
 
 - [ ] **Step 4: 运行并发与恢复测试并提交**
 
-Run: `.\mvnw.cmd -Dtest=UploadServiceTest -Dit.test=ConcurrentDeduplicationIT,StagingRecoveryIT verify`
+Run: `.\mvnw.cmd -Dtest=UploadServiceTest -Dit.test=UploadTransactionBoundaryIT,ConcurrentDeduplicationIT,StagingRecoveryIT verify`
 
 Expected: PASS；并发测试至少循环 3 轮，每轮 20 个上传；故障测试覆盖事务 B、对象提交、事务 C 三个注入点。
 
 ```powershell
-git add -- labs/06-file-service/src/main/java/com/example/files/application/upload labs/06-file-service/src/main/java/com/example/files/application/cleanup/CleanupTaskRepository.java labs/06-file-service/src/main/java/com/example/files/infrastructure/persistence/JdbcCleanupTaskRepository.java labs/06-file-service/src/test/java/com/example/files/unit/UploadServiceTest.java labs/06-file-service/src/test/java/com/example/files/integration/ConcurrentDeduplicationIT.java labs/06-file-service/src/test/java/com/example/files/integration/StagingRecoveryIT.java
+git add -- labs/06-file-service/src/main/java/com/example/files/application/upload labs/06-file-service/src/main/java/com/example/files/application/cleanup/CleanupTaskRepository.java labs/06-file-service/src/main/java/com/example/files/infrastructure/persistence/JdbcCleanupTaskRepository.java labs/06-file-service/src/test/java/com/example/files/unit/UploadServiceTest.java labs/06-file-service/src/test/java/com/example/files/integration/UploadTransactionBoundaryIT.java labs/06-file-service/src/test/java/com/example/files/integration/ConcurrentDeduplicationIT.java labs/06-file-service/src/test/java/com/example/files/integration/StagingRecoveryIT.java
 git commit -m "feat: orchestrate recoverable deduplicated uploads"
 ```
 
