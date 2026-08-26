@@ -14,6 +14,7 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
@@ -56,9 +57,13 @@ public final class LocalObjectStorage implements ObjectStorage {
             Files.createDirectories(target.getParent());
             ensureNoSymlink(target.getParent());
             ensureNoSymlink(target);
+            if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
+                throw new IllegalArgumentException("temporary object already exists");
+            }
             long count = 0;
             try (InputStream in = source;
-                 var out = Files.newOutputStream(target, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE)) {
+                 var out = Files.newOutputStream(target, StandardOpenOption.CREATE_NEW,
+                     StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
                 byte[] buffer = new byte[8192];
                 int n;
                 while ((n = in.read(buffer)) >= 0) {
@@ -74,6 +79,11 @@ public final class LocalObjectStorage implements ObjectStorage {
                 Files.deleteIfExists(target);
                 if (ex instanceof RuntimeException runtime) throw runtime;
                 throw new UncheckedIOException((IOException) ex);
+            }
+            BasicFileAttributes writtenAttributes = Files.readAttributes(target,
+                BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            if (!writtenAttributes.isRegularFile()) {
+                throw new IllegalArgumentException("temporary object must be a regular file");
             }
             return new TemporaryObject(tempKey, count);
         } catch (IOException ex) {
@@ -92,6 +102,11 @@ public final class LocalObjectStorage implements ObjectStorage {
             if (!Files.exists(source, LinkOption.NOFOLLOW_LINKS)) {
                 throw new IllegalArgumentException("temporary object does not exist");
             }
+            BasicFileAttributes sourceAttributes = Files.readAttributes(source,
+                BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            if (!sourceAttributes.isRegularFile()) {
+                throw new IllegalArgumentException("temporary object must be a regular file");
+            }
             Files.createDirectories(target.getParent());
             ensureNoSymlink(target.getParent());
             if (Files.exists(target, LinkOption.NOFOLLOW_LINKS)) {
@@ -105,6 +120,12 @@ public final class LocalObjectStorage implements ObjectStorage {
                 }
                 Files.move(source, target);
             }
+            ensureNoSymlink(target);
+            BasicFileAttributes committedAttributes = Files.readAttributes(target,
+                BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            if (!committedAttributes.isRegularFile()) {
+                throw new IllegalArgumentException("committed object must be a regular file");
+            }
         } catch (IOException ex) {
             throw new UncheckedIOException("cannot commit temporary object", ex);
         }
@@ -116,7 +137,16 @@ public final class LocalObjectStorage implements ObjectStorage {
         ensureNamespace(objectKey, namespace(objectKey));
         try {
             ensureNoSymlink(path);
-            return Files.newInputStream(path, StandardOpenOption.READ);
+            InputStream input = Files.newInputStream(path, StandardOpenOption.READ,
+                LinkOption.NOFOLLOW_LINKS);
+            BasicFileAttributes attributes = Files.readAttributes(path,
+                BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            if (!attributes.isRegularFile()) {
+                input.close();
+                throw new IllegalArgumentException("object must be a regular file");
+            }
+            ensureNoSymlink(path);
+            return input;
         } catch (IOException ex) {
             throw new UncheckedIOException("cannot open object", ex);
         }
@@ -157,6 +187,9 @@ public final class LocalObjectStorage implements ObjectStorage {
         if (!resolved.startsWith(root)) {
             throw new IllegalArgumentException("storage key escapes configured root");
         }
+        if (!KEY.matcher(key).matches()) {
+            throw new IllegalArgumentException("storage key must use tmp/<UUID> or blobs/<UUID>");
+        }
         return resolved;
     }
 
@@ -181,12 +214,16 @@ public final class LocalObjectStorage implements ObjectStorage {
         Path current = path;
         while (current != null && current.startsWith(root)) {
             try {
-                if (Files.exists(current, LinkOption.NOFOLLOW_LINKS)
-                    && Files.isSymbolicLink(current)) {
+                if (Files.isSymbolicLink(current)) {
                     throw new IllegalArgumentException("symbolic links are not allowed in storage paths");
+                }
+                if (Files.exists(current, LinkOption.NOFOLLOW_LINKS)) {
+                    Files.readAttributes(current, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
                 }
             } catch (SecurityException ex) {
                 throw new IllegalArgumentException("cannot inspect storage path", ex);
+            } catch (IOException ex) {
+                throw new UncheckedIOException("cannot inspect storage path", ex);
             }
             if (current.equals(root)) break;
             current = current.getParent();

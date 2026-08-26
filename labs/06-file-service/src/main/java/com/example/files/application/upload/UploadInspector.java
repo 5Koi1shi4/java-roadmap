@@ -17,6 +17,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.Locale;
 import java.util.Objects;
+import java.security.DigestInputStream;
 import org.springframework.util.unit.DataSize;
 
 /** Detects a bounded prefix and exposes the source body through one digesting stream. */
@@ -78,7 +79,8 @@ public final class UploadInspector {
             ? "TYPE_UNKNOWN: unsupported file signature"
             : (!detected.mediaType().equals(normalizedDeclared)
                 ? "TYPE_MISMATCH: declared type does not match file signature"
-                : (!detected.acceptsExtension(extensionOf(safeName.value()))
+                : (!extensionOf(safeName.value()).isEmpty()
+                    && !detected.acceptsExtension(extensionOf(safeName.value()))
                     ? "TYPE_MISMATCH: filename extension does not match file signature" : null));
         return new InspectionImpl(source, prefix, safeName, normalizedDeclared, detected, maxBytes,
             deferredRejection);
@@ -252,15 +254,49 @@ public final class UploadInspector {
     }
 
     private static final class LimitedDigestInputStream extends InputStream {
-        private final InputStream delegate;
+        private final LimitedInputStream limited;
+        private final DigestInputStream delegate;
         private final MessageDigest digest;
+
+        private LimitedDigestInputStream(InputStream delegate, long maxBytes) throws NoSuchAlgorithmException {
+            this.digest = MessageDigest.getInstance("SHA-256");
+            this.limited = new LimitedInputStream(delegate, maxBytes);
+            this.delegate = new DigestInputStream(limited, digest);
+        }
+
+        @Override
+        public int read() throws IOException {
+            return delegate.read();
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws IOException {
+            return delegate.read(b, off, len);
+        }
+
+        @Override
+        public void close() throws IOException {
+            delegate.close();
+        }
+
+        private UploadRejectedException tooLarge() {
+            return new UploadRejectedException("FILE_TOO_LARGE", "upload exceeds byte limit");
+        }
+
+        private boolean eof() { return limited.eof; }
+        private long count() { return limited.count; }
+        private byte[] digest() { return digest.digest(); }
+    }
+
+    /** Bounded source placed inside DigestInputStream so an overflow byte is never hashed. */
+    private static final class LimitedInputStream extends InputStream {
+        private final InputStream delegate;
         private final long maxBytes;
         private long count;
         private boolean eof;
 
-        private LimitedDigestInputStream(InputStream delegate, long maxBytes) throws NoSuchAlgorithmException {
+        private LimitedInputStream(InputStream delegate, long maxBytes) {
             this.delegate = delegate;
-            this.digest = MessageDigest.getInstance("SHA-256");
             this.maxBytes = maxBytes;
         }
 
@@ -277,7 +313,6 @@ public final class UploadInspector {
                 eof = true;
                 return -1;
             }
-            digest.update((byte) value);
             count++;
             return value;
         }
@@ -298,7 +333,6 @@ public final class UploadInspector {
                 return -1;
             }
             if (n > maxBytes - count) throw tooLarge();
-            digest.update(b, off, n);
             count += n;
             return n;
         }
@@ -311,9 +345,5 @@ public final class UploadInspector {
         private UploadRejectedException tooLarge() {
             return new UploadRejectedException("FILE_TOO_LARGE", "upload exceeds byte limit");
         }
-
-        private boolean eof() { return eof; }
-        private long count() { return count; }
-        private byte[] digest() { return digest.digest(); }
     }
 }
