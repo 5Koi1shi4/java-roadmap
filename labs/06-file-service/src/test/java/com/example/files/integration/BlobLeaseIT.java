@@ -155,11 +155,62 @@ class BlobLeaseIT extends SharedMySqlContainer {
         BlobReservation waiting = transactions.reserve(competitor.sessionId(), competitor.ownerToken(), upload);
 
         assertThat(waiting.mode()).isEqualTo(BlobReservation.Mode.WAITING);
-        assertThat(waiting.objectKey()).isEqualTo(first.objectKey());
-        assertThat(transactions.tryFinalize(competitor.sessionId(), competitor.ownerToken(), waiting.blobId())).isFalse();
+        assertThat(waiting.sessionId()).isNull();
+        assertThat(waiting.ownerToken()).isNull();
+        assertThat(waiting.blobId()).isZero();
+        assertThat(waiting.objectKey()).isNull();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> transactions.finalizeUpload(waiting))
+            .isInstanceOf(IllegalArgumentException.class);
         assertThat(blobs.get(first.blobId()).stagingSessionId()).isEqualTo(owner.sessionId());
         assertThat(blobs.get(first.blobId()).stagingOwnerToken()).isEqualTo(owner.ownerToken());
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM stored_file", Integer.class)).isZero();
+
+        assertThat(blobs.markReady(first.blobId(), owner.sessionId(), owner.ownerToken())).isTrue();
+        BlobReservation refreshed = transactions.reserve(competitor.sessionId(), competitor.ownerToken(), upload);
+        assertThat(refreshed.mode()).isEqualTo(BlobReservation.Mode.REUSE_READY);
+        transactions.finalizeUpload(refreshed);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM stored_file", Integer.class)).isOne();
+    }
+
+    @Test
+    void twoNewSessionsRaceForOneExpiredBlobAndOnlyOneCanTakeItOver() throws Exception {
+        InspectedUpload upload = new InspectedUpload(SafeDisplayName.from("race.pdf"), "application/pdf",
+            DetectedFileType.PDF, 3L, "f".repeat(64), new TemporaryObject("tmp/" + UUID.randomUUID(), 3L));
+        var old = transactions.begin(71L, upload.originalName(), upload.declaredType(), Duration.ofHours(1), Duration.ofSeconds(1));
+        BlobReservation reservation = transactions.reserve(old.sessionId(), old.ownerToken(), upload, Duration.ofSeconds(1));
+        var newA = transactions.begin(72L, upload.originalName(), upload.declaredType());
+        var newB = transactions.begin(73L, upload.originalName(), upload.declaredType());
+        assertThat(sessions.markValidated(newA.sessionId(), newA.ownerToken(), upload)).isTrue();
+        assertThat(sessions.markValidated(newB.sessionId(), newB.ownerToken(), upload)).isTrue();
+        jdbc.update("UPDATE upload_session SET lease_until = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE session_id=?",
+            old.sessionId().toString());
+        jdbc.update("UPDATE stored_blob SET staging_lease_until = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE id=?",
+            reservation.blobId());
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<Boolean> first = executor.submit(() -> transactions.takeOverExpiredStaging(reservation.blobId(),
+                old.sessionId(), old.ownerToken(), newA.sessionId(), newA.ownerToken(), Duration.ofMinutes(2)));
+            Future<Boolean> second = executor.submit(() -> transactions.takeOverExpiredStaging(reservation.blobId(),
+                old.sessionId(), old.ownerToken(), newB.sessionId(), newB.ownerToken(), Duration.ofMinutes(2)));
+            boolean firstWon = first.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            boolean secondWon = second.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(firstWon ^ secondWon).isTrue();
+            var winner = firstWon ? newA : newB;
+            var loser = firstWon ? newB : newA;
+            assertThat(jdbc.queryForObject("SELECT staging_session_id FROM stored_blob WHERE id=?", String.class,
+                reservation.blobId())).isEqualTo(winner.sessionId().toString());
+            assertThat(jdbc.queryForObject("SELECT staging_owner_token FROM stored_blob WHERE id=?", String.class,
+                reservation.blobId())).isEqualTo(winner.ownerToken().toString());
+            assertThat(jdbc.queryForObject("SELECT status FROM upload_session WHERE session_id=?", String.class,
+                old.sessionId().toString())).isEqualTo("EXPIRED");
+            assertThat(jdbc.queryForObject("SELECT status FROM upload_session WHERE session_id=?", String.class,
+                loser.sessionId().toString())).isEqualTo("VALIDATED");
+            transactions.finalizeUpload(winner.sessionId(), winner.ownerToken(), reservation.blobId());
+        } finally {
+            executor.shutdownNow();
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM stored_file", Integer.class)).isOne();
     }
 
     private int filesCount() {

@@ -73,9 +73,9 @@ public final class JdbcUploadSessionRepository implements UploadSessionRepositor
             throw new IllegalArgumentException("invalid blob binding arguments");
         }
         return jdbc.update("UPDATE upload_session SET blob_id=?,updated_at=CURRENT_TIMESTAMP(6) "
-                + "WHERE session_id=? AND owner_token=? AND status='VALIDATED' AND blob_id IS NULL "
+                + "WHERE session_id=? AND owner_token=? AND status='VALIDATED' AND (blob_id IS NULL OR blob_id=?) "
                 + "AND lease_until>CURRENT_TIMESTAMP(6) AND expires_at>CURRENT_TIMESTAMP(6)",
-            blobId, sessionId.toString(), ownerToken.toString()) == 1;
+            blobId, sessionId.toString(), ownerToken.toString(), blobId) == 1;
     }
 
     @Override

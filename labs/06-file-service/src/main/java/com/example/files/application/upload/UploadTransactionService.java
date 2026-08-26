@@ -49,10 +49,18 @@ public final class UploadTransactionService {
     public BlobReservation reserve(UUID sessionId, UUID ownerToken, InspectedUpload upload, Duration lease) {
         return transactionTemplate.execute(status -> {
             if (!sessions.markValidated(sessionId, ownerToken, upload)) {
-                throw new IllegalStateException("UPLOAD_SESSION_NOT_VALIDATED");
+                UploadSession existing = sessions.find(sessionId)
+                    .orElseThrow(() -> new IllegalStateException("UPLOAD_SESSION_NOT_FOUND"));
+                if (existing.status() != com.example.files.domain.UploadSessionStatus.VALIDATED
+                    || existing.contentHash() == null || !existing.contentHash().equalsIgnoreCase(upload.sha256())
+                    || existing.actualSize() == null || existing.actualSize() != upload.size()
+                    || existing.detectedType() != upload.detectedType()) {
+                    throw new IllegalStateException("UPLOAD_SESSION_NOT_VALIDATED");
+                }
             }
             BlobReservation reservation = blobs.reserve(sessionId, ownerToken, upload, lease);
-            if (!sessions.bindBlob(sessionId, ownerToken, reservation.blobId())) {
+            if (reservation.mode() != BlobReservation.Mode.WAITING
+                && !sessions.bindBlob(sessionId, ownerToken, reservation.blobId())) {
                 throw new IllegalStateException("UPLOAD_BLOB_BINDING_FAILED");
             }
             return reservation;
@@ -72,7 +80,9 @@ public final class UploadTransactionService {
 
     /** 使用已经领取的结果完成上传，供编排服务保持令牌和 Blob 一致。 */
     public UploadResult finalizeUpload(BlobReservation reservation) {
-        if (reservation == null) throw new IllegalArgumentException("reservation must not be null");
+        if (reservation == null || reservation.mode() == BlobReservation.Mode.WAITING) {
+            throw new IllegalArgumentException("only an owned or READY reservation can finalize");
+        }
         return finalizeUpload(reservation.sessionId(), reservation.ownerToken(), reservation.blobId());
     }
 

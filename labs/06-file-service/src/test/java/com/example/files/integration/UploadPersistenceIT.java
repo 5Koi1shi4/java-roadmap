@@ -23,12 +23,11 @@ import org.springframework.transaction.support.TransactionTemplate;
 import javax.sql.DataSource;
 import java.time.Duration;
 import java.util.UUID;
-import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.ArrayList;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CyclicBarrier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -131,30 +130,19 @@ class UploadPersistenceIT extends SharedMySqlContainer {
         var second = transactions.begin(42L, upload.originalName(), upload.declaredType());
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
-            List<Future<BlobReservation>> futures = executor.invokeAll(List.of(
-                () -> transactions.reserve(first.sessionId(), first.ownerToken(), upload),
-                () -> transactions.reserve(second.sessionId(), second.ownerToken(), upload)));
-            List<BlobReservation> reservations = new ArrayList<>();
-            for (Future<BlobReservation> future : futures) {
-                reservations.add(future.get());
-            }
-            assertThat(reservations).extracting(BlobReservation::blobId).containsOnly(reservations.get(0).blobId());
-            BlobReservation owner = reservations.stream().filter(r -> r.mode() == BlobReservation.Mode.NEW_STAGING)
-                .findFirst().orElseThrow();
-            BlobReservation waiter = reservations.stream().filter(r -> r != owner).findFirst().orElseThrow();
-            Future<UploadResult> ownerResult = executor.submit(() -> transactions.finalizeUpload(owner));
-            Future<UploadResult> waiterResult = executor.submit(() -> {
-                while (true) {
-                    try {
-                        return transactions.finalizeUpload(waiter);
-                    } catch (IllegalStateException unavailable) {
-                        Thread.yield();
-                    }
-                }
+            CyclicBarrier barrier = new CyclicBarrier(2);
+            Future<UploadResult> firstResult = executor.submit(() -> {
+                barrier.await();
+                return completeAfterReservation(first, upload);
             });
-            ownerResult.get(10, TimeUnit.SECONDS);
-            waiterResult.get(10, TimeUnit.SECONDS);
-            assertThat(blobs.get(reservations.get(0).blobId()).referenceCount()).isEqualTo(2);
+            Future<UploadResult> secondResult = executor.submit(() -> {
+                barrier.await();
+                return completeAfterReservation(second, upload);
+            });
+            firstResult.get(10, TimeUnit.SECONDS);
+            secondResult.get(10, TimeUnit.SECONDS);
+            long blobId = jdbc.queryForObject("SELECT id FROM stored_blob WHERE content_hash=?", Long.class, upload.sha256());
+            assertThat(blobs.get(blobId).referenceCount()).isEqualTo(2);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM stored_blob", Integer.class)).isOne();
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM stored_file", Integer.class)).isEqualTo(2);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM upload_session WHERE status='COMPLETED'", Integer.class)).isEqualTo(2);
@@ -162,6 +150,21 @@ class UploadPersistenceIT extends SharedMySqlContainer {
         } finally {
             executor.shutdownNow();
         }
+    }
+
+    private UploadResult completeAfterReservation(com.example.files.domain.UploadSession session,
+                                                   InspectedUpload upload) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (System.nanoTime() < deadline) {
+            BlobReservation refreshed = transactions.reserve(session.sessionId(), session.ownerToken(), upload);
+            if (refreshed.mode() == BlobReservation.Mode.NEW_STAGING
+                || refreshed.mode() == BlobReservation.Mode.OWNED_STAGING
+                || refreshed.mode() == BlobReservation.Mode.REUSE_READY) {
+                return transactions.finalizeUpload(refreshed);
+            }
+            Thread.yield();
+        }
+        throw new AssertionError("bounded reserve/finalize retry timed out");
     }
 
     private static InspectedUpload upload(String hash) {

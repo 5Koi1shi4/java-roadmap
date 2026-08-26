@@ -63,7 +63,7 @@ public final class JdbcBlobRepository implements BlobRepository {
             return new BlobReservation(sessionId, ownerToken, blob.id(), blob.objectKey(), BlobReservation.Mode.OWNED_STAGING);
         }
         if (blob.status() == BlobStatus.STAGING) {
-            return new BlobReservation(sessionId, ownerToken, blob.id(), blob.objectKey(), BlobReservation.Mode.WAITING);
+            return BlobReservation.waiting();
         }
         throw new IllegalStateException("BLOB_NOT_READY");
     }

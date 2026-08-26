@@ -7,11 +7,22 @@ import java.util.UUID;
 public record BlobReservation(UUID sessionId, UUID ownerToken, long blobId,
                               String objectKey, Mode mode) {
     public BlobReservation {
-        if (sessionId == null || ownerToken == null || blobId <= 0
-            || objectKey == null || objectKey.isBlank() || mode == null) {
+        if (mode == null) {
+            throw new IllegalArgumentException("Blob reservation contains invalid values");
+        }
+        if (mode == Mode.WAITING) {
+            if (sessionId != null || ownerToken != null || blobId != 0 || objectKey != null) {
+                throw new IllegalArgumentException("WAITING reservation must not expose Blob capability");
+            }
+        } else if (sessionId == null || ownerToken == null || blobId <= 0
+            || objectKey == null || objectKey.isBlank()) {
             throw new IllegalArgumentException("Blob reservation contains invalid values");
         }
         Objects.requireNonNull(mode);
+    }
+
+    public static BlobReservation waiting() {
+        return new BlobReservation(null, null, 0L, null, Mode.WAITING);
     }
 
     public enum Mode { NEW_STAGING, OWNED_STAGING, WAITING, REUSE_READY }
