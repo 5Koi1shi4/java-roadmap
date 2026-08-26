@@ -78,7 +78,13 @@ public final class StagingRecoveryService {
                 cleanupTasks.enqueueTemp(claimed, claimed.tempKey());
                 recovered++;
             } catch (RuntimeException failure) {
-                cleanupTasks.enqueueTemp(claimed, claimed.tempKey());
+                // C 事务失败时必须保留 FINALIZING/READY 等可恢复状态，并向调度方暴露重试信号。
+                try {
+                    cleanupTasks.enqueueTemp(claimed, claimed.tempKey());
+                } catch (RuntimeException cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+                throw new StorageCoordinationUnavailableException("staging recovery finalization is retryable", failure);
             }
         }
         return recovered;

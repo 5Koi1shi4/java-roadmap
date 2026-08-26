@@ -164,7 +164,7 @@ class UploadPersistenceIT extends SharedMySqlContainer {
                     if (!(refreshed instanceof BlobReservation.Waiting)) {
                         throw new AssertionError("unexpected reservation state: " + refreshed.mode());
                     }
-                    Thread.sleep(25);
+                    Thread.yield();
                 }
                 throw new AssertionError("bounded refresh/finalize retry timed out");
             });

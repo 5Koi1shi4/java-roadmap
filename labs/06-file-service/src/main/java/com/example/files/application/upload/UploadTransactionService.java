@@ -143,9 +143,12 @@ public final class UploadTransactionService implements UploadService.Transaction
             StoredBlob blob = blobs.findByHashForUpdate(upload.sha256()).orElse(null);
             if (blob == null || blob.status() != BlobStatus.STAGING || !oldId.equals(blob.stagingSessionId())
                 || !hint.stagingOwnerToken().equals(blob.stagingOwnerToken())) return BlobReservation.waiting();
-            if (!sessions.takeOverExpired(oldId, hint.stagingOwnerToken(), sessionId, ownerToken, blob.id(), lease)
-                || !blobs.takeOverExpiredStaging(blob.id(), oldId, hint.stagingOwnerToken(), sessionId, ownerToken, lease)) {
-                // 两张表的更新必须在当前事务中整体回滚，禁止只续租一侧。
+            if (!sessions.takeOverExpired(oldId, hint.stagingOwnerToken(), sessionId, ownerToken, blob.id(), lease)) {
+                // 条件更新为 0 可能只是仍被有效 owner 持有；重新锁定当前状态并返回安全能力。
+                return currentReservationLocked(sessionId, ownerToken, upload);
+            }
+            if (!blobs.takeOverExpiredStaging(blob.id(), oldId, hint.stagingOwnerToken(), sessionId, ownerToken, lease)) {
+                // session 已更新而 Blob 未更新时必须整体回滚，不能留下半接管状态。
                 throw new IllegalStateException("UPLOAD_TAKEOVER_LOST");
             }
             return BlobReservation.ownedStaging(sessionId, ownerToken, blob.id(), blob.objectKey());
@@ -161,6 +164,12 @@ public final class UploadTransactionService implements UploadService.Transaction
             }
         }
         return reservationFor(blob, sessionId, ownerToken);
+    }
+
+    /** 对接管竞争重新读取锁定行，不把 0 行更新误报为普通等待失败。 */
+    private BlobReservation currentReservationLocked(UUID sessionId, UUID ownerToken, InspectedUpload upload) {
+        StoredBlob current = blobs.findByHashForUpdate(upload.sha256()).orElse(null);
+        return current == null ? BlobReservation.waiting() : reservationFor(current, sessionId, ownerToken);
     }
 
     @Override
