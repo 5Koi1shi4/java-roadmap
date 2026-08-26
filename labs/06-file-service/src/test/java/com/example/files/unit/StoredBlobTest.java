@@ -88,4 +88,17 @@ class StoredBlobTest {
             Instant.parse("2030-01-01T00:00:00Z"), Instant.parse("2030-01-01T00:00:01Z")))
             .isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test
+    void rehydratePreservesDatabaseTimestampsAndRejectsInvalidStateCombinations() {
+        Instant created = Instant.parse("2030-01-01T00:00:00.123456Z");
+        Instant updated = Instant.parse("2030-01-01T00:00:01.654321Z");
+        StoredBlob ready = StoredBlob.rehydrate(8L, "c".repeat(64), "blobs/random", 12L,
+            DetectedFileType.PDF, 2L, BlobStatus.READY, 1L, null, null, null, null, null, created, updated);
+        assertThat(ready.createdAt()).isEqualTo(created);
+        assertThat(ready.updatedAt()).isEqualTo(updated);
+        assertThatThrownBy(() -> StoredBlob.rehydrate(8L, "c".repeat(64), "blobs/random", 12L,
+            DetectedFileType.PDF, 0L, BlobStatus.DELETING, 1L, null, null, null, null, null, created, updated))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
 }

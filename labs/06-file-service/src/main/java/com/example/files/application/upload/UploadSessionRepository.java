@@ -16,9 +16,14 @@ public interface UploadSessionRepository {
 
     boolean markFinalizing(UUID sessionId, UUID ownerToken, long blobId);
 
+    boolean bindBlob(UUID sessionId, UUID ownerToken, long blobId);
+
     boolean markCompleted(UUID sessionId, UUID ownerToken, UUID fileId);
 
     Optional<UploadSession> find(UUID sessionId);
+
+    boolean takeOverExpired(UUID oldSessionId, UUID oldOwnerToken, UUID newSessionId,
+                            UUID newOwnerToken, long blobId, Duration lease);
 
     default Optional<UploadSession> findForUpdate(UUID sessionId) {
         return find(sessionId);

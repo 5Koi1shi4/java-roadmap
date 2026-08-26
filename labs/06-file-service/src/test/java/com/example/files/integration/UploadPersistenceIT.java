@@ -23,6 +23,11 @@ import org.springframework.transaction.support.TransactionTemplate;
 import javax.sql.DataSource;
 import java.time.Duration;
 import java.util.UUID;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.ArrayList;
+import java.util.concurrent.Future;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -91,6 +96,59 @@ class UploadPersistenceIT extends SharedMySqlContainer {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM stored_file", Integer.class)).isZero();
         assertThat(blobs.get(reservation.blobId()).referenceCount()).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM file_audit_event", Integer.class)).isZero();
+    }
+
+    @Test
+    void validSessionCannotFinalizeAgainstAnUnboundReadyBlob() {
+        InspectedUpload firstUpload = upload("1".repeat(64));
+        var firstSession = transactions.begin(21L, firstUpload.originalName(), firstUpload.declaredType());
+        BlobReservation firstReservation = transactions.reserve(firstSession.sessionId(), firstSession.ownerToken(), firstUpload);
+        transactions.finalizeUpload(firstReservation);
+
+        InspectedUpload secondUpload = upload("2".repeat(64));
+        var secondSession = transactions.begin(22L, secondUpload.originalName(), secondUpload.declaredType());
+        BlobReservation secondReservation = transactions.reserve(secondSession.sessionId(), secondSession.ownerToken(), secondUpload);
+        transactions.finalizeUpload(secondReservation);
+
+        var attackerSession = transactions.begin(23L, firstUpload.originalName(), firstUpload.declaredType());
+        BlobReservation bound = transactions.reserve(attackerSession.sessionId(), attackerSession.ownerToken(), firstUpload);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+            transactions.finalizeUpload(attackerSession.sessionId(), attackerSession.ownerToken(), secondReservation.blobId()))
+            .isInstanceOf(IllegalStateException.class);
+
+        assertThat(jdbc.queryForObject("SELECT status FROM upload_session WHERE session_id=?", String.class,
+            attackerSession.sessionId().toString())).isEqualTo("VALIDATED");
+        assertThat(blobs.get(firstReservation.blobId()).referenceCount()).isOne();
+        assertThat(blobs.get(secondReservation.blobId()).referenceCount()).isOne();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM stored_file", Integer.class)).isEqualTo(2);
+    }
+
+    @Test
+    void concurrentIndependentReservationsConvergeOnOneBlobAndReadyReuseIncrementsReference() throws Exception {
+        InspectedUpload upload = upload("3".repeat(64));
+        var first = transactions.begin(41L, upload.originalName(), upload.declaredType());
+        var second = transactions.begin(42L, upload.originalName(), upload.declaredType());
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            List<Future<BlobReservation>> futures = executor.invokeAll(List.of(
+                () -> transactions.reserve(first.sessionId(), first.ownerToken(), upload),
+                () -> transactions.reserve(second.sessionId(), second.ownerToken(), upload)));
+            List<BlobReservation> reservations = new ArrayList<>();
+            for (Future<BlobReservation> future : futures) {
+                reservations.add(future.get());
+            }
+            assertThat(reservations).extracting(BlobReservation::blobId).containsOnly(reservations.get(0).blobId());
+            BlobReservation owner = reservations.stream().filter(r -> r.mode() == BlobReservation.Mode.NEW_STAGING)
+                .findFirst().orElseThrow();
+            BlobReservation waiter = reservations.stream().filter(r -> r != owner).findFirst().orElseThrow();
+            transactions.finalizeUpload(owner);
+            transactions.finalizeUpload(waiter);
+            assertThat(blobs.get(reservations.get(0).blobId()).referenceCount()).isEqualTo(2);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM stored_blob", Integer.class)).isOne();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM stored_file", Integer.class)).isEqualTo(2);
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     private static InspectedUpload upload(String hash) {

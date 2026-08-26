@@ -51,7 +51,11 @@ public final class UploadTransactionService {
             if (!sessions.markValidated(sessionId, ownerToken, upload)) {
                 throw new IllegalStateException("UPLOAD_SESSION_NOT_VALIDATED");
             }
-            return blobs.reserve(sessionId, ownerToken, upload, lease);
+            BlobReservation reservation = blobs.reserve(sessionId, ownerToken, upload, lease);
+            if (!sessions.bindBlob(sessionId, ownerToken, reservation.blobId())) {
+                throw new IllegalStateException("UPLOAD_BLOB_BINDING_FAILED");
+            }
+            return reservation;
         });
     }
 
@@ -96,11 +100,20 @@ public final class UploadTransactionService {
         if (!ownerToken.equals(session.ownerToken()) || session.status() != com.example.files.domain.UploadSessionStatus.VALIDATED) {
             throw new IllegalStateException("UPLOAD_SESSION_NOT_OWNED");
         }
+        if (session.blobId() == null || session.blobId() != blobId
+            || session.contentHash() == null || session.actualSize() == null || session.detectedType() == null) {
+            throw new IllegalStateException("UPLOAD_BLOB_NOT_BOUND");
+        }
         if (!sessions.markFinalizing(sessionId, ownerToken, blobId)) {
             throw new IllegalStateException("UPLOAD_SESSION_LEASE_LOST");
         }
         StoredBlob blob = blobs.findForUpdate(blobId)
             .orElseThrow(() -> new IllegalStateException("BLOB_NOT_FOUND"));
+        if (!session.contentHash().equalsIgnoreCase(blob.contentHash())
+            || session.actualSize() != blob.sizeBytes()
+            || session.detectedType() != blob.mediaType()) {
+            throw new IllegalStateException("UPLOAD_BLOB_METADATA_MISMATCH");
+        }
         if (blob.status() == BlobStatus.STAGING) {
             if (!sessionId.equals(blob.stagingSessionId()) || !ownerToken.equals(blob.stagingOwnerToken())
                 || !blobs.markReady(blobId, sessionId, ownerToken)) {
@@ -119,6 +132,36 @@ public final class UploadTransactionService {
         audits.record(new AuditEvent(CorrelationId.random(), session.uploaderId(), AuditAction.UPLOAD_COMPLETED,
             file.fileId(), null, "SUCCESS", null, null, file.createdAt()));
         return new UploadResult(file.fileId(), file.displayName().value(), blob.mediaTypeValue(), blob.sizeBytes(), file.createdAt());
+    }
+
+    /** 在同一事务内接管过期会话和 Blob，确保新会话可以继续终结。 */
+    public boolean takeOverExpiredStaging(long blobId, UUID oldSessionId, UUID oldOwnerToken,
+                                          UUID newSessionId, UUID newOwnerToken, Duration lease) {
+        Boolean result = transactionTemplate.execute(status -> {
+            if (oldSessionId == null || newSessionId == null || oldSessionId.equals(newSessionId)) {
+                throw new IllegalArgumentException("takeover requires two distinct sessions");
+            }
+            UploadSession oldSession = sessions.findForUpdate(oldSessionId)
+                .orElseThrow(() -> new IllegalStateException("OLD_UPLOAD_SESSION_NOT_FOUND"));
+            UploadSession newSession = sessions.findForUpdate(newSessionId)
+                .orElseThrow(() -> new IllegalStateException("NEW_UPLOAD_SESSION_NOT_FOUND"));
+            StoredBlob blob = blobs.findForUpdate(blobId)
+                .orElseThrow(() -> new IllegalStateException("BLOB_NOT_FOUND"));
+            if (blob.status() != BlobStatus.STAGING || !oldSessionId.equals(blob.stagingSessionId())
+                || !oldOwnerToken.equals(blob.stagingOwnerToken()) || newSession.contentHash() == null
+                || !newSession.contentHash().equalsIgnoreCase(blob.contentHash())
+                || newSession.actualSize() == null || newSession.actualSize() != blob.sizeBytes()
+                || newSession.detectedType() != blob.mediaType()) {
+                return false;
+            }
+            if (!sessions.takeOverExpired(oldSessionId, oldOwnerToken, newSessionId, newOwnerToken, blobId, lease)
+                || !blobs.takeOverExpiredStaging(blobId, oldSessionId, oldOwnerToken,
+                newSessionId, newOwnerToken, lease)) {
+                throw new IllegalStateException("UPLOAD_TAKEOVER_LOST");
+            }
+            return true;
+        });
+        return Boolean.TRUE.equals(result);
     }
 
 }

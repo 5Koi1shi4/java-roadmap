@@ -28,6 +28,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class BlobLeaseIT extends SharedMySqlContainer {
     private static JdbcTemplate jdbc;
     private static JdbcBlobRepository blobs;
+    private static JdbcUploadSessionRepository sessions;
     private static UploadTransactionService transactions;
 
     @BeforeAll
@@ -36,7 +37,7 @@ class BlobLeaseIT extends SharedMySqlContainer {
             .load().migrate();
         var dataSource = new DriverManagerDataSource(MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword());
         jdbc = new JdbcTemplate(dataSource);
-        var sessions = new JdbcUploadSessionRepository(jdbc);
+        sessions = new JdbcUploadSessionRepository(jdbc);
         blobs = new JdbcBlobRepository(jdbc);
         transactions = new UploadTransactionService(sessions, blobs, new JdbcFileRepository(jdbc),
             new JdbcAuditRecorder(jdbc), new TransactionTemplate(new DataSourceTransactionManager(dataSource)));
@@ -66,5 +67,37 @@ class BlobLeaseIT extends SharedMySqlContainer {
 
         assertThat(transactions.tryFinalize(first.sessionId(), first.ownerToken(), first.blobId())).isFalse();
         assertThat(blobs.markReady(first.blobId(), secondSession, secondToken)).isTrue();
+    }
+
+    @Test
+    void newSessionTakeoverCanFinalizeAndOldOwnerIsFenced() {
+        InspectedUpload upload = new InspectedUpload(SafeDisplayName.from("b.pdf"), "application/pdf",
+            DetectedFileType.PDF, 3L, "b".repeat(64), new TemporaryObject("tmp/" + UUID.randomUUID(), 3L));
+        var first = transactions.begin(31L, upload.originalName(), upload.declaredType(), Duration.ofHours(1), Duration.ofSeconds(1));
+        BlobReservation reservation = transactions.reserve(first.sessionId(), first.ownerToken(), upload, Duration.ofSeconds(1));
+        var second = transactions.begin(32L, upload.originalName(), upload.declaredType());
+        assertThat(sessions.markValidated(second.sessionId(), second.ownerToken(), upload)).isTrue();
+        jdbc.update("UPDATE upload_session SET lease_until = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE session_id=?",
+            first.sessionId().toString());
+        jdbc.update("UPDATE stored_blob SET staging_lease_until = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE id=?",
+            reservation.blobId());
+
+        assertThat(transactions.takeOverExpiredStaging(reservation.blobId(), first.sessionId(), first.ownerToken(),
+            second.sessionId(), second.ownerToken(), Duration.ofMinutes(2))).isTrue();
+        assertThat(transactions.tryFinalize(first.sessionId(), first.ownerToken(), reservation.blobId())).isFalse();
+        var result = transactions.finalizeUpload(second.sessionId(), second.ownerToken(), reservation.blobId());
+
+        assertThat(filesCount()).isOne();
+        assertThat(jdbc.queryForObject("SELECT reference_count FROM stored_blob WHERE id=?", Long.class, reservation.blobId())).isOne();
+        assertThat(jdbc.queryForObject("SELECT status FROM upload_session WHERE session_id=?", String.class,
+            second.sessionId().toString())).isEqualTo("COMPLETED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM file_audit_event WHERE file_id=?", Integer.class,
+            result.fileId().toString())).isOne();
+        assertThat(jdbc.queryForObject("SELECT status FROM upload_session WHERE session_id=?", String.class,
+            first.sessionId().toString())).isEqualTo("EXPIRED");
+    }
+
+    private int filesCount() {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM stored_file", Integer.class);
     }
 }

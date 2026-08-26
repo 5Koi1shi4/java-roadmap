@@ -29,9 +29,6 @@ public final class JdbcBlobRepository implements BlobRepository {
         if (sessionId == null || ownerToken == null || upload == null || lease == null || lease.isNegative() || lease.isZero()) {
             throw new IllegalArgumentException("invalid blob reservation arguments");
         }
-        Optional<StoredBlob> existing = findByHashForUpdate(upload.sha256());
-        if (existing.isPresent()) return reservationFor(existing.get(), sessionId, ownerToken);
-
         String objectKey = "blobs/" + UUID.randomUUID();
         try {
             jdbc.update("INSERT INTO stored_blob(content_hash,object_key,size_bytes,media_type,reference_count,status,"
@@ -43,10 +40,18 @@ public final class JdbcBlobRepository implements BlobRepository {
             Long id = jdbc.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
             return new BlobReservation(sessionId, ownerToken, id, objectKey, BlobReservation.Mode.NEW_STAGING);
         } catch (DuplicateKeyException duplicate) {
+            if (!isContentHashConflict(duplicate)) {
+                throw duplicate;
+            }
             StoredBlob winner = findByHashForUpdate(upload.sha256())
                 .orElseThrow(() -> new IllegalStateException("blob hash race lost without winner"));
             return reservationFor(winner, sessionId, ownerToken);
         }
+    }
+
+    private boolean isContentHashConflict(DuplicateKeyException exception) {
+        String message = exception.getMessage();
+        return message != null && message.contains("uk_blob_content_hash");
     }
 
     private BlobReservation reservationFor(StoredBlob blob, UUID sessionId, UUID ownerToken) {
@@ -55,6 +60,9 @@ public final class JdbcBlobRepository implements BlobRepository {
         }
         if (blob.status() == BlobStatus.STAGING && sessionId.equals(blob.stagingSessionId())
             && ownerToken.equals(blob.stagingOwnerToken())) {
+            return new BlobReservation(sessionId, ownerToken, blob.id(), blob.objectKey(), BlobReservation.Mode.OWNED_STAGING);
+        }
+        if (blob.status() == BlobStatus.STAGING) {
             return new BlobReservation(sessionId, ownerToken, blob.id(), blob.objectKey(), BlobReservation.Mode.OWNED_STAGING);
         }
         throw new IllegalStateException("BLOB_NOT_READY");
@@ -127,6 +135,21 @@ public final class JdbcBlobRepository implements BlobRepository {
                 + "WHERE id=? AND status='STAGING' AND staging_session_id IS NOT NULL "
                 + "AND staging_owner_token IS NOT NULL AND staging_lease_until<=CURRENT_TIMESTAMP(6)",
             sessionId.toString(), newToken.toString(), JdbcUploadSessionRepository.micros(lease), blobId) == 1;
+    }
+
+    @Override
+    public boolean takeOverExpiredStaging(long blobId, UUID oldSessionId, UUID oldOwnerToken,
+                                         UUID newSessionId, UUID newToken, Duration lease) {
+        if (blobId <= 0 || oldSessionId == null || oldOwnerToken == null || newSessionId == null
+            || newToken == null || lease == null || lease.isNegative() || lease.isZero()) {
+            throw new IllegalArgumentException("invalid atomic takeover arguments");
+        }
+        return jdbc.update("UPDATE stored_blob SET staging_session_id=?,staging_owner_token=?,"
+                + "staging_lease_until=TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6)),updated_at=CURRENT_TIMESTAMP(6) "
+                + "WHERE id=? AND status='STAGING' AND staging_session_id=? AND staging_owner_token=? "
+                + "AND staging_lease_until<=CURRENT_TIMESTAMP(6)",
+            newSessionId.toString(), newToken.toString(), JdbcUploadSessionRepository.micros(lease), blobId,
+            oldSessionId.toString(), oldOwnerToken.toString()) == 1;
     }
 
     @Override

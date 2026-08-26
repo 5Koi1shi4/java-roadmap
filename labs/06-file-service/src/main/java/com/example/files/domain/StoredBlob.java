@@ -53,6 +53,50 @@ public final class StoredBlob {
         this.updatedAt = this.createdAt;
     }
 
+    private StoredBlob(long id, String contentHash, String objectKey, long sizeBytes,
+                       DetectedFileType mediaType, long referenceCount, BlobStatus status,
+                       long generation, UUID stagingSessionId, UUID stagingOwnerToken,
+                       Instant stagingLeaseUntil, UUID cleanupToken, Instant cleanupLeaseUntil,
+                       Instant createdAt, Instant updatedAt) {
+        if (id <= 0 || contentHash == null || !contentHash.matches("[0-9a-fA-F]{64}")
+            || objectKey == null || objectKey.isBlank() || objectKey.contains("..")
+            || objectKey.contains("\\") || objectKey.startsWith("/") || sizeBytes < 0
+            || sizeBytes > MAX_SIZE_BYTES || mediaType == null || referenceCount < 0
+            || status == null || generation <= 0 || createdAt == null || updatedAt == null
+            || updatedAt.isBefore(createdAt)) {
+            throw new IllegalArgumentException("invalid persisted blob metadata");
+        }
+        boolean hasStaging = stagingSessionId != null || stagingOwnerToken != null || stagingLeaseUntil != null;
+        boolean hasCleanup = cleanupToken != null || cleanupLeaseUntil != null;
+        if (status == BlobStatus.STAGING && (!hasStaging || stagingSessionId == null
+            || stagingOwnerToken == null || stagingLeaseUntil == null || hasCleanup)) {
+            throw new IllegalArgumentException("STAGING blob must have only staging lease fields");
+        }
+        if (status == BlobStatus.DELETING && (!hasCleanup || cleanupToken == null
+            || cleanupLeaseUntil == null || hasStaging)) {
+            throw new IllegalArgumentException("DELETING blob must have only cleanup lease fields");
+        }
+        if ((status == BlobStatus.READY || status == BlobStatus.PENDING_DELETE || status == BlobStatus.DELETED)
+            && (hasStaging || hasCleanup)) {
+            throw new IllegalArgumentException("stable blob state must not have lease fields");
+        }
+        this.id = id;
+        this.contentHash = contentHash.toLowerCase(java.util.Locale.ROOT);
+        this.objectKey = objectKey;
+        this.sizeBytes = sizeBytes;
+        this.mediaType = mediaType;
+        this.referenceCount = referenceCount;
+        this.status = status;
+        this.generation = generation;
+        this.stagingSessionId = stagingSessionId;
+        this.stagingOwnerToken = stagingOwnerToken;
+        this.stagingLeaseUntil = stagingLeaseUntil;
+        this.cleanupToken = cleanupToken;
+        this.cleanupLeaseUntil = cleanupLeaseUntil;
+        this.createdAt = createdAt;
+        this.updatedAt = updatedAt;
+    }
+
     public static StoredBlob beginStaging(long id, String contentHash, String objectKey, long sizeBytes,
                                           DetectedFileType mediaType, long generation,
                                           UUID stagingSessionId, UUID stagingOwnerToken,
@@ -70,20 +114,9 @@ public final class StoredBlob {
         if (status == null || createdAt == null || updatedAt == null || referenceCount < 0) {
             throw new IllegalArgumentException("invalid persisted blob state");
         }
-        Instant lease = stagingLeaseUntil != null ? stagingLeaseUntil : updatedAt.plusSeconds(1);
-        UUID session = stagingSessionId != null ? stagingSessionId : UUID.randomUUID();
-        UUID owner = stagingOwnerToken != null ? stagingOwnerToken : UUID.randomUUID();
-        StoredBlob blob = new StoredBlob(id, contentHash, objectKey, sizeBytes, mediaType, generation,
-            session, owner, lease, updatedAt.isBefore(lease) ? updatedAt : lease.minusNanos(1));
-        blob.referenceCount = referenceCount;
-        blob.status = status;
-        blob.stagingSessionId = stagingSessionId;
-        blob.stagingOwnerToken = stagingOwnerToken;
-        blob.stagingLeaseUntil = stagingLeaseUntil;
-        blob.cleanupToken = cleanupToken;
-        blob.cleanupLeaseUntil = cleanupLeaseUntil;
-        blob.updatedAt = updatedAt;
-        return blob;
+        return new StoredBlob(id, contentHash, objectKey, sizeBytes, mediaType, referenceCount, status,
+            generation, stagingSessionId, stagingOwnerToken, stagingLeaseUntil, cleanupToken,
+            cleanupLeaseUntil, createdAt, updatedAt);
     }
 
     public StoredBlob ready() {

@@ -61,10 +61,40 @@ public final class JdbcUploadSessionRepository implements UploadSessionRepositor
         if (sessionId == null || ownerToken == null || blobId <= 0) {
             throw new IllegalArgumentException("invalid finalization arguments");
         }
-        return jdbc.update("UPDATE upload_session SET status='FINALIZING',blob_id=?,updated_at=CURRENT_TIMESTAMP(6) "
+        return jdbc.update("UPDATE upload_session SET status='FINALIZING',updated_at=CURRENT_TIMESTAMP(6) "
+                + "WHERE session_id=? AND owner_token=? AND status='VALIDATED' AND blob_id=? "
+                + "AND lease_until>CURRENT_TIMESTAMP(6) AND expires_at>CURRENT_TIMESTAMP(6)",
+            sessionId.toString(), ownerToken.toString(), blobId) == 1;
+    }
+
+    @Override
+    public boolean bindBlob(UUID sessionId, UUID ownerToken, long blobId) {
+        if (sessionId == null || ownerToken == null || blobId <= 0) {
+            throw new IllegalArgumentException("invalid blob binding arguments");
+        }
+        return jdbc.update("UPDATE upload_session SET blob_id=?,updated_at=CURRENT_TIMESTAMP(6) "
                 + "WHERE session_id=? AND owner_token=? AND status='VALIDATED' AND blob_id IS NULL "
                 + "AND lease_until>CURRENT_TIMESTAMP(6) AND expires_at>CURRENT_TIMESTAMP(6)",
             blobId, sessionId.toString(), ownerToken.toString()) == 1;
+    }
+
+    @Override
+    public boolean takeOverExpired(UUID oldSessionId, UUID oldOwnerToken, UUID newSessionId,
+                                   UUID newOwnerToken, long blobId, Duration lease) {
+        if (oldSessionId == null || oldOwnerToken == null || newSessionId == null
+            || newOwnerToken == null || blobId <= 0 || lease == null || lease.isNegative() || lease.isZero()) {
+            throw new IllegalArgumentException("invalid session takeover arguments");
+        }
+        int old = jdbc.update("UPDATE upload_session SET status='EXPIRED',updated_at=CURRENT_TIMESTAMP(6) "
+                + "WHERE session_id=? AND owner_token=? AND status IN ('RECEIVING','VALIDATED','FINALIZING') "
+                + "AND lease_until<=CURRENT_TIMESTAMP(6)", oldSessionId.toString(), oldOwnerToken.toString());
+        if (old != 1) return false;
+        return jdbc.update("UPDATE upload_session SET owner_token=?,blob_id=?,"
+                + "lease_until=TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6)),updated_at=CURRENT_TIMESTAMP(6) "
+                + "WHERE session_id=? AND owner_token=? AND status='VALIDATED' AND blob_id IS NULL "
+                + "AND lease_until>CURRENT_TIMESTAMP(6) AND expires_at>CURRENT_TIMESTAMP(6)",
+            newOwnerToken.toString(), blobId, micros(lease), newSessionId.toString(),
+            newOwnerToken.toString()) == 1;
     }
 
     @Override

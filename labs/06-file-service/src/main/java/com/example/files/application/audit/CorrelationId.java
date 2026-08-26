@@ -1,22 +1,17 @@
 package com.example.files.application.audit;
 
-import java.security.SecureRandom;
-import java.util.Base64;
+import java.util.UUID;
 
 /** 服务端生成的请求关联标识，至少含 128 位随机熵。 */
 public record CorrelationId(String value) {
-    private static final SecureRandom RANDOM = new SecureRandom();
-
     public CorrelationId {
-        if (value == null || value.isBlank() || value.length() > 128
-            || !value.matches("[A-Za-z0-9_-]+")) {
+        if (value == null || value.length() != 36
+            || !value.matches("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}")) {
             throw new IllegalArgumentException("invalid correlation id");
         }
     }
 
     public static CorrelationId random() {
-        byte[] bytes = new byte[16];
-        RANDOM.nextBytes(bytes);
-        return new CorrelationId(Base64.getUrlEncoder().withoutPadding().encodeToString(bytes));
+        return new CorrelationId(UUID.randomUUID().toString());
     }
 }

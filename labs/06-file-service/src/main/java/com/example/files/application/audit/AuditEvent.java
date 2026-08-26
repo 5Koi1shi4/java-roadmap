@@ -15,8 +15,8 @@ public record AuditEvent(CorrelationId correlationId, long actorId, AuditAction 
         if (targetUserId != null && targetUserId <= 0) {
             throw new IllegalArgumentException("targetUserId must be positive");
         }
-        if (failureCode != null && failureCode.length() > 64) {
-            throw new IllegalArgumentException("failureCode is too long");
+        if (failureCode != null && !failureCode.matches("[A-Z][A-Z0-9_]{0,63}")) {
+            throw new IllegalArgumentException("unsupported failureCode");
         }
         if (clientTraceId != null && !clientTraceId.matches("[A-Za-z0-9._:-]{1,128}")) {
             throw new IllegalArgumentException("invalid clientTraceId");

@@ -28,6 +28,11 @@ public interface BlobRepository {
 
     boolean takeOverExpiredStaging(long blobId, UUID sessionId, UUID newToken, Duration lease);
 
+    default boolean takeOverExpiredStaging(long blobId, UUID oldSessionId, UUID oldOwnerToken,
+                                           UUID newSessionId, UUID newToken, Duration lease) {
+        throw new UnsupportedOperationException("atomic takeover is not supported");
+    }
+
     default boolean incrementReference(long blobId) {
         throw new UnsupportedOperationException("incrementReference is not supported");
     }
