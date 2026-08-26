@@ -59,8 +59,8 @@ public final class UploadTransactionService {
                 }
             }
             BlobReservation reservation = blobs.reserve(sessionId, ownerToken, upload, lease);
-            if (reservation.mode() != BlobReservation.Mode.WAITING
-                && !sessions.bindBlob(sessionId, ownerToken, reservation.blobId())) {
+            if (reservation instanceof BlobReservation.Granted granted
+                && !sessions.bindBlob(sessionId, ownerToken, granted.blobId())) {
                 throw new IllegalStateException("UPLOAD_BLOB_BINDING_FAILED");
             }
             return reservation;
@@ -71,6 +71,11 @@ public final class UploadTransactionService {
         return reserve(sessionId, ownerToken, upload, Duration.ofMinutes(2));
     }
 
+    /** 以调用方最新校验结果重新解析领取状态，等待结果本身不作为后续能力使用。 */
+    public BlobReservation resolve(UUID sessionId, UUID ownerToken, InspectedUpload upload, Duration lease) {
+        return reserve(sessionId, ownerToken, upload, lease);
+    }
+
     /** 在一个数据库事务内完成 Blob 发布、逻辑文件、引用、会话和审计。 */
     public UploadResult finalizeUpload(UUID sessionId, UUID ownerToken, long blobId) {
         UploadResult result = transactionTemplate.execute(status -> finalizeInTransaction(sessionId, ownerToken, blobId));
@@ -79,16 +84,16 @@ public final class UploadTransactionService {
     }
 
     /** 使用已经领取的结果完成上传，供编排服务保持令牌和 Blob 一致。 */
-    public UploadResult finalizeUpload(BlobReservation reservation) {
-        if (reservation == null || reservation.mode() == BlobReservation.Mode.WAITING) {
-            throw new IllegalArgumentException("only an owned or READY reservation can finalize");
+    public UploadResult finalizeUpload(BlobReservation.Granted reservation) {
+        if (reservation == null) {
+            throw new IllegalArgumentException("reservation is required");
         }
         return finalizeUpload(reservation.sessionId(), reservation.ownerToken(), reservation.blobId());
     }
 
     /** READY Blob 复用路径与普通终结共用同一原子事务。 */
-    public UploadResult attachReadyBlob(BlobReservation reservation) {
-        if (reservation == null || !reservation.reusesReadyBlob()) {
+    public UploadResult attachReadyBlob(BlobReservation.ReadyReuse reservation) {
+        if (reservation == null) {
             throw new IllegalArgumentException("reservation must refer to a READY blob");
         }
         return finalizeUpload(reservation);

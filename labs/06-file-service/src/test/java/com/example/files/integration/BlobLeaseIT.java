@@ -4,8 +4,10 @@ import com.example.files.application.upload.BlobReservation;
 import com.example.files.application.upload.InspectedUpload;
 import com.example.files.application.upload.TemporaryObject;
 import com.example.files.application.upload.UploadTransactionService;
+import com.example.files.domain.BlobStatus;
 import com.example.files.domain.DetectedFileType;
 import com.example.files.domain.SafeDisplayName;
+import com.example.files.domain.UploadSessionStatus;
 import com.example.files.infrastructure.persistence.JdbcAuditRecorder;
 import com.example.files.infrastructure.persistence.JdbcBlobRepository;
 import com.example.files.infrastructure.persistence.JdbcFileRepository;
@@ -60,7 +62,7 @@ class BlobLeaseIT extends SharedMySqlContainer {
         InspectedUpload upload = new InspectedUpload(SafeDisplayName.from("a.pdf"), "application/pdf",
             DetectedFileType.PDF, 3L, "a".repeat(64), new TemporaryObject("tmp/" + UUID.randomUUID(), 3L));
         var firstSession = transactions.begin(11L, upload.originalName(), upload.declaredType());
-        BlobReservation first = transactions.reserve(firstSession.sessionId(), firstSession.ownerToken(), upload,
+        BlobReservation.Granted first = (BlobReservation.Granted) transactions.reserve(firstSession.sessionId(), firstSession.ownerToken(), upload,
             Duration.ofSeconds(1));
         jdbc.update("UPDATE stored_blob SET staging_lease_until = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE id=?",
             first.blobId());
@@ -78,7 +80,7 @@ class BlobLeaseIT extends SharedMySqlContainer {
         InspectedUpload upload = new InspectedUpload(SafeDisplayName.from("b.pdf"), "application/pdf",
             DetectedFileType.PDF, 3L, "b".repeat(64), new TemporaryObject("tmp/" + UUID.randomUUID(), 3L));
         var first = transactions.begin(31L, upload.originalName(), upload.declaredType(), Duration.ofHours(1), Duration.ofSeconds(1));
-        BlobReservation reservation = transactions.reserve(first.sessionId(), first.ownerToken(), upload, Duration.ofSeconds(1));
+        BlobReservation.Granted reservation = (BlobReservation.Granted) transactions.reserve(first.sessionId(), first.ownerToken(), upload, Duration.ofSeconds(1));
         var second = transactions.begin(32L, upload.originalName(), upload.declaredType());
         assertThat(sessions.markValidated(second.sessionId(), second.ownerToken(), upload)).isTrue();
         jdbc.update("UPDATE upload_session SET lease_until = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE session_id=?",
@@ -106,7 +108,7 @@ class BlobLeaseIT extends SharedMySqlContainer {
         InspectedUpload upload = new InspectedUpload(SafeDisplayName.from("cross.pdf"), "application/pdf",
             DetectedFileType.PDF, 3L, "d".repeat(64), new TemporaryObject("tmp/" + UUID.randomUUID(), 3L));
         var oldA = transactions.begin(51L, upload.originalName(), upload.declaredType(), Duration.ofHours(1), Duration.ofSeconds(1));
-        BlobReservation reservation = transactions.reserve(oldA.sessionId(), oldA.ownerToken(), upload, Duration.ofSeconds(1));
+        BlobReservation.Granted reservation = (BlobReservation.Granted) transactions.reserve(oldA.sessionId(), oldA.ownerToken(), upload, Duration.ofSeconds(1));
         var oldB = transactions.begin(52L, upload.originalName(), upload.declaredType(), Duration.ofHours(1), Duration.ofSeconds(1));
         var newA = transactions.begin(53L, upload.originalName(), upload.declaredType());
         var newB = transactions.begin(54L, upload.originalName(), upload.declaredType());
@@ -150,23 +152,20 @@ class BlobLeaseIT extends SharedMySqlContainer {
         InspectedUpload upload = new InspectedUpload(SafeDisplayName.from("wait.pdf"), "application/pdf",
             DetectedFileType.PDF, 3L, "e".repeat(64), new TemporaryObject("tmp/" + UUID.randomUUID(), 3L));
         var owner = transactions.begin(61L, upload.originalName(), upload.declaredType());
-        BlobReservation first = transactions.reserve(owner.sessionId(), owner.ownerToken(), upload);
+        BlobReservation.Granted first = (BlobReservation.Granted) transactions.reserve(owner.sessionId(), owner.ownerToken(), upload);
         var competitor = transactions.begin(62L, upload.originalName(), upload.declaredType());
         BlobReservation waiting = transactions.reserve(competitor.sessionId(), competitor.ownerToken(), upload);
 
         assertThat(waiting.mode()).isEqualTo(BlobReservation.Mode.WAITING);
-        assertThat(waiting.sessionId()).isNull();
-        assertThat(waiting.ownerToken()).isNull();
-        assertThat(waiting.blobId()).isZero();
-        assertThat(waiting.objectKey()).isNull();
-        org.assertj.core.api.Assertions.assertThatThrownBy(() -> transactions.finalizeUpload(waiting))
-            .isInstanceOf(IllegalArgumentException.class);
+        assertThat(waiting).isInstanceOf(BlobReservation.Waiting.class);
+        assertThat(waiting).isNotInstanceOf(BlobReservation.Granted.class);
         assertThat(blobs.get(first.blobId()).stagingSessionId()).isEqualTo(owner.sessionId());
         assertThat(blobs.get(first.blobId()).stagingOwnerToken()).isEqualTo(owner.ownerToken());
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM stored_file", Integer.class)).isZero();
 
         assertThat(blobs.markReady(first.blobId(), owner.sessionId(), owner.ownerToken())).isTrue();
-        BlobReservation refreshed = transactions.reserve(competitor.sessionId(), competitor.ownerToken(), upload);
+        BlobReservation.ReadyReuse refreshed = (BlobReservation.ReadyReuse) transactions.resolve(
+            competitor.sessionId(), competitor.ownerToken(), upload, Duration.ofMinutes(2));
         assertThat(refreshed.mode()).isEqualTo(BlobReservation.Mode.REUSE_READY);
         transactions.finalizeUpload(refreshed);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM stored_file", Integer.class)).isOne();
@@ -177,7 +176,7 @@ class BlobLeaseIT extends SharedMySqlContainer {
         InspectedUpload upload = new InspectedUpload(SafeDisplayName.from("race.pdf"), "application/pdf",
             DetectedFileType.PDF, 3L, "f".repeat(64), new TemporaryObject("tmp/" + UUID.randomUUID(), 3L));
         var old = transactions.begin(71L, upload.originalName(), upload.declaredType(), Duration.ofHours(1), Duration.ofSeconds(1));
-        BlobReservation reservation = transactions.reserve(old.sessionId(), old.ownerToken(), upload, Duration.ofSeconds(1));
+        BlobReservation.Granted reservation = (BlobReservation.Granted) transactions.reserve(old.sessionId(), old.ownerToken(), upload, Duration.ofSeconds(1));
         var newA = transactions.begin(72L, upload.originalName(), upload.declaredType());
         var newB = transactions.begin(73L, upload.originalName(), upload.declaredType());
         assertThat(sessions.markValidated(newA.sessionId(), newA.ownerToken(), upload)).isTrue();
@@ -189,10 +188,17 @@ class BlobLeaseIT extends SharedMySqlContainer {
 
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
-            Future<Boolean> first = executor.submit(() -> transactions.takeOverExpiredStaging(reservation.blobId(),
-                old.sessionId(), old.ownerToken(), newA.sessionId(), newA.ownerToken(), Duration.ofMinutes(2)));
-            Future<Boolean> second = executor.submit(() -> transactions.takeOverExpiredStaging(reservation.blobId(),
-                old.sessionId(), old.ownerToken(), newB.sessionId(), newB.ownerToken(), Duration.ofMinutes(2)));
+            CyclicBarrier barrier = new CyclicBarrier(2);
+            Future<Boolean> first = executor.submit(() -> {
+                barrier.await(5, java.util.concurrent.TimeUnit.SECONDS);
+                return transactions.takeOverExpiredStaging(reservation.blobId(), old.sessionId(), old.ownerToken(),
+                    newA.sessionId(), newA.ownerToken(), Duration.ofMinutes(2));
+            });
+            Future<Boolean> second = executor.submit(() -> {
+                barrier.await(5, java.util.concurrent.TimeUnit.SECONDS);
+                return transactions.takeOverExpiredStaging(reservation.blobId(), old.sessionId(), old.ownerToken(),
+                    newB.sessionId(), newB.ownerToken(), Duration.ofMinutes(2));
+            });
             boolean firstWon = first.get(10, java.util.concurrent.TimeUnit.SECONDS);
             boolean secondWon = second.get(10, java.util.concurrent.TimeUnit.SECONDS);
             assertThat(firstWon ^ secondWon).isTrue();
@@ -204,9 +210,15 @@ class BlobLeaseIT extends SharedMySqlContainer {
                 reservation.blobId())).isEqualTo(winner.ownerToken().toString());
             assertThat(jdbc.queryForObject("SELECT status FROM upload_session WHERE session_id=?", String.class,
                 old.sessionId().toString())).isEqualTo("EXPIRED");
+            assertThat(sessions.find(winner.sessionId()).orElseThrow().status()).isEqualTo(UploadSessionStatus.VALIDATED);
+            assertThat(sessions.find(winner.sessionId()).orElseThrow().blobId()).isEqualTo(reservation.blobId());
             assertThat(jdbc.queryForObject("SELECT status FROM upload_session WHERE session_id=?", String.class,
                 loser.sessionId().toString())).isEqualTo("VALIDATED");
+            assertThat(sessions.find(loser.sessionId()).orElseThrow().blobId()).isNull();
+            assertThat(sessions.find(loser.sessionId()).orElseThrow().ownerToken()).isEqualTo(loser.ownerToken());
             transactions.finalizeUpload(winner.sessionId(), winner.ownerToken(), reservation.blobId());
+            assertThat(sessions.find(winner.sessionId()).orElseThrow().status()).isEqualTo(UploadSessionStatus.COMPLETED);
+            assertThat(blobs.get(reservation.blobId()).status()).isEqualTo(BlobStatus.READY);
         } finally {
             executor.shutdownNow();
         }

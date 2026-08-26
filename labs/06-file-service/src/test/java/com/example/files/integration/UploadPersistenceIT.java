@@ -68,7 +68,7 @@ class UploadPersistenceIT extends SharedMySqlContainer {
     void finalizesBlobFileReferenceAndAuditAtomically() {
         InspectedUpload upload = upload("1".repeat(64));
         var session = transactions.begin(7L, upload.originalName(), upload.declaredType());
-        BlobReservation reservation = transactions.reserve(session.sessionId(), session.ownerToken(), upload,
+        BlobReservation.Granted reservation = (BlobReservation.Granted) transactions.reserve(session.sessionId(), session.ownerToken(), upload,
             Duration.ofMinutes(2));
 
         UploadResult result = transactions.finalizeUpload(reservation.sessionId(), reservation.ownerToken(), reservation.blobId());
@@ -83,7 +83,7 @@ class UploadPersistenceIT extends SharedMySqlContainer {
     void rollbackLeavesNoFileReferenceOrAudit() {
         InspectedUpload upload = upload("2".repeat(64));
         var session = transactions.begin(8L, upload.originalName(), upload.declaredType());
-        BlobReservation reservation = transactions.reserve(session.sessionId(), session.ownerToken(), upload,
+        BlobReservation.Granted reservation = (BlobReservation.Granted) transactions.reserve(session.sessionId(), session.ownerToken(), upload,
             Duration.ofMinutes(2));
         AuditRecorder failingAudit = event -> { throw new RuntimeException("audit unavailable"); };
         UploadTransactionService failingTransactions = new UploadTransactionService(sessions, blobs, files,
@@ -102,16 +102,16 @@ class UploadPersistenceIT extends SharedMySqlContainer {
     void validSessionCannotFinalizeAgainstAnUnboundReadyBlob() {
         InspectedUpload firstUpload = upload("1".repeat(64));
         var firstSession = transactions.begin(21L, firstUpload.originalName(), firstUpload.declaredType());
-        BlobReservation firstReservation = transactions.reserve(firstSession.sessionId(), firstSession.ownerToken(), firstUpload);
+        BlobReservation.Granted firstReservation = (BlobReservation.Granted) transactions.reserve(firstSession.sessionId(), firstSession.ownerToken(), firstUpload);
         transactions.finalizeUpload(firstReservation);
 
         InspectedUpload secondUpload = upload("2".repeat(64));
         var secondSession = transactions.begin(22L, secondUpload.originalName(), secondUpload.declaredType());
-        BlobReservation secondReservation = transactions.reserve(secondSession.sessionId(), secondSession.ownerToken(), secondUpload);
+        BlobReservation.Granted secondReservation = (BlobReservation.Granted) transactions.reserve(secondSession.sessionId(), secondSession.ownerToken(), secondUpload);
         transactions.finalizeUpload(secondReservation);
 
         var attackerSession = transactions.begin(23L, firstUpload.originalName(), firstUpload.declaredType());
-        BlobReservation bound = transactions.reserve(attackerSession.sessionId(), attackerSession.ownerToken(), firstUpload);
+        BlobReservation.Granted bound = (BlobReservation.Granted) transactions.reserve(attackerSession.sessionId(), attackerSession.ownerToken(), firstUpload);
         org.assertj.core.api.Assertions.assertThatThrownBy(() ->
             transactions.finalizeUpload(attackerSession.sessionId(), attackerSession.ownerToken(), secondReservation.blobId()))
             .isInstanceOf(IllegalStateException.class);
@@ -131,13 +131,42 @@ class UploadPersistenceIT extends SharedMySqlContainer {
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
             CyclicBarrier barrier = new CyclicBarrier(2);
+            java.util.concurrent.CountDownLatch ownerReserved = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.CountDownLatch waiterObservedWaiting = new java.util.concurrent.CountDownLatch(1);
             Future<UploadResult> firstResult = executor.submit(() -> {
-                barrier.await();
-                return completeAfterReservation(first, upload);
+                barrier.await(5, TimeUnit.SECONDS);
+                BlobReservation.Granted owned = (BlobReservation.Granted) transactions.reserve(
+                    first.sessionId(), first.ownerToken(), upload);
+                assertThat(owned.mode()).isIn(BlobReservation.Mode.NEW_STAGING, BlobReservation.Mode.OWNED_STAGING);
+                ownerReserved.countDown();
+                if (!waiterObservedWaiting.await(5, TimeUnit.SECONDS)) {
+                    throw new AssertionError("waiter did not observe WAITING reservation");
+                }
+                return transactions.finalizeUpload(owned);
             });
             Future<UploadResult> secondResult = executor.submit(() -> {
-                barrier.await();
-                return completeAfterReservation(second, upload);
+                barrier.await(5, TimeUnit.SECONDS);
+                if (!ownerReserved.await(5, TimeUnit.SECONDS)) {
+                    throw new AssertionError("owner did not reserve Blob");
+                }
+                BlobReservation waiting = transactions.resolve(second.sessionId(), second.ownerToken(), upload,
+                    Duration.ofMinutes(2));
+                assertThat(waiting).isInstanceOf(BlobReservation.Waiting.class);
+                assertThat(waiting).isNotInstanceOf(BlobReservation.Granted.class);
+                waiterObservedWaiting.countDown();
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+                while (System.nanoTime() < deadline) {
+                    BlobReservation refreshed = transactions.resolve(second.sessionId(), second.ownerToken(), upload,
+                        Duration.ofMinutes(2));
+                    if (refreshed instanceof BlobReservation.ReadyReuse ready) {
+                        return transactions.finalizeUpload(ready);
+                    }
+                    if (!(refreshed instanceof BlobReservation.Waiting)) {
+                        throw new AssertionError("unexpected reservation state: " + refreshed.mode());
+                    }
+                    Thread.sleep(25);
+                }
+                throw new AssertionError("bounded refresh/finalize retry timed out");
             });
             firstResult.get(10, TimeUnit.SECONDS);
             secondResult.get(10, TimeUnit.SECONDS);
@@ -150,21 +179,6 @@ class UploadPersistenceIT extends SharedMySqlContainer {
         } finally {
             executor.shutdownNow();
         }
-    }
-
-    private UploadResult completeAfterReservation(com.example.files.domain.UploadSession session,
-                                                   InspectedUpload upload) {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
-        while (System.nanoTime() < deadline) {
-            BlobReservation refreshed = transactions.reserve(session.sessionId(), session.ownerToken(), upload);
-            if (refreshed.mode() == BlobReservation.Mode.NEW_STAGING
-                || refreshed.mode() == BlobReservation.Mode.OWNED_STAGING
-                || refreshed.mode() == BlobReservation.Mode.REUSE_READY) {
-                return transactions.finalizeUpload(refreshed);
-            }
-            Thread.yield();
-        }
-        throw new AssertionError("bounded reserve/finalize retry timed out");
     }
 
     private static InspectedUpload upload(String hash) {

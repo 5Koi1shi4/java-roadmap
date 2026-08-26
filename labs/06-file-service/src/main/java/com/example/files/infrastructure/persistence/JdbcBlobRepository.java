@@ -38,7 +38,7 @@ public final class JdbcBlobRepository implements BlobRepository {
                 upload.sha256(), objectKey, upload.size(), upload.mediaType(), sessionId.toString(),
                 ownerToken.toString(), JdbcUploadSessionRepository.micros(lease));
             Long id = jdbc.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
-            return new BlobReservation(sessionId, ownerToken, id, objectKey, BlobReservation.Mode.NEW_STAGING);
+            return BlobReservation.newStaging(sessionId, ownerToken, id, objectKey);
         } catch (DuplicateKeyException duplicate) {
             if (!isContentHashConflict(duplicate)) {
                 throw duplicate;
@@ -56,11 +56,11 @@ public final class JdbcBlobRepository implements BlobRepository {
 
     private BlobReservation reservationFor(StoredBlob blob, UUID sessionId, UUID ownerToken) {
         if (blob.status() == BlobStatus.READY) {
-            return new BlobReservation(sessionId, ownerToken, blob.id(), blob.objectKey(), BlobReservation.Mode.REUSE_READY);
+            return BlobReservation.readyReuse(sessionId, ownerToken, blob.id(), blob.objectKey());
         }
         if (blob.status() == BlobStatus.STAGING && sessionId.equals(blob.stagingSessionId())
             && ownerToken.equals(blob.stagingOwnerToken())) {
-            return new BlobReservation(sessionId, ownerToken, blob.id(), blob.objectKey(), BlobReservation.Mode.OWNED_STAGING);
+            return BlobReservation.ownedStaging(sessionId, ownerToken, blob.id(), blob.objectKey());
         }
         if (blob.status() == BlobStatus.STAGING) {
             return BlobReservation.waiting();
