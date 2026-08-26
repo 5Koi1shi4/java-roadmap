@@ -38,6 +38,7 @@ public final class UploadTransactionService implements UploadService.Transaction
         return begin(uploaderId, name, declaredType, Duration.ofHours(1), Duration.ofMinutes(2));
     }
 
+    @Override
     public UploadSession begin(long uploaderId, com.example.files.domain.SafeDisplayName name,
                                String declaredType, Duration ttl, Duration lease) {
         String tempKey = "tmp/" + UUID.randomUUID();
@@ -47,24 +48,53 @@ public final class UploadTransactionService implements UploadService.Transaction
 
     /** 在验证阶段持久化真实大小、类型和哈希并领取物理 Blob。 */
     public BlobReservation reserve(UUID sessionId, UUID ownerToken, InspectedUpload upload, Duration lease) {
-        return transactionTemplate.execute(status -> {
-            if (!sessions.markValidated(sessionId, ownerToken, upload)) {
-                UploadSession existing = sessions.find(sessionId)
-                    .orElseThrow(() -> new IllegalStateException("UPLOAD_SESSION_NOT_FOUND"));
-                if (existing.status() != com.example.files.domain.UploadSessionStatus.VALIDATED
-                    || existing.contentHash() == null || !existing.contentHash().equalsIgnoreCase(upload.sha256())
-                    || existing.actualSize() == null || existing.actualSize() != upload.size()
-                    || existing.detectedType() != upload.detectedType()) {
-                    throw new IllegalStateException("UPLOAD_SESSION_NOT_VALIDATED");
+        for (int attempt = 0; attempt < 8; attempt++) {
+            try {
+                return transactionTemplate.execute(status -> reserveInTransaction(sessionId, ownerToken, upload, lease));
+            } catch (BlobHashConflictException conflict) {
+                // 唯一键冲突事务已经结束；先在事务外短查询，再以新事务绑定会话。
+                BlobReservation existing = blobs.resolveExisting(sessionId, ownerToken, upload).orElse(null);
+                if (existing != null) {
+                    return transactionTemplate.execute(status -> bindExistingInTransaction(sessionId, ownerToken, upload, existing));
                 }
             }
-            BlobReservation reservation = blobs.reserve(sessionId, ownerToken, upload, lease);
-            if (reservation instanceof BlobReservation.Granted granted
-                && !sessions.bindBlob(sessionId, ownerToken, granted.blobId())) {
-                throw new IllegalStateException("UPLOAD_BLOB_BINDING_FAILED");
+        }
+        throw new IllegalStateException("BLOB_HASH_COORDINATION_RETRY_EXHAUSTED");
+    }
+
+    private BlobReservation reserveInTransaction(UUID sessionId, UUID ownerToken, InspectedUpload upload, Duration lease) {
+        validateSession(sessionId, ownerToken, upload);
+        BlobReservation reservation = blobs.reserve(sessionId, ownerToken, upload, lease);
+        bindReservation(sessionId, ownerToken, reservation);
+        return reservation;
+    }
+
+    private BlobReservation bindExistingInTransaction(UUID sessionId, UUID ownerToken,
+                                                      InspectedUpload upload, BlobReservation observed) {
+        validateSession(sessionId, ownerToken, upload);
+        BlobReservation current = blobs.resolveExisting(sessionId, ownerToken, upload).orElse(observed);
+        bindReservation(sessionId, ownerToken, current);
+        return current;
+    }
+
+    private void validateSession(UUID sessionId, UUID ownerToken, InspectedUpload upload) {
+        if (!sessions.markValidated(sessionId, ownerToken, upload)) {
+            UploadSession existing = sessions.find(sessionId)
+                .orElseThrow(() -> new IllegalStateException("UPLOAD_SESSION_NOT_FOUND"));
+            if (existing.status() != com.example.files.domain.UploadSessionStatus.VALIDATED
+                || existing.contentHash() == null || !existing.contentHash().equalsIgnoreCase(upload.sha256())
+                || existing.actualSize() == null || existing.actualSize() != upload.size()
+                || existing.detectedType() != upload.detectedType()) {
+                throw new IllegalStateException("UPLOAD_SESSION_NOT_VALIDATED");
             }
-            return reservation;
-        });
+        }
+    }
+
+    private void bindReservation(UUID sessionId, UUID ownerToken, BlobReservation reservation) {
+        if (reservation instanceof BlobReservation.Granted granted
+            && !sessions.bindBlob(sessionId, ownerToken, granted.blobId())) {
+            throw new IllegalStateException("UPLOAD_BLOB_BINDING_FAILED");
+        }
     }
 
     public BlobReservation reserve(UUID sessionId, UUID ownerToken, InspectedUpload upload) {
@@ -73,7 +103,32 @@ public final class UploadTransactionService implements UploadService.Transaction
 
     /** 以调用方最新校验结果重新解析领取状态，等待结果本身不作为后续能力使用。 */
     public BlobReservation resolve(UUID sessionId, UUID ownerToken, InspectedUpload upload, Duration lease) {
-        return reserve(sessionId, ownerToken, upload, lease);
+        BlobReservation reservation = reserve(sessionId, ownerToken, upload, lease);
+        if (!(reservation instanceof BlobReservation.Waiting)) return reservation;
+        StoredBlob existing = blobs.findByHash(upload.sha256()).orElse(null);
+        if (existing == null) return reservation;
+        if (existing.status() == BlobStatus.STAGING && existing.stagingLeaseUntil() != null
+            && !existing.stagingLeaseUntil().isAfter(Instant.now())
+            && existing.stagingSessionId() != null && existing.stagingOwnerToken() != null
+            && blobs.renewOwnershipForRecovery(existing.id(), existing.stagingSessionId(),
+                existing.stagingOwnerToken(), ownerToken, lease)) {
+            transactionTemplate.executeWithoutResult(status -> {
+                if (!sessions.bindBlob(sessionId, ownerToken, existing.id()))
+                    throw new IllegalStateException("UPLOAD_BLOB_BINDING_FAILED");
+            });
+            return BlobReservation.ownedStaging(sessionId, ownerToken, existing.id(), existing.objectKey());
+        }
+        if (existing.status() == BlobStatus.DELETED) {
+            String key = "blobs/" + UUID.randomUUID();
+            if (blobs.restageDeleted(existing.id(), sessionId, ownerToken, key, lease)) {
+                transactionTemplate.executeWithoutResult(status -> {
+                    if (!sessions.bindBlob(sessionId, ownerToken, existing.id()))
+                        throw new IllegalStateException("UPLOAD_BLOB_BINDING_FAILED");
+                });
+                return BlobReservation.ownedStaging(sessionId, ownerToken, existing.id(), key);
+            }
+        }
+        return reservation;
     }
 
     @Override
@@ -83,9 +138,7 @@ public final class UploadTransactionService implements UploadService.Transaction
 
     /** 在一个数据库事务内完成 Blob 发布、逻辑文件、引用、会话和审计。 */
     public UploadResult finalizeUpload(UUID sessionId, UUID ownerToken, long blobId) {
-        UploadResult result = transactionTemplate.execute(status -> finalizeInTransaction(sessionId, ownerToken, blobId));
-        if (result == null) throw new IllegalStateException("upload finalization returned no result");
-        return result;
+        return finalizeUpload(sessionId, ownerToken, blobId, CorrelationId.random());
     }
 
     /** 使用已经领取的结果完成上传，供编排服务保持令牌和 Blob 一致。 */
@@ -93,7 +146,12 @@ public final class UploadTransactionService implements UploadService.Transaction
         if (reservation == null) {
             throw new IllegalArgumentException("reservation is required");
         }
-        return finalizeUpload(reservation.sessionId(), reservation.ownerToken(), reservation.blobId());
+        return finalizeUpload(reservation.sessionId(), reservation.ownerToken(), reservation.blobId(), CorrelationId.random());
+    }
+
+    public UploadResult finalizeUpload(BlobReservation.Granted reservation, CorrelationId correlationId) {
+        if (reservation == null || correlationId == null) throw new IllegalArgumentException("reservation and correlationId are required");
+        return finalizeUpload(reservation.sessionId(), reservation.ownerToken(), reservation.blobId(), correlationId);
     }
 
     /** READY Blob 复用路径与普通终结共用同一原子事务。 */
@@ -102,6 +160,11 @@ public final class UploadTransactionService implements UploadService.Transaction
             throw new IllegalArgumentException("reservation must refer to a READY blob");
         }
         return finalizeUpload(reservation);
+    }
+
+    public UploadResult attachReadyBlob(BlobReservation.ReadyReuse reservation, CorrelationId correlationId) {
+        if (reservation == null || correlationId == null) throw new IllegalArgumentException("reservation and correlationId are required");
+        return finalizeUpload(reservation, correlationId);
     }
 
     /** 记录失败分类；条件更新确保迟到执行者不能覆盖接管者。 */
@@ -124,7 +187,14 @@ public final class UploadTransactionService implements UploadService.Transaction
         }
     }
 
-    private UploadResult finalizeInTransaction(UUID sessionId, UUID ownerToken, long blobId) {
+    public UploadResult finalizeUpload(UUID sessionId, UUID ownerToken, long blobId, CorrelationId correlationId) {
+        if (correlationId == null) throw new IllegalArgumentException("correlationId is required");
+        UploadResult result = transactionTemplate.execute(status -> finalizeInTransaction(sessionId, ownerToken, blobId, correlationId));
+        if (result == null) throw new IllegalStateException("upload finalization returned no result");
+        return result;
+    }
+
+    private UploadResult finalizeInTransaction(UUID sessionId, UUID ownerToken, long blobId, CorrelationId correlationId) {
         UploadSession session = sessions.findForUpdate(sessionId)
             .orElseThrow(() -> new IllegalStateException("UPLOAD_SESSION_NOT_FOUND"));
         if (!ownerToken.equals(session.ownerToken()) || session.status() != com.example.files.domain.UploadSessionStatus.VALIDATED) {
@@ -159,7 +229,7 @@ public final class UploadTransactionService implements UploadService.Transaction
         if (!sessions.markCompleted(sessionId, ownerToken, file.fileId())) {
             throw new IllegalStateException("UPLOAD_SESSION_COMPLETION_FAILED");
         }
-        audits.record(new AuditEvent(CorrelationId.random(), session.uploaderId(), AuditAction.UPLOAD_COMPLETED,
+        audits.record(new AuditEvent(correlationId, session.uploaderId(), AuditAction.UPLOAD_COMPLETED,
             file.fileId(), null, "SUCCESS", null, null, file.createdAt()));
         return new UploadResult(file.fileId(), file.displayName().value(), blob.mediaTypeValue(), blob.sizeBytes(), file.createdAt());
     }

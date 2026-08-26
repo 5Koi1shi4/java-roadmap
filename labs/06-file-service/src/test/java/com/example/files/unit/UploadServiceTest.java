@@ -41,13 +41,15 @@ class UploadServiceTest {
             storage, new StagingWaitPolicy(Duration.ofSeconds(1), Duration.ofMillis(1)),
             new NoopCleanupTasks(), new UploadFailureClassifier());
 
+        CorrelationId correlationId = CorrelationId.random();
         UploadResult result = service.upload(new UploadCommand(7L, "report.pdf", "application/pdf",
-            pdf.length, new ByteArrayInputStream(pdf), CorrelationId.random()));
+            pdf.length, new ByteArrayInputStream(pdf), correlationId));
 
         assertThat(result.fileId()).isEqualTo(transactions.fileId);
         assertThat(storage.transactionActiveDuringWrite).isFalse();
         assertThat(storage.transactionActiveDuringCommit).isFalse();
         assertThat(storage.transactionActiveDuringDelete).isFalse();
+        assertThat(transactions.lastCorrelationId).isEqualTo(correlationId);
     }
 
     @Test
@@ -67,6 +69,40 @@ class UploadServiceTest {
         assertThat(storage.committedObjectKey).startsWith("blobs/");
     }
 
+    @Test
+    void commitFailureKeepsOwnedSessionRecoverable() {
+        byte[] pdf = "%PDF-1.7 commit-failure".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        RecordingStorage storage = new RecordingStorage();
+        storage.failCommit = true;
+        FakeTransactions transactions = new FakeTransactions();
+        UploadService service = new UploadService(transactions, new com.example.files.application.upload.UploadInspector(),
+            storage, new StagingWaitPolicy(Duration.ofSeconds(1), Duration.ofMillis(1)),
+            new NoopCleanupTasks(), new UploadFailureClassifier());
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.upload(new UploadCommand(7L, "a.pdf",
+            "application/pdf", pdf.length, new ByteArrayInputStream(pdf), CorrelationId.random())))
+            .isInstanceOf(RuntimeException.class);
+
+        assertThat(transactions.failureCalls).isZero();
+    }
+
+    @Test
+    void finalizationFailureKeepsOwnedSessionRecoverable() {
+        byte[] pdf = "%PDF-1.7 finalize-failure".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        RecordingStorage storage = new RecordingStorage();
+        FakeTransactions transactions = new FakeTransactions();
+        transactions.failFinalize = true;
+        UploadService service = new UploadService(transactions, new com.example.files.application.upload.UploadInspector(),
+            storage, new StagingWaitPolicy(Duration.ofSeconds(1), Duration.ofMillis(1)),
+            new NoopCleanupTasks(), new UploadFailureClassifier());
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.upload(new UploadCommand(7L, "a.pdf",
+            "application/pdf", pdf.length, new ByteArrayInputStream(pdf), CorrelationId.random())))
+            .isInstanceOf(RuntimeException.class);
+
+        assertThat(transactions.failureCalls).isZero();
+    }
+
     private static final class FakeTransactions implements UploadService.Transactions {
         private final UUID sessionId = UUID.randomUUID();
         private final UUID token = UUID.randomUUID();
@@ -74,6 +110,9 @@ class UploadServiceTest {
         private boolean waitOnce;
         private int resolveCalls;
         private String committedObjectKey;
+        private boolean failFinalize;
+        private int failureCalls;
+        private CorrelationId lastCorrelationId;
         private final UploadSession session = UploadSession.newSession(sessionId, 7L, "tmp/" + UUID.randomUUID(),
             token, SafeDisplayName.from("report.pdf"), "application/pdf", Duration.ofHours(1),
             Duration.ofMinutes(2), Instant.now());
@@ -89,12 +128,21 @@ class UploadServiceTest {
             return reserve(id, owner, upload);
         }
         @Override public UploadResult finalizeUpload(BlobReservation.Granted reservation) {
+            if (failFinalize) throw new IllegalStateException("finalize failed");
             return new UploadResult(fileId, "report.pdf", "application/pdf", 13L, Instant.now());
+        }
+        @Override public UploadResult finalizeUpload(BlobReservation.Granted reservation, CorrelationId correlationId) {
+            lastCorrelationId = correlationId;
+            return finalizeUpload(reservation);
         }
         @Override public UploadResult attachReadyBlob(BlobReservation.ReadyReuse reservation) {
             return finalizeUpload(reservation);
         }
-        @Override public void recordFailure(UUID id, UUID owner, String failureCode) { }
+        @Override public UploadResult attachReadyBlob(BlobReservation.ReadyReuse reservation, CorrelationId correlationId) {
+            lastCorrelationId = correlationId;
+            return attachReadyBlob(reservation);
+        }
+        @Override public void recordFailure(UUID id, UUID owner, String failureCode) { failureCalls++; }
     }
 
     private static final class RecordingStorage implements ObjectStorage {
@@ -103,6 +151,7 @@ class UploadServiceTest {
         private boolean transactionActiveDuringDelete;
         private byte[] bytes;
         private String committedObjectKey;
+        private boolean failCommit;
 
         @Override public TemporaryObject writeTemporary(String key, InputStream source, long maxBytes) {
             transactionActiveDuringWrite = TransactionSynchronizationManager.isActualTransactionActive();
@@ -116,6 +165,7 @@ class UploadServiceTest {
         @Override public void commit(String tempKey, String objectKey) {
             transactionActiveDuringCommit = TransactionSynchronizationManager.isActualTransactionActive();
             committedObjectKey = objectKey;
+            if (failCommit) throw new IllegalStateException("commit failed");
         }
         @Override public InputStream open(String objectKey) { return new ByteArrayInputStream(bytes); }
         @Override public void delete(String objectKey) {
@@ -129,5 +179,7 @@ class UploadServiceTest {
     private static final class NoopCleanupTasks implements CleanupTaskRepository {
         @Override public void enqueueTemp(UploadSession session, String tempKey) { }
         @Override public void enqueueTempIfEligible(UUID sessionId) { }
+        @Override public void enqueueBlob(com.example.files.domain.StoredBlob blob) { }
+        @Override public void enqueueBlob(BlobReservation.Granted reservation) { }
     }
 }

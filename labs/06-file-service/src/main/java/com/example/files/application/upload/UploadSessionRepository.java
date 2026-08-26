@@ -22,9 +22,7 @@ public interface UploadSessionRepository {
     boolean markCompleted(UUID sessionId, UUID ownerToken, UUID fileId);
 
     /** 以 owner token fencing 记录有限失败分类。 */
-    default boolean recordFailure(UUID sessionId, UUID ownerToken, String failureCode) {
-        return false;
-    }
+    boolean recordFailure(UUID sessionId, UUID ownerToken, String failureCode);
 
     Optional<UploadSession> find(UUID sessionId);
 
@@ -35,7 +33,7 @@ public interface UploadSessionRepository {
         return find(sessionId);
     }
 
-    default List<UploadSession> findExpiredForRecovery(int batchSize) { return List.of(); }
+    List<UploadSession> findExpiredForRecovery(int batchSize);
 
-    default boolean claimExpiredForRecovery(UUID sessionId, UUID newOwnerToken, Duration lease) { return false; }
+    boolean claimExpiredForRecovery(UUID sessionId, UUID newOwnerToken, Duration lease);
 }

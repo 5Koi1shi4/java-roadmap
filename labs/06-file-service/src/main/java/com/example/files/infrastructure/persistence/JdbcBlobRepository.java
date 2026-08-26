@@ -43,9 +43,7 @@ public final class JdbcBlobRepository implements BlobRepository {
             if (!isContentHashConflict(duplicate)) {
                 throw duplicate;
             }
-            StoredBlob winner = findByHashForUpdate(upload.sha256())
-                .orElseThrow(() -> new IllegalStateException("blob hash race lost without winner"));
-            return reservationFor(winner, sessionId, ownerToken);
+            throw new com.example.files.application.upload.BlobHashConflictException(duplicate);
         }
     }
 
@@ -65,12 +63,22 @@ public final class JdbcBlobRepository implements BlobRepository {
         if (blob.status() == BlobStatus.STAGING) {
             return BlobReservation.waiting();
         }
+        if (blob.status() == BlobStatus.PENDING_DELETE || blob.status() == BlobStatus.DELETING
+            || blob.status() == BlobStatus.DELETED) {
+            return BlobReservation.waiting();
+        }
         throw new IllegalStateException("BLOB_NOT_READY");
     }
 
     @Override
     public Optional<StoredBlob> findByHash(String sha256) {
         return findByHashInternal(sha256, false);
+    }
+
+    @Override
+    public Optional<BlobReservation> resolveExisting(UUID sessionId, UUID ownerToken, InspectedUpload upload) {
+        if (sessionId == null || ownerToken == null || upload == null) throw new IllegalArgumentException("invalid resolve arguments");
+        return findByHash(upload.sha256()).map(blob -> reservationFor(blob, sessionId, ownerToken));
     }
 
     private Optional<StoredBlob> findByHashForUpdate(String sha256) {
@@ -181,6 +189,16 @@ public final class JdbcBlobRepository implements BlobRepository {
                 + "AND staging_owner_token=? AND staging_lease_until<=CURRENT_TIMESTAMP(6)",
             newOwnerToken.toString(), JdbcUploadSessionRepository.micros(lease), blobId,
             sessionId.toString(), oldOwnerToken.toString()) == 1;
+    }
+
+    @Override
+    public boolean restageDeleted(long blobId, UUID sessionId, UUID ownerToken, String objectKey, Duration lease) {
+        if (blobId <= 0 || sessionId == null || ownerToken == null || objectKey == null || objectKey.isBlank()
+            || lease == null || lease.isZero() || lease.isNegative()) throw new IllegalArgumentException("invalid restaging arguments");
+        return jdbc.update("UPDATE stored_blob SET object_key=?,status='STAGING',generation=generation+1,cleanup_token=NULL,cleanup_lease_until=NULL,"
+                + "staging_session_id=?,staging_owner_token=?,staging_lease_until=TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6)),"
+                + "updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='DELETED' AND reference_count=0",
+            objectKey, sessionId.toString(), ownerToken.toString(), JdbcUploadSessionRepository.micros(lease), blobId) == 1;
     }
 
     private StoredBlob map(ResultSet rs, int row) throws SQLException {

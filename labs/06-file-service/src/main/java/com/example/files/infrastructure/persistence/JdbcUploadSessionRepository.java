@@ -114,7 +114,8 @@ public final class JdbcUploadSessionRepository implements UploadSessionRepositor
         if (sessionId == null || ownerToken == null || failureCode == null || failureCode.isBlank()
             || failureCode.length() > 64) throw new IllegalArgumentException("invalid failure arguments");
         return jdbc.update("UPDATE upload_session SET status='FAILED',failure_code=?,updated_at=CURRENT_TIMESTAMP(6) "
-                + "WHERE session_id=? AND owner_token=? AND status IN ('RECEIVING','VALIDATED','FINALIZING')",
+                + "WHERE session_id=? AND owner_token=? AND status IN ('RECEIVING','VALIDATED','FINALIZING') "
+                + "AND lease_until>CURRENT_TIMESTAMP(6) AND expires_at>CURRENT_TIMESTAMP(6)",
             failureCode, sessionId.toString(), ownerToken.toString()) == 1;
     }
 

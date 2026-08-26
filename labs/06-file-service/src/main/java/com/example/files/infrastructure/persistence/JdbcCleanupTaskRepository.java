@@ -46,4 +46,20 @@ public final class JdbcCleanupTaskRepository implements CleanupTaskRepository {
             // 同一 Blob 代次只保留一条清理任务。
         }
     }
+
+    @Override
+    public void enqueueBlob(com.example.files.application.upload.BlobReservation.Granted reservation) {
+        if (reservation == null) throw new IllegalArgumentException("reservation must not be null");
+        var row = jdbc.query("SELECT id,generation,object_key FROM stored_blob WHERE id=?",
+            (rs, index) -> new Object[]{rs.getLong(1), rs.getLong(2), rs.getString(3)}, reservation.blobId());
+        if (row.isEmpty()) return;
+        Object[] values = row.get(0);
+        try {
+            jdbc.update("INSERT INTO storage_cleanup_task(task_id,task_type,target_id,target_generation,object_key,"
+                    + "status,available_at,attempt_count,created_at) VALUES(?,?,?,?,?,'NEW',CURRENT_TIMESTAMP(6),0,CURRENT_TIMESTAMP(6))",
+                UUID.randomUUID().toString(), "BLOB_OBJECT", Long.toString((Long) values[0]), values[1], values[2]);
+        } catch (DuplicateKeyException ignored) {
+            // 同一 Blob 代次只保留一条清理任务。
+        }
+    }
 }
