@@ -219,11 +219,15 @@ public final class LocalObjectStorage implements ObjectStorage {
                 }
                 if (Files.exists(current, LinkOption.NOFOLLOW_LINKS)) {
                     Files.readAttributes(current, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+                    Path real = current.toRealPath();
+                    if (!real.startsWith(root)) {
+                        throw new IllegalArgumentException("storage path resolves outside configured root");
+                    }
                 }
             } catch (SecurityException ex) {
                 throw new IllegalArgumentException("cannot inspect storage path", ex);
             } catch (IOException ex) {
-                throw new UncheckedIOException("cannot inspect storage path", ex);
+                throw new IllegalArgumentException("cannot inspect storage path", ex);
             }
             if (current.equals(root)) break;
             current = current.getParent();
