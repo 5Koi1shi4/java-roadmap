@@ -61,6 +61,31 @@ public final class StoredBlob {
             stagingSessionId, stagingOwnerToken, stagingLeaseUntil, databaseNow);
     }
 
+    /** 从数据库还原完整状态；数据库时间用于校验创建和更新时间。 */
+    public static StoredBlob rehydrate(long id, String contentHash, String objectKey, long sizeBytes,
+                                       DetectedFileType mediaType, long referenceCount, BlobStatus status,
+                                       long generation, UUID stagingSessionId, UUID stagingOwnerToken,
+                                       Instant stagingLeaseUntil, UUID cleanupToken, Instant cleanupLeaseUntil,
+                                       Instant createdAt, Instant updatedAt) {
+        if (status == null || createdAt == null || updatedAt == null || referenceCount < 0) {
+            throw new IllegalArgumentException("invalid persisted blob state");
+        }
+        Instant lease = stagingLeaseUntil != null ? stagingLeaseUntil : updatedAt.plusSeconds(1);
+        UUID session = stagingSessionId != null ? stagingSessionId : UUID.randomUUID();
+        UUID owner = stagingOwnerToken != null ? stagingOwnerToken : UUID.randomUUID();
+        StoredBlob blob = new StoredBlob(id, contentHash, objectKey, sizeBytes, mediaType, generation,
+            session, owner, lease, updatedAt.isBefore(lease) ? updatedAt : lease.minusNanos(1));
+        blob.referenceCount = referenceCount;
+        blob.status = status;
+        blob.stagingSessionId = stagingSessionId;
+        blob.stagingOwnerToken = stagingOwnerToken;
+        blob.stagingLeaseUntil = stagingLeaseUntil;
+        blob.cleanupToken = cleanupToken;
+        blob.cleanupLeaseUntil = cleanupLeaseUntil;
+        blob.updatedAt = updatedAt;
+        return blob;
+    }
+
     public StoredBlob ready() {
         transition(BlobStatus.STAGING, BlobStatus.READY);
         this.stagingSessionId = null;
