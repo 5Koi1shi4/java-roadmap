@@ -45,24 +45,22 @@ public final class StagingRecoveryService {
         int recovered = 0;
         for (UploadSession candidate : sessions.findExpiredForRecovery(batchSize)) {
             UUID token = UUID.randomUUID();
-            if (!sessions.claimExpiredForRecovery(candidate.sessionId(), token, lease)) continue;
+            if (candidate.blobId() != null && !transactions.claimRecovery(candidate, token, lease)) continue;
+            if (candidate.blobId() == null && !sessions.claimExpiredForRecovery(candidate.sessionId(), token, lease)) continue;
             UploadSession claimed = sessions.find(candidate.sessionId()).orElse(null);
             if (claimed == null || !token.equals(claimed.ownerToken())) continue;
             if (claimed.blobId() == null) {
-                transactions.recordFailure(claimed.sessionId(), token, "RECOVERY_BLOB_MISSING");
-                cleanupTasks.enqueueTemp(claimed, claimed.tempKey());
+                transactions.markRecoveryFailure(claimed, token, "RECOVERY_BLOB_MISSING", cleanupTasks);
                 continue;
             }
             StoredBlob blob = blobs.findById(claimed.blobId()).orElse(null);
-            if (blob != null && !transactions.takeOverRecoveryOwnership(blob, candidate.ownerToken(), token, lease)) {
-                continue;
-            }
             if (blob == null || !matches(claimed, blob)) {
                 if (blob != null) {
-                    blobs.recoverMissingStaging(blob.id(), claimed.sessionId(), token);
+                    transactions.markRecoveryPending(claimed, blob, token,
+                        "RECOVERY_METADATA_MISMATCH", cleanupTasks);
+                } else {
+                    transactions.markRecoveryFailure(claimed, token, "RECOVERY_BLOB_MISSING", cleanupTasks);
                 }
-                transactions.recordFailure(claimed.sessionId(), token, "RECOVERY_OBJECT_MISSING");
-                cleanupTasks.enqueueTemp(claimed, claimed.tempKey());
                 continue;
             }
             ProbeResult probe = probe(blob);
@@ -70,14 +68,9 @@ public final class StagingRecoveryService {
                 throw new StorageCoordinationUnavailableException("storage unavailable during staging recovery");
             }
             if (probe != ProbeResult.MATCH) {
-                if (probe == ProbeResult.ABSENT) {
-                    blobs.recoverMissingStaging(blob.id(), claimed.sessionId(), token);
-                } else if (blobs.markPendingDeleteFromRecovery(blob.id(), claimed.sessionId(), token)) {
-                    cleanupTasks.enqueueBlob(blob);
-                }
-                transactions.recordFailure(claimed.sessionId(), token,
-                    probe == ProbeResult.ABSENT ? "RECOVERY_OBJECT_MISSING" : "RECOVERY_OBJECT_MISMATCH");
-                cleanupTasks.enqueueTemp(claimed, claimed.tempKey());
+                transactions.markRecoveryPending(claimed, blob, token,
+                    probe == ProbeResult.ABSENT ? "RECOVERY_OBJECT_MISSING" : "RECOVERY_OBJECT_MISMATCH",
+                    cleanupTasks);
                 continue;
             }
             try {
@@ -92,7 +85,8 @@ public final class StagingRecoveryService {
     }
 
     private boolean matches(UploadSession session, StoredBlob blob) {
-        return blob.status() == com.example.files.domain.BlobStatus.STAGING
+        return (blob.status() == com.example.files.domain.BlobStatus.STAGING
+            || blob.status() == com.example.files.domain.BlobStatus.READY)
             && session.actualSize() != null && session.actualSize() == blob.sizeBytes()
             && session.contentHash() != null && session.contentHash().equalsIgnoreCase(blob.contentHash())
             && session.detectedType() == blob.mediaType();

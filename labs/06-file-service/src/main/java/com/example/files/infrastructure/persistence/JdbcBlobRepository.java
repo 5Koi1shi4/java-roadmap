@@ -81,7 +81,8 @@ public final class JdbcBlobRepository implements BlobRepository {
         return findByHash(upload.sha256()).map(blob -> reservationFor(blob, sessionId, ownerToken));
     }
 
-    private Optional<StoredBlob> findByHashForUpdate(String sha256) {
+    @Override
+    public Optional<StoredBlob> findByHashForUpdate(String sha256) {
         return findByHashInternal(sha256, true);
     }
 
@@ -167,31 +168,6 @@ public final class JdbcBlobRepository implements BlobRepository {
     }
 
     @Override
-    public boolean recoverMissingStaging(long blobId, UUID sessionId, UUID ownerToken) {
-        if (blobId <= 0 || sessionId == null || ownerToken == null) {
-            throw new IllegalArgumentException("invalid missing blob recovery arguments");
-        }
-        return jdbc.update("UPDATE stored_blob SET status='DELETED',staging_session_id=NULL,staging_owner_token=NULL,"
-                + "staging_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='STAGING' "
-                + "AND staging_session_id=? AND staging_owner_token=? AND reference_count=0",
-            blobId, sessionId.toString(), ownerToken.toString()) == 1;
-    }
-
-    @Override
-    public boolean renewOwnershipForRecovery(long blobId, UUID sessionId, UUID oldOwnerToken,
-                                             UUID newOwnerToken, Duration lease) {
-        if (blobId <= 0 || sessionId == null || oldOwnerToken == null || newOwnerToken == null
-            || lease == null || lease.isZero() || lease.isNegative()) {
-            throw new IllegalArgumentException("invalid recovery ownership arguments");
-        }
-        return jdbc.update("UPDATE stored_blob SET staging_owner_token=?,staging_lease_until=TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6)),"
-                + "updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='STAGING' AND staging_session_id=? "
-                + "AND staging_owner_token=? AND staging_lease_until<=CURRENT_TIMESTAMP(6)",
-            newOwnerToken.toString(), JdbcUploadSessionRepository.micros(lease), blobId,
-            sessionId.toString(), oldOwnerToken.toString()) == 1;
-    }
-
-    @Override
     public boolean restageDeleted(long blobId, UUID sessionId, UUID ownerToken, String objectKey, Duration lease) {
         if (blobId <= 0 || sessionId == null || ownerToken == null || objectKey == null || objectKey.isBlank()
             || lease == null || lease.isZero() || lease.isNegative()) throw new IllegalArgumentException("invalid restaging arguments");
@@ -205,9 +181,11 @@ public final class JdbcBlobRepository implements BlobRepository {
     public boolean markPendingDeleteFromRecovery(long blobId, UUID sessionId, UUID ownerToken) {
         if (blobId <= 0 || sessionId == null || ownerToken == null) throw new IllegalArgumentException("invalid recovery cleanup arguments");
         return jdbc.update("UPDATE stored_blob SET status='PENDING_DELETE',staging_session_id=NULL,staging_owner_token=NULL,"
-                + "staging_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='STAGING' "
-                + "AND staging_session_id=? AND staging_owner_token=? AND reference_count=0",
-            blobId, sessionId.toString(), ownerToken.toString()) == 1;
+                + "staging_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND reference_count=0 AND "
+                + "((status='STAGING' AND staging_session_id=? AND staging_owner_token=?) OR "
+                + "(status='READY' AND EXISTS (SELECT 1 FROM upload_session WHERE session_id=? AND owner_token=? "
+                + "AND status='FINALIZING' AND blob_id=?)))",
+            blobId, sessionId.toString(), ownerToken.toString(), sessionId.toString(), ownerToken.toString(), blobId) == 1;
     }
 
     private StoredBlob map(ResultSet rs, int row) throws SQLException {

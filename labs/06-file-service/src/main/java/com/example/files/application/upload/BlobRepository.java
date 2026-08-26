@@ -15,6 +15,8 @@ public interface BlobRepository {
     /** 在冲突事务结束后以短查询解析现有 Blob，不持有行锁。 */
     Optional<BlobReservation> resolveExisting(UUID sessionId, UUID ownerToken, InspectedUpload upload);
 
+    Optional<StoredBlob> findByHashForUpdate(String sha256);
+
     default Optional<StoredBlob> findById(long blobId) {
         return Optional.empty();
     }
@@ -39,13 +41,6 @@ public interface BlobRepository {
     default boolean incrementReference(long blobId) {
         throw new UnsupportedOperationException("incrementReference is not supported");
     }
-
-    /** 正式对象缺失时，在匹配 token 的条件下安全回收 STAGING 元数据。 */
-    boolean recoverMissingStaging(long blobId, UUID sessionId, UUID ownerToken);
-
-    /** 恢复任务为同一会话更换 owner token，旧 token 的迟到结果被拒绝。 */
-    boolean renewOwnershipForRecovery(long blobId, UUID sessionId, UUID oldOwnerToken,
-                                      UUID newOwnerToken, Duration lease);
 
     boolean restageDeleted(long blobId, UUID sessionId, UUID ownerToken, String objectKey, Duration lease);
 
