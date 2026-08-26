@@ -141,10 +141,15 @@ public final class UploadTransactionService {
             if (oldSessionId == null || newSessionId == null || oldSessionId.equals(newSessionId)) {
                 throw new IllegalArgumentException("takeover requires two distinct sessions");
             }
-            UploadSession oldSession = sessions.findForUpdate(oldSessionId)
-                .orElseThrow(() -> new IllegalStateException("OLD_UPLOAD_SESSION_NOT_FOUND"));
-            UploadSession newSession = sessions.findForUpdate(newSessionId)
-                .orElseThrow(() -> new IllegalStateException("NEW_UPLOAD_SESSION_NOT_FOUND"));
+            UUID firstSessionId = oldSessionId.toString().compareTo(newSessionId.toString()) < 0
+                ? oldSessionId : newSessionId;
+            UUID secondSessionId = firstSessionId.equals(oldSessionId) ? newSessionId : oldSessionId;
+            UploadSession firstSession = sessions.findForUpdate(firstSessionId)
+                .orElseThrow(() -> new IllegalStateException("UPLOAD_SESSION_NOT_FOUND"));
+            UploadSession secondSession = sessions.findForUpdate(secondSessionId)
+                .orElseThrow(() -> new IllegalStateException("UPLOAD_SESSION_NOT_FOUND"));
+            UploadSession oldSession = oldSessionId.equals(firstSessionId) ? firstSession : secondSession;
+            UploadSession newSession = newSessionId.equals(firstSessionId) ? firstSession : secondSession;
             StoredBlob blob = blobs.findForUpdate(blobId)
                 .orElseThrow(() -> new IllegalStateException("BLOB_NOT_FOUND"));
             if (blob.status() != BlobStatus.STAGING || !oldSessionId.equals(blob.stagingSessionId())

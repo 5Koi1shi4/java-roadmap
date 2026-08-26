@@ -14,7 +14,7 @@ public record BlobReservation(UUID sessionId, UUID ownerToken, long blobId,
         Objects.requireNonNull(mode);
     }
 
-    public enum Mode { NEW_STAGING, OWNED_STAGING, REUSE_READY }
+    public enum Mode { NEW_STAGING, OWNED_STAGING, WAITING, REUSE_READY }
 
     public boolean reusesReadyBlob() {
         return mode == Mode.REUSE_READY;

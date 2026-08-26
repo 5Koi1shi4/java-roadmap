@@ -101,4 +101,27 @@ class StoredBlobTest {
             DetectedFileType.PDF, 0L, BlobStatus.DELETING, 1L, null, null, null, null, null, created, updated))
             .isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test
+    void rehydrateRejectsReferencesOnNonReadyStates() {
+        Instant created = Instant.parse("2030-01-01T00:00:00Z");
+        Instant updated = Instant.parse("2030-01-01T00:00:01Z");
+        UUID session = UUID.randomUUID();
+        UUID owner = UUID.randomUUID();
+        Instant lease = Instant.parse("2030-01-01T00:02:00Z");
+        UUID cleanup = UUID.randomUUID();
+        Instant cleanupLease = Instant.parse("2030-01-01T00:02:00Z");
+        assertThatThrownBy(() -> StoredBlob.rehydrate(8L, "c".repeat(64), "blobs/random", 12L,
+            DetectedFileType.PDF, 1L, BlobStatus.STAGING, 1L, session, owner, lease, null, null, created, updated))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> StoredBlob.rehydrate(8L, "c".repeat(64), "blobs/random", 12L,
+            DetectedFileType.PDF, 1L, BlobStatus.PENDING_DELETE, 1L, null, null, null, null, null, created, updated))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> StoredBlob.rehydrate(8L, "c".repeat(64), "blobs/random", 12L,
+            DetectedFileType.PDF, 1L, BlobStatus.DELETING, 1L, null, null, null, cleanup, cleanupLease, created, updated))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> StoredBlob.rehydrate(8L, "c".repeat(64), "blobs/random", 12L,
+            DetectedFileType.PDF, 1L, BlobStatus.DELETED, 1L, null, null, null, null, null, created, updated))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
 }

@@ -72,6 +72,9 @@ public final class StoredBlob {
             || stagingOwnerToken == null || stagingLeaseUntil == null || hasCleanup)) {
             throw new IllegalArgumentException("STAGING blob must have only staging lease fields");
         }
+        if (status != BlobStatus.READY && referenceCount != 0) {
+            throw new IllegalArgumentException("only READY blob may have references");
+        }
         if (status == BlobStatus.DELETING && (!hasCleanup || cleanupToken == null
             || cleanupLeaseUntil == null || hasStaging)) {
             throw new IllegalArgumentException("DELETING blob must have only cleanup lease fields");

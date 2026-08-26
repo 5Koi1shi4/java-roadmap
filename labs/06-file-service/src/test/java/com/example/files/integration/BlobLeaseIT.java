@@ -21,6 +21,10 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
 import java.util.UUID;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -95,6 +99,67 @@ class BlobLeaseIT extends SharedMySqlContainer {
             result.fileId().toString())).isOne();
         assertThat(jdbc.queryForObject("SELECT status FROM upload_session WHERE session_id=?", String.class,
             first.sessionId().toString())).isEqualTo("EXPIRED");
+    }
+
+    @Test
+    void crossedTakeoversUseDeterministicSessionLockOrderAndAtMostOneWins() throws Exception {
+        InspectedUpload upload = new InspectedUpload(SafeDisplayName.from("cross.pdf"), "application/pdf",
+            DetectedFileType.PDF, 3L, "d".repeat(64), new TemporaryObject("tmp/" + UUID.randomUUID(), 3L));
+        var oldA = transactions.begin(51L, upload.originalName(), upload.declaredType(), Duration.ofHours(1), Duration.ofSeconds(1));
+        BlobReservation reservation = transactions.reserve(oldA.sessionId(), oldA.ownerToken(), upload, Duration.ofSeconds(1));
+        var oldB = transactions.begin(52L, upload.originalName(), upload.declaredType(), Duration.ofHours(1), Duration.ofSeconds(1));
+        var newA = transactions.begin(53L, upload.originalName(), upload.declaredType());
+        var newB = transactions.begin(54L, upload.originalName(), upload.declaredType());
+        assertThat(sessions.markValidated(oldB.sessionId(), oldB.ownerToken(), upload)).isTrue();
+        assertThat(sessions.markValidated(newA.sessionId(), newA.ownerToken(), upload)).isTrue();
+        assertThat(sessions.markValidated(newB.sessionId(), newB.ownerToken(), upload)).isTrue();
+        jdbc.update("UPDATE upload_session SET lease_until = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE session_id IN (?,?)",
+            oldA.sessionId().toString(), oldB.sessionId().toString());
+        jdbc.update("UPDATE stored_blob SET staging_lease_until = TIMESTAMPADD(SECOND, -1, CURRENT_TIMESTAMP(6)) WHERE id=?",
+            reservation.blobId());
+
+        var firstOld = oldA.sessionId().toString().compareTo(oldB.sessionId().toString()) < 0 ? oldA : oldB;
+        var secondOld = firstOld == oldA ? oldB : oldA;
+        var firstNew = firstOld == oldA ? newB : newA;
+        var secondNew = firstOld == oldA ? newA : newB;
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            CyclicBarrier barrier = new CyclicBarrier(2);
+            Future<Boolean> first = executor.submit(() -> {
+                barrier.await();
+                return transactions.takeOverExpiredStaging(reservation.blobId(), firstOld.sessionId(), firstOld.ownerToken(),
+                    firstNew.sessionId(), firstNew.ownerToken(), Duration.ofMinutes(2));
+            });
+            Future<Boolean> second = executor.submit(() -> {
+                barrier.await();
+                return transactions.takeOverExpiredStaging(reservation.blobId(), secondOld.sessionId(), secondOld.ownerToken(),
+                    secondNew.sessionId(), secondNew.ownerToken(), Duration.ofMinutes(2));
+            });
+            boolean firstResult = first.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            boolean secondResult = second.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(firstResult ^ secondResult).isTrue();
+        } finally {
+            executor.shutdownNow();
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM stored_blob WHERE status='STAGING'", Integer.class)).isOne();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM upload_session WHERE status='EXPIRED'", Integer.class)).isOne();
+    }
+
+    @Test
+    void competingSessionReceivesWaitingReservationAndCannotFinalizeStagingBlob() {
+        InspectedUpload upload = new InspectedUpload(SafeDisplayName.from("wait.pdf"), "application/pdf",
+            DetectedFileType.PDF, 3L, "e".repeat(64), new TemporaryObject("tmp/" + UUID.randomUUID(), 3L));
+        var owner = transactions.begin(61L, upload.originalName(), upload.declaredType());
+        BlobReservation first = transactions.reserve(owner.sessionId(), owner.ownerToken(), upload);
+        var competitor = transactions.begin(62L, upload.originalName(), upload.declaredType());
+        BlobReservation waiting = transactions.reserve(competitor.sessionId(), competitor.ownerToken(), upload);
+
+        assertThat(waiting.mode()).isEqualTo(BlobReservation.Mode.WAITING);
+        assertThat(waiting.objectKey()).isEqualTo(first.objectKey());
+        assertThat(transactions.tryFinalize(competitor.sessionId(), competitor.ownerToken(), waiting.blobId())).isFalse();
+        assertThat(blobs.get(first.blobId()).stagingSessionId()).isEqualTo(owner.sessionId());
+        assertThat(blobs.get(first.blobId()).stagingOwnerToken()).isEqualTo(owner.ownerToken());
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM stored_file", Integer.class)).isZero();
     }
 
     private int filesCount() {

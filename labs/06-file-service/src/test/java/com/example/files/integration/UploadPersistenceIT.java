@@ -28,6 +28,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.ArrayList;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -141,11 +142,23 @@ class UploadPersistenceIT extends SharedMySqlContainer {
             BlobReservation owner = reservations.stream().filter(r -> r.mode() == BlobReservation.Mode.NEW_STAGING)
                 .findFirst().orElseThrow();
             BlobReservation waiter = reservations.stream().filter(r -> r != owner).findFirst().orElseThrow();
-            transactions.finalizeUpload(owner);
-            transactions.finalizeUpload(waiter);
+            Future<UploadResult> ownerResult = executor.submit(() -> transactions.finalizeUpload(owner));
+            Future<UploadResult> waiterResult = executor.submit(() -> {
+                while (true) {
+                    try {
+                        return transactions.finalizeUpload(waiter);
+                    } catch (IllegalStateException unavailable) {
+                        Thread.yield();
+                    }
+                }
+            });
+            ownerResult.get(10, TimeUnit.SECONDS);
+            waiterResult.get(10, TimeUnit.SECONDS);
             assertThat(blobs.get(reservations.get(0).blobId()).referenceCount()).isEqualTo(2);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM stored_blob", Integer.class)).isOne();
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM stored_file", Integer.class)).isEqualTo(2);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM upload_session WHERE status='COMPLETED'", Integer.class)).isEqualTo(2);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM file_audit_event WHERE action='UPLOAD_COMPLETED'", Integer.class)).isEqualTo(2);
         } finally {
             executor.shutdownNow();
         }
