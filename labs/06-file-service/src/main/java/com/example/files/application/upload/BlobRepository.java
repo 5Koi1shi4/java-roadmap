@@ -36,4 +36,15 @@ public interface BlobRepository {
     default boolean incrementReference(long blobId) {
         throw new UnsupportedOperationException("incrementReference is not supported");
     }
+
+    /** 正式对象缺失时，在匹配 token 的条件下安全回收 STAGING 元数据。 */
+    default boolean recoverMissingStaging(long blobId, UUID sessionId, UUID ownerToken) {
+        return false;
+    }
+
+    /** 恢复任务为同一会话更换 owner token，旧 token 的迟到结果被拒绝。 */
+    default boolean renewOwnershipForRecovery(long blobId, UUID sessionId, UUID oldOwnerToken,
+                                              UUID newOwnerToken, Duration lease) {
+        return false;
+    }
 }

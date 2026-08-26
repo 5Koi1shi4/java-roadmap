@@ -158,6 +158,31 @@ public final class JdbcBlobRepository implements BlobRepository {
             + "WHERE id=? AND status='READY'", blobId) == 1;
     }
 
+    @Override
+    public boolean recoverMissingStaging(long blobId, UUID sessionId, UUID ownerToken) {
+        if (blobId <= 0 || sessionId == null || ownerToken == null) {
+            throw new IllegalArgumentException("invalid missing blob recovery arguments");
+        }
+        return jdbc.update("UPDATE stored_blob SET status='DELETED',staging_session_id=NULL,staging_owner_token=NULL,"
+                + "staging_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='STAGING' "
+                + "AND staging_session_id=? AND staging_owner_token=? AND reference_count=0",
+            blobId, sessionId.toString(), ownerToken.toString()) == 1;
+    }
+
+    @Override
+    public boolean renewOwnershipForRecovery(long blobId, UUID sessionId, UUID oldOwnerToken,
+                                             UUID newOwnerToken, Duration lease) {
+        if (blobId <= 0 || sessionId == null || oldOwnerToken == null || newOwnerToken == null
+            || lease == null || lease.isZero() || lease.isNegative()) {
+            throw new IllegalArgumentException("invalid recovery ownership arguments");
+        }
+        return jdbc.update("UPDATE stored_blob SET staging_owner_token=?,staging_lease_until=TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6)),"
+                + "updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='STAGING' AND staging_session_id=? "
+                + "AND staging_owner_token=? AND staging_lease_until<=CURRENT_TIMESTAMP(6)",
+            newOwnerToken.toString(), JdbcUploadSessionRepository.micros(lease), blobId,
+            sessionId.toString(), oldOwnerToken.toString()) == 1;
+    }
+
     private StoredBlob map(ResultSet rs, int row) throws SQLException {
         BlobStatus status = BlobStatus.valueOf(rs.getString("status"));
         UUID session = JdbcUploadSessionRepository.nullableUuid(rs, "staging_session_id");

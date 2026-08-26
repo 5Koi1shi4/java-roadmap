@@ -15,7 +15,7 @@ import java.time.Instant;
 import java.util.UUID;
 
 /** 编排上传会话、Blob 和逻辑文件的短事务；事务内不执行对象存储 IO。 */
-public final class UploadTransactionService {
+public final class UploadTransactionService implements UploadService.Transactions {
     private final UploadSessionRepository sessions;
     private final BlobRepository blobs;
     private final FileRepository files;
@@ -76,6 +76,11 @@ public final class UploadTransactionService {
         return reserve(sessionId, ownerToken, upload, lease);
     }
 
+    @Override
+    public BlobReservation resolve(UUID sessionId, UUID ownerToken, InspectedUpload upload) {
+        return resolve(sessionId, ownerToken, upload, Duration.ofMinutes(2));
+    }
+
     /** 在一个数据库事务内完成 Blob 发布、逻辑文件、引用、会话和审计。 */
     public UploadResult finalizeUpload(UUID sessionId, UUID ownerToken, long blobId) {
         UploadResult result = transactionTemplate.execute(status -> finalizeInTransaction(sessionId, ownerToken, blobId));
@@ -97,6 +102,16 @@ public final class UploadTransactionService {
             throw new IllegalArgumentException("reservation must refer to a READY blob");
         }
         return finalizeUpload(reservation);
+    }
+
+    /** 记录失败分类；条件更新确保迟到执行者不能覆盖接管者。 */
+    @Override
+    public void recordFailure(UUID sessionId, UUID ownerToken, String failureCode) {
+        transactionTemplate.executeWithoutResult(status -> {
+            if (!sessions.recordFailure(sessionId, ownerToken, failureCode)) {
+                // 已完成、已接管或已失败的会话均无需再次覆盖状态。
+            }
+        });
     }
 
     /** 旧令牌或过期租约只能得到 false，不得覆盖新 owner 的状态。 */
@@ -182,6 +197,15 @@ public final class UploadTransactionService {
             return true;
         });
         return Boolean.TRUE.equals(result);
+    }
+
+    /** 恢复同一过期会话时，只更换 Blob owner token，保持会话 ID 不变。 */
+    public boolean takeOverRecoveryOwnership(StoredBlob blob, UUID oldOwnerToken,
+                                             UUID newOwnerToken, Duration lease) {
+        if (blob == null || oldOwnerToken == null || newOwnerToken == null || lease == null) {
+            throw new IllegalArgumentException("invalid recovery ownership arguments");
+        }
+        return blobs.renewOwnershipForRecovery(blob.id(), blob.stagingSessionId(), oldOwnerToken, newOwnerToken, lease);
     }
 
 }

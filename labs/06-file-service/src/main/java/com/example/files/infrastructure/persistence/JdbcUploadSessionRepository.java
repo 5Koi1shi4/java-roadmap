@@ -15,6 +15,7 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
+import java.util.List;
 import java.util.UUID;
 
 /** 基于 JdbcTemplate 的上传会话仓储；租约和时间比较全部使用 MySQL 时钟。 */
@@ -109,8 +110,36 @@ public final class JdbcUploadSessionRepository implements UploadSessionRepositor
     }
 
     @Override
+    public boolean recordFailure(UUID sessionId, UUID ownerToken, String failureCode) {
+        if (sessionId == null || ownerToken == null || failureCode == null || failureCode.isBlank()
+            || failureCode.length() > 64) throw new IllegalArgumentException("invalid failure arguments");
+        return jdbc.update("UPDATE upload_session SET status='FAILED',failure_code=?,updated_at=CURRENT_TIMESTAMP(6) "
+                + "WHERE session_id=? AND owner_token=? AND status IN ('RECEIVING','VALIDATED','FINALIZING')",
+            failureCode, sessionId.toString(), ownerToken.toString()) == 1;
+    }
+
+    @Override
     public Optional<UploadSession> find(UUID sessionId) {
         return findInternal(sessionId, false);
+    }
+
+    @Override
+    public List<UploadSession> findExpiredForRecovery(int batchSize) {
+        if (batchSize <= 0 || batchSize > 50) throw new IllegalArgumentException("invalid recovery batch size");
+        return jdbc.query("SELECT session_id FROM upload_session WHERE status IN ('VALIDATED','FINALIZING') "
+                + "AND lease_until<=CURRENT_TIMESTAMP(6) ORDER BY updated_at LIMIT ?",
+            (rs, row) -> find(UUID.fromString(rs.getString(1))).orElseThrow(), batchSize);
+    }
+
+    @Override
+    public boolean claimExpiredForRecovery(UUID sessionId, UUID newOwnerToken, Duration lease) {
+        if (sessionId == null || newOwnerToken == null || lease == null || lease.isNegative() || lease.isZero()) {
+            throw new IllegalArgumentException("invalid recovery claim arguments");
+        }
+        return jdbc.update("UPDATE upload_session SET owner_token=?,lease_until=TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6)),"
+                + "updated_at=CURRENT_TIMESTAMP(6) WHERE session_id=? AND status IN ('VALIDATED','FINALIZING') "
+                + "AND lease_until<=CURRENT_TIMESTAMP(6) AND expires_at>CURRENT_TIMESTAMP(6)",
+            newOwnerToken.toString(), micros(lease), sessionId.toString()) == 1;
     }
 
     @Override
