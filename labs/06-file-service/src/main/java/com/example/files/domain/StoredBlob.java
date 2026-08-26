@@ -5,6 +5,7 @@ import java.util.UUID;
 
 /** Mutable domain aggregate whose transitions are deliberately narrower than the persistence model. */
 public final class StoredBlob {
+    public static final long MAX_SIZE_BYTES = 20L * 1024 * 1024;
     private final long id;
     private final String contentHash;
     private String objectKey;
@@ -23,15 +24,18 @@ public final class StoredBlob {
 
     private StoredBlob(long id, String contentHash, String objectKey, long sizeBytes,
                        DetectedFileType mediaType, long generation, UUID stagingSessionId,
-                       UUID stagingOwnerToken, Instant stagingLeaseUntil) {
+                       UUID stagingOwnerToken, Instant stagingLeaseUntil, Instant databaseNow) {
         if (id <= 0 || contentHash == null || !contentHash.matches("[0-9a-fA-F]{64}")
             || objectKey == null || objectKey.isBlank() || objectKey.contains("..")
             || objectKey.contains("\\") || objectKey.startsWith("/") || sizeBytes < 0
             || mediaType == null || generation <= 0 || stagingSessionId == null
-            || stagingOwnerToken == null || stagingLeaseUntil == null) {
+            || stagingOwnerToken == null || stagingLeaseUntil == null || databaseNow == null) {
             throw new IllegalArgumentException("invalid blob metadata");
         }
-        if (!stagingLeaseUntil.isAfter(Instant.now())) {
+        if (sizeBytes > MAX_SIZE_BYTES) {
+            throw new IllegalArgumentException("sizeBytes must not exceed 20 MiB");
+        }
+        if (!stagingLeaseUntil.isAfter(databaseNow)) {
             throw new IllegalArgumentException("staging lease must be in the future");
         }
         this.id = id;
@@ -45,16 +49,16 @@ public final class StoredBlob {
         this.stagingSessionId = stagingSessionId;
         this.stagingOwnerToken = stagingOwnerToken;
         this.stagingLeaseUntil = stagingLeaseUntil;
-        this.createdAt = Instant.now();
+        this.createdAt = databaseNow;
         this.updatedAt = this.createdAt;
     }
 
     public static StoredBlob beginStaging(long id, String contentHash, String objectKey, long sizeBytes,
                                           DetectedFileType mediaType, long generation,
                                           UUID stagingSessionId, UUID stagingOwnerToken,
-                                          Instant stagingLeaseUntil) {
+                                          Instant stagingLeaseUntil, Instant databaseNow) {
         return new StoredBlob(id, contentHash, objectKey, sizeBytes, mediaType, generation,
-            stagingSessionId, stagingOwnerToken, stagingLeaseUntil);
+            stagingSessionId, stagingOwnerToken, stagingLeaseUntil, databaseNow);
     }
 
     public StoredBlob ready() {
@@ -71,19 +75,17 @@ public final class StoredBlob {
             throw new IllegalStateException("only an unreferenced READY blob can be pending deletion");
         }
         status = BlobStatus.PENDING_DELETE;
-        touch();
         return this;
     }
 
-    public StoredBlob beginDeletionAttempt(UUID cleanupToken, Instant cleanupLeaseUntil) {
+    public StoredBlob beginDeletionAttempt(UUID cleanupToken, Instant cleanupLeaseUntil, Instant databaseNow) {
         if (status != BlobStatus.PENDING_DELETE || cleanupToken == null || cleanupLeaseUntil == null
-            || !cleanupLeaseUntil.isAfter(Instant.now())) {
+            || databaseNow == null || !cleanupLeaseUntil.isAfter(databaseNow)) {
             throw new IllegalStateException("invalid deletion claim");
         }
         this.cleanupToken = cleanupToken;
         this.cleanupLeaseUntil = cleanupLeaseUntil;
         status = BlobStatus.DELETING;
-        touch();
         return this;
     }
 
@@ -91,22 +93,18 @@ public final class StoredBlob {
         transition(BlobStatus.DELETING, BlobStatus.DELETED);
         this.cleanupToken = null;
         this.cleanupLeaseUntil = null;
-        touch();
         return this;
     }
 
     /** Reuses metadata only after the old physical object has reached DELETED. */
-    public StoredBlob beginStaging(UUID newSessionId, UUID newOwnerToken, Instant newLeaseUntil) {
-        return beginStaging(objectKey, newSessionId, newOwnerToken, newLeaseUntil);
-    }
-
     public StoredBlob beginStaging(String newObjectKey, UUID newSessionId, UUID newOwnerToken,
-                                   Instant newLeaseUntil) {
+                                   Instant newLeaseUntil, Instant databaseNow) {
         if (status != BlobStatus.DELETED || newSessionId == null || newOwnerToken == null
-            || newLeaseUntil == null || !newLeaseUntil.isAfter(Instant.now())
+            || newLeaseUntil == null || databaseNow == null || !newLeaseUntil.isAfter(databaseNow)
             || newObjectKey == null || newObjectKey.isBlank() || newObjectKey.contains("..")
-            || newObjectKey.contains("\\") || newObjectKey.startsWith("/")) {
-            throw new IllegalStateException("only a DELETED blob can be restaged");
+            || newObjectKey.contains("\\") || newObjectKey.startsWith("/")
+            || newObjectKey.equals(objectKey)) {
+            throw new IllegalArgumentException("restaging requires a different safe object key");
         }
         objectKey = newObjectKey;
         status = BlobStatus.STAGING;
@@ -117,7 +115,6 @@ public final class StoredBlob {
         stagingLeaseUntil = newLeaseUntil;
         cleanupToken = null;
         cleanupLeaseUntil = null;
-        touch();
         return this;
     }
 
@@ -127,7 +124,6 @@ public final class StoredBlob {
             throw new IllegalStateException("only a READY blob can gain references");
         }
         referenceCount++;
-        touch();
         return referenceCount;
     }
 
@@ -137,10 +133,8 @@ public final class StoredBlob {
             throw new IllegalStateException("blob has no removable reference");
         }
         referenceCount--;
-        touch();
         if (referenceCount == 0) {
             status = BlobStatus.PENDING_DELETE;
-            touch();
             return new ReferenceBecameZero(id, objectKey, generation);
         }
         return null;
@@ -155,10 +149,7 @@ public final class StoredBlob {
             throw new IllegalStateException("invalid blob transition " + status + " -> " + next);
         }
         status = next;
-        touch();
     }
-
-    private void touch() { updatedAt = Instant.now(); }
 
     public long id() { return id; }
     public long blobId() { return id; }

@@ -14,8 +14,4 @@ public record ReferenceBecameZero(long blobId, String objectKey, long generation
             throw new IllegalArgumentException("generation must be positive");
         }
     }
-
-    public ReferenceBecameZero(long blobId) {
-        this(blobId, "unknown", 1L);
-    }
 }

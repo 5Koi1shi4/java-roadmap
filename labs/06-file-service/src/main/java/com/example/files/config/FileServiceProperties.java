@@ -1,6 +1,7 @@
 package com.example.files.config;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.util.unit.DataSize;
 
@@ -14,27 +15,46 @@ public record FileServiceProperties(
     DataSize maxSize,
     Duration uploadSessionTtl,
     Duration stagingLease,
+    Duration stagingWaitTimeout,
+    Duration stagingPollInterval,
     Cleanup cleanup,
     Download download,
     Identity identity,
-    Storage storage) {
+    Storage storage,
+    Maintenance maintenance) {
 
     public static final DataSize SECURITY_MAX_SIZE = DataSize.ofMegabytes(20);
     public static final Duration SECURITY_MAX_LINK_TTL = Duration.ofMinutes(2);
 
+    /** Compatibility constructor for callers that only need the original core settings. */
+    public FileServiceProperties(DataSize maxSize, Duration uploadSessionTtl, Duration stagingLease,
+                                 Cleanup cleanup, Download download, Identity identity, Storage storage) {
+        this(maxSize, uploadSessionTtl, stagingLease, Duration.ofSeconds(5), Duration.ofMillis(100),
+            cleanup, download, identity, storage, new Maintenance(false));
+    }
+
+    @ConstructorBinding
     public FileServiceProperties {
         require(maxSize, "maxSize");
         require(uploadSessionTtl, "uploadSessionTtl");
         require(stagingLease, "stagingLease");
+        require(stagingWaitTimeout, "stagingWaitTimeout");
+        require(stagingPollInterval, "stagingPollInterval");
         require(cleanup, "cleanup");
         require(download, "download");
         require(identity, "identity");
         require(storage, "storage");
+        require(maintenance, "maintenance");
         if (maxSize.toBytes() <= 0 || maxSize.compareTo(SECURITY_MAX_SIZE) > 0) {
             throw new IllegalArgumentException("maxSize must be between 1 byte and 20 MiB");
         }
         positive(uploadSessionTtl, "uploadSessionTtl");
         positive(stagingLease, "stagingLease");
+        positive(stagingWaitTimeout, "stagingWaitTimeout");
+        positive(stagingPollInterval, "stagingPollInterval");
+        if (stagingPollInterval.compareTo(stagingWaitTimeout) >= 0) {
+            throw new IllegalArgumentException("stagingPollInterval must be less than stagingWaitTimeout");
+        }
     }
 
     public long maxBytes() {
@@ -74,6 +94,8 @@ public record FileServiceProperties(
     }
 
     public record Identity(boolean trustedHeaderEnabled) { }
+
+    public record Maintenance(boolean enabled) { }
 
     public record Storage(String type, String localRoot, String minioEndpoint,
                           String minioAccessKey, String minioSecretKey, String minioBucket) {

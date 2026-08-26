@@ -17,11 +17,21 @@ class FileServicePropertiesTest {
             .isInstanceOf(IllegalArgumentException.class);
     }
 
+    @Test
+    void rejectsInvalidStagingPollingConfiguration() {
+        assertThatThrownBy(() -> propertiesWithStaging(Duration.ZERO, Duration.ofMillis(100)))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> propertiesWithStaging(Duration.ofSeconds(1), Duration.ofSeconds(1)))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
     private static FileServiceProperties propertiesWithMaxSize(DataSize maxSize) {
         return new FileServiceProperties(
             maxSize,
             Duration.ofHours(1),
             Duration.ofMinutes(2),
+            Duration.ofSeconds(5),
+            Duration.ofMillis(100),
             new FileServiceProperties.Cleanup(
                 50,
                 Duration.ofSeconds(30),
@@ -30,6 +40,18 @@ class FileServicePropertiesTest {
                 Duration.ofHours(24)),
             new FileServiceProperties.Download(Duration.ofMinutes(2), ""),
             new FileServiceProperties.Identity(false),
-            new FileServiceProperties.Storage("local", "./data/files", "http://localhost:9000", "", "", "secure-files"));
+            new FileServiceProperties.Storage("local", "./data/files", "http://localhost:9000", "", "", "secure-files"),
+            new FileServiceProperties.Maintenance(false));
+    }
+
+    private static FileServiceProperties propertiesWithStaging(Duration wait, Duration poll) {
+        return new FileServiceProperties(
+            DataSize.ofMegabytes(20), Duration.ofHours(1), Duration.ofMinutes(2), wait, poll,
+            new FileServiceProperties.Cleanup(50, Duration.ofSeconds(30),
+                List.of(Duration.ofSeconds(5)), 5, Duration.ofHours(24)),
+            new FileServiceProperties.Download(Duration.ofMinutes(2), ""),
+            new FileServiceProperties.Identity(false),
+            new FileServiceProperties.Storage("local", "./data/files", "http://localhost:9000", "", "", "secure-files"),
+            new FileServiceProperties.Maintenance(false));
     }
 }
