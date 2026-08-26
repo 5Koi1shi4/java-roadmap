@@ -1,0 +1,14 @@
+spring:
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+  servlet:
+    multipart:
+      max-file-size: 21MB
+      max-request-size: 22MB
+server:
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true

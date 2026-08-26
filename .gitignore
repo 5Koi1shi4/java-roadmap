@@ -1,0 +1,17 @@
+# Local agent instructions
+/AGENTS.md
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Java/Maven output
+target/
+*.log
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
