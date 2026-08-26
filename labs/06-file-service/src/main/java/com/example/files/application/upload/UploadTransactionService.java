@@ -25,24 +25,16 @@ public final class UploadTransactionService implements UploadService.Transaction
     private Duration configuredTtl;
     private Duration configuredLease;
 
-    public UploadTransactionService(UploadSessionRepository sessions, BlobRepository blobs,
-                                    FileRepository files, AuditRecorder audits,
-                                    TransactionTemplate transactionTemplate) {
-        this.sessions = java.util.Objects.requireNonNull(sessions, "sessions");
-        this.blobs = java.util.Objects.requireNonNull(blobs, "blobs");
-        this.files = java.util.Objects.requireNonNull(files, "files");
-        this.audits = java.util.Objects.requireNonNull(audits, "audits");
-        this.transactionTemplate = java.util.Objects.requireNonNull(transactionTemplate, "transactionTemplate");
-        this.configuredTtl = null;
-        this.configuredLease = null;
-    }
-
     /** 生产编排必须注入类型安全配置，避免隐式租约和等待窗口。 */
     public UploadTransactionService(UploadSessionRepository sessions, BlobRepository blobs,
                                     FileRepository files, AuditRecorder audits,
                                     TransactionTemplate transactionTemplate,
                                     FileServiceProperties properties) {
-        this(sessions, blobs, files, audits, transactionTemplate);
+        this.sessions = java.util.Objects.requireNonNull(sessions, "sessions");
+        this.blobs = java.util.Objects.requireNonNull(blobs, "blobs");
+        this.files = java.util.Objects.requireNonNull(files, "files");
+        this.audits = java.util.Objects.requireNonNull(audits, "audits");
+        this.transactionTemplate = java.util.Objects.requireNonNull(transactionTemplate, "transactionTemplate");
         FileServiceProperties configured = java.util.Objects.requireNonNull(properties, "properties");
         this.configuredTtl = configured.uploadSessionTtl();
         this.configuredLease = configured.stagingLease();

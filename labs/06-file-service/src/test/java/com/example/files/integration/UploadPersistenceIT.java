@@ -53,7 +53,7 @@ class UploadPersistenceIT extends SharedMySqlContainer {
         transactionTemplate = new TransactionTemplate(
             new org.springframework.jdbc.datasource.DataSourceTransactionManager(dataSource));
         transactions = new UploadTransactionService(sessions, blobs, files,
-            new JdbcAuditRecorder(jdbc), transactionTemplate);
+            new JdbcAuditRecorder(jdbc), transactionTemplate, testProperties());
     }
 
     @BeforeEach
@@ -87,7 +87,7 @@ class UploadPersistenceIT extends SharedMySqlContainer {
             Duration.ofMinutes(2));
         AuditRecorder failingAudit = event -> { throw new RuntimeException("audit unavailable"); };
         UploadTransactionService failingTransactions = new UploadTransactionService(sessions, blobs, files,
-            failingAudit, transactionTemplate);
+            failingAudit, transactionTemplate, testProperties());
 
         org.assertj.core.api.Assertions.assertThatThrownBy(() ->
             failingTransactions.finalizeUpload(reservation.sessionId(), reservation.ownerToken(), reservation.blobId()))

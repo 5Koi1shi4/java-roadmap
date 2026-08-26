@@ -50,7 +50,7 @@ class UploadTransactionBoundaryIT extends SharedMySqlContainer {
         var sessions = new JdbcUploadSessionRepository(jdbc);
         var blobs = new JdbcBlobRepository(jdbc);
         var transactions = new UploadTransactionService(sessions, blobs, new JdbcFileRepository(jdbc),
-            new JdbcAuditRecorder(jdbc), new TransactionTemplate(new DataSourceTransactionManager(dataSource)));
+            new JdbcAuditRecorder(jdbc), new TransactionTemplate(new DataSourceTransactionManager(dataSource)), testProperties());
         storage = new ProbeStorage(new LocalObjectStorage(Files.createTempDirectory("upload-boundary")));
         service = new UploadService(transactions, new UploadInspector(), storage,
             new StagingWaitPolicy(Duration.ofSeconds(2), Duration.ofMillis(5)),

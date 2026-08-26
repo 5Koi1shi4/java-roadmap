@@ -5,6 +5,7 @@ import com.example.files.application.upload.StagingRecoveryService;
 import com.example.files.application.upload.TemporaryObject;
 import com.example.files.application.upload.UploadTransactionService;
 import com.example.files.application.cleanup.CleanupTaskRepository;
+import com.example.files.application.audit.AuditRecorder;
 import com.example.files.domain.DetectedFileType;
 import com.example.files.domain.SafeDisplayName;
 import com.example.files.infrastructure.persistence.JdbcAuditRecorder;
@@ -23,6 +24,7 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.file.Files;
+import java.io.ByteArrayInputStream;
 import java.time.Duration;
 import java.util.UUID;
 
@@ -47,7 +49,7 @@ class StagingRecoveryIT extends SharedMySqlContainer {
         blobs = new JdbcBlobRepository(jdbc);
         cleanup = new JdbcCleanupTaskRepository(jdbc);
         transactions = new UploadTransactionService(sessions, blobs, new JdbcFileRepository(jdbc),
-            new JdbcAuditRecorder(jdbc), new TransactionTemplate(new DataSourceTransactionManager(dataSource)));
+            new JdbcAuditRecorder(jdbc), new TransactionTemplate(new DataSourceTransactionManager(dataSource)), testProperties());
         storage = new LocalObjectStorage(Files.createTempDirectory("staging-recovery"));
     }
 
@@ -112,5 +114,37 @@ class StagingRecoveryIT extends SharedMySqlContainer {
         assertThat(sessions.find(session.sessionId()).orElseThrow().status())
             .isEqualTo(com.example.files.domain.UploadSessionStatus.VALIDATED);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM storage_cleanup_task", Integer.class)).isZero();
+    }
+
+    @Test
+    void auditFailureAfterCommitIsRecoveredWhenFormalObjectMatches() {
+        byte[] bytes = "pdf".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        InspectedUpload upload = new InspectedUpload(SafeDisplayName.from("audit.pdf"), "application/pdf",
+            DetectedFileType.PDF, bytes.length, "7".repeat(64), new TemporaryObject("tmp/" + UUID.randomUUID(), bytes.length));
+        var session = transactions.begin(11L, upload.originalName(), upload.declaredType(),
+            Duration.ofHours(1), Duration.ofSeconds(1));
+        storage.writeTemporary(session.tempKey(), new ByteArrayInputStream(bytes), 20_000_000L);
+        var reservation = (com.example.files.application.upload.BlobReservation.Granted)
+            transactions.reserve(session.sessionId(), session.ownerToken(), upload, Duration.ofSeconds(1));
+        storage.commit(session.tempKey(), reservation.objectKey());
+        AuditRecorder failingAudit = event -> { throw new IllegalStateException("injected audit failure"); };
+        UploadTransactionService failing = new UploadTransactionService(sessions, blobs, new JdbcFileRepository(jdbc),
+            failingAudit, new TransactionTemplate(new DataSourceTransactionManager(
+                new DriverManagerDataSource(MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword()))), testProperties());
+        assertThatThrownBy(() -> failing.finalizeUpload(reservation.sessionId(), reservation.ownerToken(), reservation.blobId()))
+            .isInstanceOf(IllegalStateException.class);
+        jdbc.update("UPDATE upload_session SET lease_until=TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP(6)) WHERE session_id=?",
+            session.sessionId().toString());
+        jdbc.update("UPDATE stored_blob SET staging_lease_until=TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP(6)) WHERE id=?",
+            reservation.blobId());
+
+        StagingRecoveryService recovery = new StagingRecoveryService(sessions, blobs, transactions, storage, cleanup,
+            Duration.ofSeconds(2));
+        assertThat(recovery.recoverExpired(10, "recovery-worker")).isEqualTo(1);
+        assertThat(blobs.get(reservation.blobId()).status()).isEqualTo(com.example.files.domain.BlobStatus.READY);
+        assertThat(blobs.get(reservation.blobId()).referenceCount()).isOne();
+        assertThat(sessions.find(session.sessionId()).orElseThrow().status())
+            .isEqualTo(com.example.files.domain.UploadSessionStatus.COMPLETED);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM storage_cleanup_task WHERE task_type='BLOB_OBJECT'", Integer.class)).isZero();
     }
 }

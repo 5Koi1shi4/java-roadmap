@@ -47,7 +47,7 @@ class ConcurrentDeduplicationIT extends SharedMySqlContainer {
         var sessions = new JdbcUploadSessionRepository(jdbc);
         var blobs = new JdbcBlobRepository(jdbc);
         var transactions = new UploadTransactionService(sessions, blobs, new JdbcFileRepository(jdbc),
-            new JdbcAuditRecorder(jdbc), new TransactionTemplate(new DataSourceTransactionManager(dataSource)));
+            new JdbcAuditRecorder(jdbc), new TransactionTemplate(new DataSourceTransactionManager(dataSource)), testProperties());
         service = new UploadService(transactions, new UploadInspector(),
             new LocalObjectStorage(Files.createTempDirectory("dedup")),
             new StagingWaitPolicy(Duration.ofSeconds(5), Duration.ofMillis(10)),

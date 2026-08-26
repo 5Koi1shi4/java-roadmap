@@ -46,7 +46,7 @@ class BlobLeaseIT extends SharedMySqlContainer {
         sessions = new JdbcUploadSessionRepository(jdbc);
         blobs = new JdbcBlobRepository(jdbc);
         transactions = new UploadTransactionService(sessions, blobs, new JdbcFileRepository(jdbc),
-            new JdbcAuditRecorder(jdbc), new TransactionTemplate(new DataSourceTransactionManager(dataSource)));
+            new JdbcAuditRecorder(jdbc), new TransactionTemplate(new DataSourceTransactionManager(dataSource)), testProperties());
     }
 
     @BeforeEach
