@@ -48,4 +48,6 @@ public interface BlobRepository {
                                       UUID newOwnerToken, Duration lease);
 
     boolean restageDeleted(long blobId, UUID sessionId, UUID ownerToken, String objectKey, Duration lease);
+
+    boolean markPendingDeleteFromRecovery(long blobId, UUID sessionId, UUID ownerToken);
 }

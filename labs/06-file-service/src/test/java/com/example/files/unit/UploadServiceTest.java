@@ -168,6 +168,9 @@ class UploadServiceTest {
             if (failCommit) throw new IllegalStateException("commit failed");
         }
         @Override public InputStream open(String objectKey) { return new ByteArrayInputStream(bytes); }
+        @Override public com.example.files.application.upload.StorageObjectMetadata stat(String objectKey) {
+            return new com.example.files.application.upload.StorageObjectMetadata(bytes == null ? 0 : bytes.length);
+        }
         @Override public void delete(String objectKey) {
             transactionActiveDuringDelete = TransactionSynchronizationManager.isActualTransactionActive();
         }

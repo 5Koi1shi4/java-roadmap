@@ -39,6 +39,9 @@ public final class JdbcCleanupTaskRepository implements CleanupTaskRepository {
     public void enqueueBlob(com.example.files.domain.StoredBlob blob) {
         if (blob == null) throw new IllegalArgumentException("blob must not be null");
         try {
+            Integer eligible = jdbc.queryForObject("SELECT COUNT(*) FROM stored_blob WHERE id=? AND generation=? AND status IN ('PENDING_DELETE','DELETING') AND reference_count=0",
+                Integer.class, blob.id(), blob.generation());
+            if (!Integer.valueOf(1).equals(eligible)) return;
             jdbc.update("INSERT INTO storage_cleanup_task(task_id,task_type,target_id,target_generation,object_key,"
                     + "status,available_at,attempt_count,created_at) VALUES(?,?,?,?,?,'NEW',CURRENT_TIMESTAMP(6),0,CURRENT_TIMESTAMP(6))",
                 UUID.randomUUID().toString(), "BLOB_OBJECT", Long.toString(blob.id()), blob.generation(), blob.objectKey());
@@ -54,6 +57,9 @@ public final class JdbcCleanupTaskRepository implements CleanupTaskRepository {
             (rs, index) -> new Object[]{rs.getLong(1), rs.getLong(2), rs.getString(3)}, reservation.blobId());
         if (row.isEmpty()) return;
         Object[] values = row.get(0);
+        Integer eligible = jdbc.queryForObject("SELECT COUNT(*) FROM stored_blob WHERE id=? AND generation=? AND status IN ('PENDING_DELETE','DELETING') AND reference_count=0",
+            Integer.class, values[0], values[1]);
+        if (!Integer.valueOf(1).equals(eligible)) return;
         try {
             jdbc.update("INSERT INTO storage_cleanup_task(task_id,task_type,target_id,target_generation,object_key,"
                     + "status,available_at,attempt_count,created_at) VALUES(?,?,?,?,?,'NEW',CURRENT_TIMESTAMP(6),0,CURRENT_TIMESTAMP(6))",

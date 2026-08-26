@@ -4,8 +4,6 @@ import com.example.files.application.cleanup.CleanupTaskRepository;
 import com.example.files.domain.StoredBlob;
 import com.example.files.domain.UploadSession;
 
-import java.io.IOException;
-import java.io.InputStream;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.UUID;
@@ -59,12 +57,26 @@ public final class StagingRecoveryService {
             if (blob != null && !transactions.takeOverRecoveryOwnership(blob, candidate.ownerToken(), token, lease)) {
                 continue;
             }
-            if (blob == null || !matches(claimed, blob) || !objectMatches(blob)) {
+            if (blob == null || !matches(claimed, blob)) {
                 if (blob != null) {
                     blobs.recoverMissingStaging(blob.id(), claimed.sessionId(), token);
-                    cleanupTasks.enqueueBlob(blob);
                 }
                 transactions.recordFailure(claimed.sessionId(), token, "RECOVERY_OBJECT_MISSING");
+                cleanupTasks.enqueueTemp(claimed, claimed.tempKey());
+                continue;
+            }
+            ProbeResult probe = probe(blob);
+            if (probe == ProbeResult.STORAGE_UNAVAILABLE) {
+                throw new StorageCoordinationUnavailableException("storage unavailable during staging recovery");
+            }
+            if (probe != ProbeResult.MATCH) {
+                if (probe == ProbeResult.ABSENT) {
+                    blobs.recoverMissingStaging(blob.id(), claimed.sessionId(), token);
+                } else if (blobs.markPendingDeleteFromRecovery(blob.id(), claimed.sessionId(), token)) {
+                    cleanupTasks.enqueueBlob(blob);
+                }
+                transactions.recordFailure(claimed.sessionId(), token,
+                    probe == ProbeResult.ABSENT ? "RECOVERY_OBJECT_MISSING" : "RECOVERY_OBJECT_MISMATCH");
                 cleanupTasks.enqueueTemp(claimed, claimed.tempKey());
                 continue;
             }
@@ -86,19 +98,16 @@ public final class StagingRecoveryService {
             && session.detectedType() == blob.mediaType();
     }
 
-    private boolean objectMatches(StoredBlob blob) {
-        try (InputStream in = storage.open(blob.objectKey())) {
-            long count = 0;
-            byte[] buffer = new byte[8192];
-            int n;
-            while ((n = in.read(buffer)) >= 0) {
-                if (n == 0) continue;
-                count += n;
-                if (count > blob.sizeBytes()) return false;
-            }
-            return count == blob.sizeBytes();
-        } catch (IOException | RuntimeException failure) {
-            return false;
+    private ProbeResult probe(StoredBlob blob) {
+        try {
+            long size = storage.stat(blob.objectKey()).size();
+            return size == blob.sizeBytes() ? ProbeResult.MATCH : ProbeResult.SIZE_MISMATCH;
+        } catch (StorageObjectNotFoundException notFound) {
+            return ProbeResult.ABSENT;
+        } catch (RuntimeException unavailable) {
+            return ProbeResult.STORAGE_UNAVAILABLE;
         }
     }
+
+    private enum ProbeResult { MATCH, ABSENT, SIZE_MISMATCH, STORAGE_UNAVAILABLE }
 }

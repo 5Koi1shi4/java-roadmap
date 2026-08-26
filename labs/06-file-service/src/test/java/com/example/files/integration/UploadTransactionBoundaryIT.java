@@ -94,6 +94,7 @@ class UploadTransactionBoundaryIT extends SharedMySqlContainer {
             delegate.commit(tempKey, objectKey);
         }
         @Override public InputStream open(String key) { return delegate.open(key); }
+        @Override public com.example.files.application.upload.StorageObjectMetadata stat(String key) { return delegate.stat(key); }
         @Override public void delete(String key) {
             deleteInTransaction |= TransactionSynchronizationManager.isActualTransactionActive();
             delegate.delete(key);

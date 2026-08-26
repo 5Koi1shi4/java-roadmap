@@ -201,6 +201,15 @@ public final class JdbcBlobRepository implements BlobRepository {
             objectKey, sessionId.toString(), ownerToken.toString(), JdbcUploadSessionRepository.micros(lease), blobId) == 1;
     }
 
+    @Override
+    public boolean markPendingDeleteFromRecovery(long blobId, UUID sessionId, UUID ownerToken) {
+        if (blobId <= 0 || sessionId == null || ownerToken == null) throw new IllegalArgumentException("invalid recovery cleanup arguments");
+        return jdbc.update("UPDATE stored_blob SET status='PENDING_DELETE',staging_session_id=NULL,staging_owner_token=NULL,"
+                + "staging_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='STAGING' "
+                + "AND staging_session_id=? AND staging_owner_token=? AND reference_count=0",
+            blobId, sessionId.toString(), ownerToken.toString()) == 1;
+    }
+
     private StoredBlob map(ResultSet rs, int row) throws SQLException {
         BlobStatus status = BlobStatus.valueOf(rs.getString("status"));
         UUID session = JdbcUploadSessionRepository.nullableUuid(rs, "staging_session_id");

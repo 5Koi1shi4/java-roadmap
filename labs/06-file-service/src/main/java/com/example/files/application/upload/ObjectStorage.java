@@ -14,6 +14,8 @@ public interface ObjectStorage {
 
     InputStream open(String objectKey);
 
+    StorageObjectMetadata stat(String objectKey);
+
     void delete(String objectKey);
 
     Optional<URI> createPresignedGet(String objectKey, Duration ttl,

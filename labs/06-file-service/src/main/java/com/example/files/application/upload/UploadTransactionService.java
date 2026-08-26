@@ -107,9 +107,7 @@ public final class UploadTransactionService implements UploadService.Transaction
         if (!(reservation instanceof BlobReservation.Waiting)) return reservation;
         StoredBlob existing = blobs.findByHash(upload.sha256()).orElse(null);
         if (existing == null) return reservation;
-        if (existing.status() == BlobStatus.STAGING && existing.stagingLeaseUntil() != null
-            && !existing.stagingLeaseUntil().isAfter(Instant.now())
-            && existing.stagingSessionId() != null && existing.stagingOwnerToken() != null
+        if (existing.status() == BlobStatus.STAGING && existing.stagingSessionId() != null && existing.stagingOwnerToken() != null
             && blobs.renewOwnershipForRecovery(existing.id(), existing.stagingSessionId(),
                 existing.stagingOwnerToken(), ownerToken, lease)) {
             transactionTemplate.executeWithoutResult(status -> {

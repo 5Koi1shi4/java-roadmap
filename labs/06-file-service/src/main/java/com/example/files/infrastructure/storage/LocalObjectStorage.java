@@ -1,6 +1,8 @@
 package com.example.files.infrastructure.storage;
 
 import com.example.files.application.upload.ObjectStorage;
+import com.example.files.application.upload.StorageObjectMetadata;
+import com.example.files.application.upload.StorageObjectNotFoundException;
 import com.example.files.application.upload.TemporaryObject;
 import com.example.files.config.FileServiceProperties;
 
@@ -149,6 +151,22 @@ public final class LocalObjectStorage implements ObjectStorage {
             return input;
         } catch (IOException ex) {
             throw new UncheckedIOException("cannot open object", ex);
+        }
+    }
+
+    @Override
+    public StorageObjectMetadata stat(String objectKey) {
+        Path path = resolveInsideRoot(objectKey);
+        ensureNamespace(objectKey, namespace(objectKey));
+        try {
+            ensureNoSymlink(path);
+            BasicFileAttributes attributes = Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
+            if (!attributes.isRegularFile()) throw new IllegalArgumentException("object must be a regular file");
+            return new StorageObjectMetadata(attributes.size());
+        } catch (java.nio.file.NoSuchFileException ex) {
+            throw new StorageObjectNotFoundException("object does not exist");
+        } catch (IOException ex) {
+            throw new UncheckedIOException("cannot stat object", ex);
         }
     }
 

@@ -138,9 +138,10 @@ public final class JdbcUploadSessionRepository implements UploadSessionRepositor
             throw new IllegalArgumentException("invalid recovery claim arguments");
         }
         return jdbc.update("UPDATE upload_session SET owner_token=?,lease_until=TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6)),"
+                + "expires_at=IF(expires_at>CURRENT_TIMESTAMP(6),expires_at,TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6))),"
                 + "updated_at=CURRENT_TIMESTAMP(6) WHERE session_id=? AND status IN ('VALIDATED','FINALIZING') "
-                + "AND lease_until<=CURRENT_TIMESTAMP(6) AND expires_at>CURRENT_TIMESTAMP(6)",
-            newOwnerToken.toString(), micros(lease), sessionId.toString()) == 1;
+                + "AND lease_until<=CURRENT_TIMESTAMP(6)",
+            newOwnerToken.toString(), micros(lease), micros(lease), sessionId.toString()) == 1;
     }
 
     @Override

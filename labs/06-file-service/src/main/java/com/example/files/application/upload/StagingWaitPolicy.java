@@ -9,10 +9,6 @@ public final class StagingWaitPolicy {
     private final Duration timeout;
     private final Duration interval;
 
-    public StagingWaitPolicy() {
-        this(Duration.ofSeconds(5), Duration.ofMillis(100));
-    }
-
     public StagingWaitPolicy(Duration timeout, Duration interval) {
         if (timeout == null || interval == null || timeout.isZero() || timeout.isNegative()
             || interval.isZero() || interval.isNegative() || interval.compareTo(timeout) >= 0) {
