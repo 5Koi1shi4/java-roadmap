@@ -1,3 +1,30 @@
+file:
+  max-size: 20MB
+  upload-session-ttl: 1h
+  staging-lease: 2m
+  staging-wait-timeout: 5s
+  staging-poll-interval: 100ms
+  cleanup:
+    batch-size: 50
+    lease: 30s
+    retry-delays: [5s, 30s, 2m, 10m]
+    max-attempts: 5
+    temporary-object-fallback-age: 24h
+  download:
+    max-link-ttl: 2m
+    local-hmac-secret: ${FILE_LOCAL_HMAC_SECRET:}
+  identity:
+    trusted-header-enabled: false
+  maintenance:
+    enabled: false
+  storage:
+    type: ${FILE_STORAGE_TYPE:local}
+    local-root: ${FILE_LOCAL_ROOT:./data/files}
+    minio-endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+    minio-access-key: ${MINIO_ACCESS_KEY:}
+    minio-secret-key: ${MINIO_SECRET_KEY:}
+    minio-bucket: ${MINIO_BUCKET:secure-files}
+
 spring:
   jackson:
     deserialization:
