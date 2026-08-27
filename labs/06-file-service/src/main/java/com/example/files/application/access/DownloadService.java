@@ -103,7 +103,7 @@ public final class DownloadService {
             return new DownloadDescriptor(view.fileId(), actorId, target.objectKey(),
                 SafeDisplayName.from(view.displayName()).value(), view.mediaType(), view.size(), content);
         } catch (RuntimeException | IOException ex) {
-            closeQuietly(opened);
+            closeQuietly(opened, ex, correlationId, actorId, fileId);
             recordFailed(actorId, fileId, correlationId, classify(ex));
             if (ex instanceof StorageObjectNotFoundException) throw new ResourceHiddenException();
             if (ex instanceof RuntimeException runtime) throw runtime;
@@ -239,9 +239,20 @@ public final class DownloadService {
         return "STORAGE_READ_FAILED";
     }
 
-    private static void closeQuietly(InputStream input) {
+    private static void closeQuietly(InputStream input, Throwable original,
+                                    CorrelationId correlationId, long actorId, UUID fileId) {
         if (input == null) return;
-        try { input.close(); } catch (IOException ignored) { }
+        try {
+            input.close();
+        } catch (IOException | RuntimeException closeFailure) {
+            try {
+                original.addSuppressed(closeFailure);
+            } catch (RuntimeException ignoredSuppressionFailure) {
+                // 即使异常对象拒绝 suppressed，也不能覆盖原始读取失败。
+            }
+            LOG.warn("download object close failed correlationId={} actorId={} fileId={} failureCode={}",
+                correlationId.value(), actorId, fileId, "STORAGE_READ_FAILED");
+        }
     }
 
     private record Outcome<T>(T value, boolean hidden) {

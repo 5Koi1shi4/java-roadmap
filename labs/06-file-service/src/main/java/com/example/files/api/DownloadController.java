@@ -109,7 +109,7 @@ public final class DownloadController {
         try {
             headers = downloadHeaders(descriptor);
         } catch (RuntimeException ex) {
-            try { descriptor.close(); } catch (IOException ignored) { }
+            closeAfterFailure(descriptor, ex, actorId, fileId, request, "HEADER_FAILED");
             recordFailure(actorId, fileId, request, "HEADER_FAILED");
             throw ex;
         }
@@ -129,7 +129,13 @@ public final class DownloadController {
             try {
                 descriptor.close();
             } catch (IOException | RuntimeException ex) {
-                if (failure == null) failure = ex;
+                if (failure == null) {
+                    failure = ex;
+                    logCloseFailure(actorId, fileId, request, "STREAM_FAILED");
+                } else {
+                    suppress(failure, ex);
+                    logCloseFailure(actorId, fileId, request, "STREAM_FAILED");
+                }
             }
             if (failure != null) {
                 if (finished.compareAndSet(false, true)) {
@@ -155,7 +161,11 @@ public final class DownloadController {
                     new CallableProcessingInterceptor() {
                         private void abort() {
                             if (finished.compareAndSet(false, true)) {
-                                try { descriptor.close(); } catch (IOException | RuntimeException ignoredClose) { }
+                                try {
+                                    descriptor.close();
+                                } catch (IOException | RuntimeException closeFailure) {
+                                    logCloseFailure(actorId, fileId, request, "ASYNC_ABORTED");
+                                }
                                 recordFailure(actorId, fileId, request, "ASYNC_ABORTED");
                             }
                         }
@@ -177,13 +187,41 @@ public final class DownloadController {
                     });
             } catch (RuntimeException ex) {
                 if (finished.compareAndSet(false, true)) {
-                    try { descriptor.close(); } catch (IOException | RuntimeException ignoredClose) { }
+                    try {
+                        descriptor.close();
+                    } catch (IOException | RuntimeException closeFailure) {
+                        logCloseFailure(actorId, fileId, request, "ASYNC_ABORTED");
+                        suppress(ex, closeFailure);
+                    }
                     recordFailure(actorId, fileId, request, "ASYNC_ABORTED");
                 }
                 throw ex;
             }
         }
         return ResponseEntity.ok().headers(headers).body(body);
+    }
+
+    private void closeAfterFailure(DownloadDescriptor descriptor, Throwable original, long actorId,
+                                   UUID fileId, HttpServletRequest request, String failureCode) {
+        try {
+            descriptor.close();
+        } catch (IOException | RuntimeException closeFailure) {
+            suppress(original, closeFailure);
+            logCloseFailure(actorId, fileId, request, failureCode);
+        }
+    }
+
+    private static void suppress(Throwable original, Throwable additional) {
+        try {
+            original.addSuppressed(additional);
+        } catch (RuntimeException ignoredSuppressionFailure) {
+            // 关闭异常不得覆盖原始异常；日志仍只输出固定失败分类。
+        }
+    }
+
+    private void logCloseFailure(long actorId, UUID fileId, HttpServletRequest request, String failureCode) {
+        LOG.warn("download descriptor close failed correlationId={} actorId={} fileId={} failureCode={}",
+            correlationId(request).value(), actorId, fileId, DownloadFailureReason.fromCode(failureCode).name());
     }
 
     private static long bodySeconds(Map<String, Object> body) {

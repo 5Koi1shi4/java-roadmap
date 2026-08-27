@@ -1,6 +1,7 @@
 package com.example.files.unit;
 
 import com.example.files.api.FileController;
+import com.example.files.api.DownloadController;
 import com.example.files.api.ApiExceptionHandler;
 import com.example.files.api.CorrelationIdFilter;
 import com.example.files.api.security.RequesterIdentityResolver;
@@ -22,6 +23,8 @@ import com.example.files.infrastructure.storage.LocalObjectStorage;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.jdbc.core.JdbcTemplate;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
 import javax.sql.DataSource;
 
@@ -34,10 +37,11 @@ class FileServiceWiringConfigurationTest {
         DataSource dataSource = mock(DataSource.class);
         new ApplicationContextRunner()
             .withUserConfiguration(FileServiceWiringConfiguration.class, TrustedHeaderIdentityConfiguration.class,
-                FileController.class, ApiExceptionHandler.class, CorrelationIdFilter.class)
+                FileController.class, DownloadController.class, ApiExceptionHandler.class, CorrelationIdFilter.class)
             .withBean(FileServiceProperties.class, FileServiceWiringConfigurationTest::properties)
             .withBean(DataSource.class, () -> dataSource)
             .withBean(JdbcTemplate.class, () -> new JdbcTemplate(dataSource))
+            .withBean(MeterRegistry.class, SimpleMeterRegistry::new)
             .withPropertyValues("spring.profiles.active=test", "file.identity.trusted-header-enabled=true")
             .run(context -> {
                 assertThat(context.getStartupFailure()).isNull();
@@ -54,6 +58,8 @@ class FileServiceWiringConfigurationTest {
                 assertThat(context).hasSingleBean(StagingRecoveryService.class);
                 assertThat(context).hasSingleBean(RequesterIdentityResolver.class);
                 assertThat(context).hasSingleBean(FileController.class);
+                assertThat(context.getBeansOfType(DownloadController.class)).hasSize(1);
+                assertThat(context).hasSingleBean(MeterRegistry.class);
             });
     }
 

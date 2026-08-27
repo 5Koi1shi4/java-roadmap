@@ -17,6 +17,7 @@ import org.springframework.util.MultiValueMap;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -68,6 +69,47 @@ class LocalDownloadHttpIT extends SharedMySqlContainer {
             .getStatusCode().value()).isEqualTo(404);
     }
 
+    @Test
+    void deletedFileInvalidatesPreviouslyIssuedLinkAndContent() throws Exception {
+        String fileId = upload(812L);
+        ResponseEntity<String> linkResponse = client.exchange("/api/files/" + fileId + "/download-links",
+            HttpMethod.POST, new HttpEntity<>(headers(812L)), String.class);
+        String path = objectMapper.readTree(linkResponse.getBody()).path("url").asText();
+        assertThat(client.exchange("/api/files/" + fileId, HttpMethod.DELETE,
+            new HttpEntity<>(headers(812L)), String.class).getStatusCode().value()).isEqualTo(204);
+
+        ResponseEntity<String> missing = client.exchange("/api/files/" + UUID.randomUUID() + "/content",
+            HttpMethod.GET, new HttpEntity<>(headers(812L)), String.class);
+        ResponseEntity<String> linked = client.exchange(path, HttpMethod.GET,
+            new HttpEntity<>(headers(812L)), String.class);
+        ResponseEntity<byte[]> content = client.exchange("/api/files/" + fileId + "/content",
+            HttpMethod.GET, new HttpEntity<>(headers(812L)), byte[].class);
+        assertThat(linked.getStatusCode().value()).isEqualTo(404);
+        assertThat(content.getStatusCode().value()).isEqualTo(404);
+        assertThat(withoutCorrelation(linked.getBody())).isEqualTo(withoutCorrelation(missing.getBody()));
+    }
+
+    @Test
+    void fractionalTtlIsRejectedOverQueryAndJsonBody() {
+        String fileId = uploadUnchecked(813L);
+        assertThat(fileId).isNotNull();
+        ResponseEntity<String> query = client.exchange("/api/files/" + fileId
+                + "/download-links?ttlSeconds=1.5", HttpMethod.POST,
+            new HttpEntity<>(headers(813L)), String.class);
+        HttpHeaders jsonHeaders = headers(813L);
+        jsonHeaders.setContentType(MediaType.APPLICATION_JSON);
+        ResponseEntity<String> body = client.exchange("/api/files/" + fileId + "/download-links",
+            HttpMethod.POST, new HttpEntity<>("{\"ttlSeconds\":1.5}", jsonHeaders), String.class);
+        assertBadRequest(query);
+        assertBadRequest(body);
+    }
+
+    @Test
+    void actuatorExposesHealthButNotMetrics() {
+        assertThat(client.getForEntity("/actuator/health", String.class).getStatusCode().value()).isEqualTo(200);
+        assertThat(client.getForEntity("/actuator/metrics", String.class).getStatusCode().value()).isNotEqualTo(200);
+    }
+
     private String upload(long userId) throws Exception {
         HttpHeaders part = new HttpHeaders();
         part.setContentType(MediaType.APPLICATION_PDF);
@@ -82,6 +124,27 @@ class LocalDownloadHttpIT extends SharedMySqlContainer {
             new HttpEntity<>(body, headers(userId)), String.class);
         assertThat(response.getStatusCode().value()).isEqualTo(201);
         return objectMapper.readTree(response.getBody()).path("fileId").asText();
+    }
+
+    private String uploadUnchecked(long userId) {
+        try {
+            return upload(userId);
+        } catch (Exception ex) {
+            throw new AssertionError(ex);
+        }
+    }
+
+    private String withoutCorrelation(String body) throws Exception {
+        JsonNode node = objectMapper.readTree(body);
+        ((com.fasterxml.jackson.databind.node.ObjectNode) node).remove("correlationId");
+        return node.toString();
+    }
+
+    private void assertBadRequest(ResponseEntity<String> response) {
+        assertThat(response.getStatusCode().value()).isEqualTo(400);
+        assertThat(response.getHeaders().getContentType().toString()).isEqualTo("application/json;charset=UTF-8");
+        assertThat(response.getBody()).contains("\"code\":\"INVALID_REQUEST\"")
+            .contains("\"message\":\"请求参数无效\"");
     }
 
     private static HttpHeaders headers(long userId) {
