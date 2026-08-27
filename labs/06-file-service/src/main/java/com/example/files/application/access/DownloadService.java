@@ -16,8 +16,12 @@ import java.io.SequenceInputStream;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
+import java.net.URI;
 import java.util.function.Supplier;
 import java.time.Clock;
+import java.util.Map;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -140,7 +144,6 @@ public final class DownloadService {
 
     public DownloadLink issueLink(long actorId, UUID fileId, Duration ttl, CorrelationId correlationId) {
         require(actorId, fileId, correlationId);
-        if (tokens == null) throw new IllegalStateException("local download signing is unavailable");
         if (ttl == null || ttl.isZero() || ttl.isNegative() || ttl.getNano() != 0 || ttl.compareTo(maxLinkTtl) > 0) {
             throw new IllegalArgumentException("link ttl must be positive and no more than 2 minutes");
         }
@@ -158,8 +161,40 @@ public final class DownloadService {
             return Outcome.success(decision.view());
         });
         if (outcome.hidden()) throw new ResourceHiddenException();
+        FileAccessRepository.DownloadTarget target = access.findDownloadTarget(actorId, fileId)
+            .filter(candidate -> candidate.view().fileId().equals(outcome.value().fileId()))
+            .orElseThrow(ResourceHiddenException::new);
+        Map<String, String> responseHeaders = responseHeaders(outcome.value());
+        java.util.Optional<URI> presigned = storage.createPresignedGet(target.objectKey(), ttl, responseHeaders);
+        if (presigned.isPresent()) {
+            return new DownloadLink(presigned.get().toString(), expiresAt);
+        }
+        if (tokens == null) throw new IllegalStateException("local download signing is unavailable");
         String token = tokens.issue(actorId, fileId, expiresAt);
         return new DownloadLink("/api/local-downloads/" + token, expiresAt);
+    }
+
+    /** 仅传入安全展示名和媒体类型；不会把 bearer URL 或 token 写入审计。 */
+    private static Map<String, String> responseHeaders(FileView view) {
+        SafeDisplayName display = SafeDisplayName.from(view.displayName());
+        String fallback = display.asciiFallback().replace("\"", "_");
+        String encoded = URLEncoder.encode(display.value(), StandardCharsets.UTF_8).replace("+", "%20")
+            .replace("%7E", "~");
+        return Map.of("response-content-type", safeMediaType(view.mediaType()),
+            "response-content-disposition", "attachment; filename=\"" + fallback
+                + "\"; filename*=UTF-8''" + encoded);
+    }
+
+    private static String safeMediaType(String mediaType) {
+        if (mediaType == null || mediaType.isBlank() || mediaType.indexOf('\r') >= 0 || mediaType.indexOf('\n') >= 0) {
+            return "application/octet-stream";
+        }
+        try {
+            org.springframework.http.MediaType.parseMediaType(mediaType);
+            return mediaType;
+        } catch (IllegalArgumentException ex) {
+            return "application/octet-stream";
+        }
     }
 
     public DownloadLink issueLink(com.example.files.api.security.RequesterIdentity actor, UUID fileId,

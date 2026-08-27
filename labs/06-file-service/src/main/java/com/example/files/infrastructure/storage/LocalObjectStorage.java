@@ -195,6 +195,10 @@ public final class LocalObjectStorage implements ObjectStorage {
                                             Map<String, String> responseHeaders) {
         resolveInsideRoot(objectKey);
         ensureNamespace(objectKey, "blobs");
+        if (ttl == null || ttl.isZero() || ttl.isNegative() || ttl.getNano() != 0
+            || ttl.compareTo(Duration.ofMinutes(2)) > 0) {
+            throw new IllegalArgumentException("link ttl must be positive and no more than 2 minutes");
+        }
         return Optional.empty();
     }
 

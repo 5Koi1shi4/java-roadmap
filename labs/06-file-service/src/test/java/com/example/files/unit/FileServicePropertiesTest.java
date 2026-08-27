@@ -8,6 +8,7 @@ import java.time.Duration;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.assertThat;
 
 class FileServicePropertiesTest {
 
@@ -27,6 +28,13 @@ class FileServicePropertiesTest {
             .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> propertiesWithLease(Duration.ofSeconds(5), Duration.ofSeconds(11), Duration.ofMillis(100)))
             .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void masksMinioSecretInConfigurationToString() {
+        FileServiceProperties.Storage storage = new FileServiceProperties.Storage(
+            "minio", "./data/files", "http://localhost:9000", "access", "super-secret", "secure-files");
+        assertThat(storage.toString()).doesNotContain("super-secret").contains("<redacted>");
     }
 
     private static FileServiceProperties propertiesWithMaxSize(DataSize maxSize) {

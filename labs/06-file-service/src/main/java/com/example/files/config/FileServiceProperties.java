@@ -109,7 +109,16 @@ public record FileServiceProperties(
     public record Maintenance(boolean enabled) { }
 
     public record Storage(String type, String localRoot, String minioEndpoint,
-                          String minioAccessKey, String minioSecretKey, String minioBucket) {
+                          String minioAccessKey, String minioSecretKey, String minioBucket,
+                          Duration minioConnectTimeout, Duration minioReadTimeout,
+                          Duration minioWriteTimeout) {
+        /** 保持本地适配器调用方兼容；MinIO 超时采用安全的短默认值。 */
+        public Storage(String type, String localRoot, String minioEndpoint,
+                       String minioAccessKey, String minioSecretKey, String minioBucket) {
+            this(type, localRoot, minioEndpoint, minioAccessKey, minioSecretKey, minioBucket,
+                Duration.ofSeconds(5), Duration.ofSeconds(30), Duration.ofSeconds(30));
+        }
+
         public Storage {
             require(type, "storage.type");
             require(localRoot, "storage.localRoot");
@@ -117,12 +126,50 @@ public record FileServiceProperties(
             require(minioAccessKey, "storage.minioAccessKey");
             require(minioSecretKey, "storage.minioSecretKey");
             require(minioBucket, "storage.minioBucket");
+            require(minioConnectTimeout, "storage.minioConnectTimeout");
+            require(minioReadTimeout, "storage.minioReadTimeout");
+            require(minioWriteTimeout, "storage.minioWriteTimeout");
             if (!type.equals("local") && !type.equals("minio")) {
                 throw new IllegalArgumentException("storage.type must be local or minio");
             }
             if (localRoot.isBlank() || minioEndpoint.isBlank() || minioBucket.isBlank()) {
                 throw new IllegalArgumentException("storage paths, endpoint and bucket must not be blank");
             }
+            if (type.equals("minio")) {
+                try {
+                    java.net.URI endpoint = java.net.URI.create(minioEndpoint);
+                    if (!("http".equalsIgnoreCase(endpoint.getScheme())
+                        || "https".equalsIgnoreCase(endpoint.getScheme()))
+                        || endpoint.getHost() == null || endpoint.getPath().length() > 0) {
+                        throw new IllegalArgumentException("storage.minioEndpoint must be an absolute http(s) URL");
+                    }
+                    if (endpoint.getQuery() != null || endpoint.getFragment() != null || endpoint.getUserInfo() != null) {
+                        throw new IllegalArgumentException("storage.minioEndpoint must not contain query or credentials");
+                    }
+                } catch (IllegalArgumentException ex) {
+                    throw new IllegalArgumentException("storage.minioEndpoint must be an absolute http(s) URL", ex);
+                }
+                if (minioAccessKey.isBlank() || minioSecretKey.isBlank()) {
+                    throw new IllegalArgumentException("MinIO credentials must not be blank");
+                }
+                if (!minioBucket.matches("[a-z0-9][a-z0-9.-]{2,62}")) {
+                    throw new IllegalArgumentException("storage.minioBucket has invalid format");
+                }
+            }
+            positive(minioConnectTimeout, "storage.minioConnectTimeout");
+            positive(minioReadTimeout, "storage.minioReadTimeout");
+            positive(minioWriteTimeout, "storage.minioWriteTimeout");
+        }
+
+        /** Secret 不得随 record 默认 toString 泄露到日志。 */
+        @Override
+        public String toString() {
+            return "Storage[type=" + type + ", localRoot=" + localRoot
+                + ", minioEndpoint=" + minioEndpoint + ", minioAccessKey=" + minioAccessKey
+                + ", minioSecretKey=<redacted>, minioBucket=" + minioBucket
+                + ", minioConnectTimeout=" + minioConnectTimeout
+                + ", minioReadTimeout=" + minioReadTimeout
+                + ", minioWriteTimeout=" + minioWriteTimeout + "]";
         }
     }
 

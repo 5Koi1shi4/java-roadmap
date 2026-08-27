@@ -24,6 +24,9 @@ file:
     minio-access-key: ${MINIO_ACCESS_KEY:}
     minio-secret-key: ${MINIO_SECRET_KEY:}
     minio-bucket: ${MINIO_BUCKET:secure-files}
+    minio-connect-timeout: ${MINIO_CONNECT_TIMEOUT:5s}
+    minio-read-timeout: ${MINIO_READ_TIMEOUT:30s}
+    minio-write-timeout: ${MINIO_WRITE_TIMEOUT:30s}
 
 spring:
   jackson:

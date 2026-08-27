@@ -25,6 +25,7 @@ import com.example.files.infrastructure.persistence.JdbcCleanupTaskRepository;
 import com.example.files.infrastructure.persistence.JdbcFileRepository;
 import com.example.files.infrastructure.persistence.JdbcUploadSessionRepository;
 import com.example.files.infrastructure.storage.LocalObjectStorage;
+import org.springframework.context.annotation.Import;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.context.annotation.Bean;
@@ -43,6 +44,7 @@ import io.micrometer.core.instrument.MeterRegistry;
  * 这样缺失基础设施时应用会在启动阶段失败，而不会由条件 Controller 隐藏配置错误。
  */
 @Configuration(proxyBeanMethods = false)
+@Import(ObjectStorageConfiguration.class)
 public class FileServiceWiringConfiguration {
 
     @Bean
@@ -120,15 +122,6 @@ public class FileServiceWiringConfiguration {
     @Bean
     public UploadInspector uploadInspector(FileServiceProperties properties) {
         return new UploadInspector(properties);
-    }
-
-    @Bean
-    public LocalObjectStorage objectStorage(FileServiceProperties properties) {
-        FileServiceProperties.Storage storage = properties.storage();
-        if (!"local".equals(storage.type())) {
-            throw new IllegalStateException("storage type is not implemented: " + storage.type());
-        }
-        return new LocalObjectStorage(storage);
     }
 
     @Bean

@@ -54,6 +54,20 @@ class DownloadServiceTest {
         assertThat(events.get(0).failureCode()).isEqualTo("INVALID_TOKEN");
     }
 
+    @Test
+    void minioPresignedLinkIsIssuedAfterAccessAuditWithoutLocalToken() {
+        java.util.List<AuditEvent> events = new java.util.ArrayList<>();
+        UUID file = UUID.randomUUID();
+        DownloadService service = new DownloadService(new AuthorizedAccess(file), events::add,
+            new PresigningStorage(), null, null);
+
+        DownloadService.DownloadLink link = service.issueLink(7L, file, Duration.ofSeconds(30), CorrelationId.random());
+
+        assertThat(link.url()).isEqualTo("http://minio.test/secure");
+        assertThat(events).extracting(AuditEvent::action)
+            .containsExactly(AuditAction.DOWNLOAD_LINK_ISSUED);
+    }
+
     private static final class EmptyAccess implements FileAccessRepository {
         @Override public AccessDecision findAccess(long actorId, UUID fileId) { return AccessDecision.hidden(); }
     }
@@ -94,5 +108,11 @@ class DownloadServiceTest {
         @Override public StorageObjectMetadata stat(String k) { throw new UnsupportedOperationException(); }
         @Override public void delete(String k) { throw new UnsupportedOperationException(); }
         @Override public Optional<URI> createPresignedGet(String k, Duration t, Map<String, String> h) { return Optional.empty(); }
+    }
+
+    private static final class PresigningStorage extends EmptyStorage {
+        @Override public Optional<URI> createPresignedGet(String key, Duration ttl, Map<String, String> headers) {
+            return Optional.of(URI.create("http://minio.test/secure"));
+        }
     }
 }
