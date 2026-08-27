@@ -7,6 +7,11 @@ services:
       MYSQL_PASSWORD: ${DB_PASSWORD:-secure_files_local}
       MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root_local}
     ports: ["3312:3306"]
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
   minio:
     image: quay.io/minio/minio:RELEASE.2025-10-15T17-29-55Z
     command: server /data --console-address :9001
@@ -14,3 +19,16 @@ services:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin-local}
     ports: ["9000:9000", "9001:9001"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    depends_on:
+      minio:
+        condition: service_healthy
+    ports: ["8666:8666", "8474:8474"]
+    environment:
+      TOXIPROXY_MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://toxiproxy:8666}

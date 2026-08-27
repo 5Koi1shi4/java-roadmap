@@ -52,6 +52,8 @@ class FileServiceWiringConfigurationTest {
                 assertThat(context).hasSingleBean(JdbcAuditRecorder.class);
                 assertThat(context).hasSingleBean(UploadInspector.class);
                 assertThat(context).hasSingleBean(ObjectStorage.class);
+                assertThat(context).hasSingleBean(LocalObjectStorage.class);
+                assertThat(context.getBean(ObjectStorage.class)).isNotNull();
                 assertThat(context).hasSingleBean(StagingWaitPolicy.class);
                 assertThat(context).hasSingleBean(UploadTransactionService.class);
                 assertThat(context).hasSingleBean(UploadService.class);
