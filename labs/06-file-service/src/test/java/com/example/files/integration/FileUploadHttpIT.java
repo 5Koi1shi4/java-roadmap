@@ -13,9 +13,13 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -31,6 +35,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 class FileUploadHttpIT extends SharedMySqlContainer {
     @Autowired
     private org.springframework.boot.test.web.client.TestRestTemplate client;
+
+    @Autowired
+    private ObjectMapper objectMapper;
 
     @Test
     void missingIdentityIs401AndResponseIsUtf8() {
@@ -50,6 +57,22 @@ class FileUploadHttpIT extends SharedMySqlContainer {
     }
 
     @Test
+    void commaSeparatedIdentityHeaderIs401() {
+        HttpHeaders headers = baseHeaders();
+        headers.set("X-Trusted-User-Id", "42,43");
+        ResponseEntity<String> response = postWithHeaders("资料.pdf", "application/pdf", pdfBytes(), headers);
+        assertUnauthorized(response);
+    }
+
+    @Test
+    void commaSeparatedIdentityHeaderWithWhitespaceIs401() {
+        HttpHeaders headers = baseHeaders();
+        headers.set("X-Trusted-User-Id", "42, 43");
+        ResponseEntity<String> response = postWithHeaders("资料.pdf", "application/pdf", pdfBytes(), headers);
+        assertUnauthorized(response);
+    }
+
+    @Test
     void acceptsJpegPngWebpAndPdfAndAllowsMissingExtension() {
         Map<String, byte[]> payloads = Map.of(
             "照片.jpg", jpegBytes(), "图像.png", pngBytes(), "动画.webp", webpBytes(), "课程资料.pdf", pdfBytes(),
@@ -66,6 +89,25 @@ class FileUploadHttpIT extends SharedMySqlContainer {
                 .doesNotContain("hash", "blob", "objectKey", "dedup", "deduplication");
             if (name.equals("课程资料.pdf")) assertThat(response.getBody()).contains("课程资料.pdf");
         });
+    }
+
+    @Test
+    void chinesePdfSuccessHasOnlyLogicalMetadataWithValidUuid() throws Exception {
+        byte[] bytes = pdfBytes();
+        ResponseEntity<String> response = post("课程资料.pdf", "application/pdf", bytes, "42");
+        assertThat(response.getStatusCode().value()).isEqualTo(201);
+        assertThat(response.getHeaders().getContentType().toString()).isEqualTo("application/json;charset=UTF-8");
+
+        JsonNode body = objectMapper.readTree(response.getBody());
+        String fileId = body.path("fileId").asText();
+        assertThat(UUID.fromString(fileId)).isNotNull();
+        assertThat(body.path("displayName").asText()).isEqualTo("课程资料.pdf");
+        assertThat(body.path("mediaType").asText()).isEqualTo("application/pdf");
+        assertThat(body.path("size").asLong()).isEqualTo(bytes.length);
+        assertThat(Instant.parse(body.path("createdAt").asText())).isNotNull();
+        assertThat(body.fieldNames()).toIterable().containsExactlyInAnyOrder(
+            "fileId", "displayName", "mediaType", "size", "createdAt");
+        assertThat(response.getBody()).doesNotContain("hash", "blob", "objectKey", "dedup", "deduplication");
     }
 
     @Test
@@ -117,6 +159,19 @@ class FileUploadHttpIT extends SharedMySqlContainer {
         HttpHeaders headers = new HttpHeaders();
         headers.setAccept(java.util.List.of(MediaType.APPLICATION_JSON));
         return headers;
+    }
+
+    private void assertUnauthorized(ResponseEntity<String> response) {
+        assertThat(response.getStatusCode().value()).isEqualTo(401);
+        assertThat(response.getHeaders().getContentType().toString()).isEqualTo("application/json;charset=UTF-8");
+        try {
+            JsonNode body = objectMapper.readTree(response.getBody());
+            assertThat(body.path("code").asText()).isEqualTo("UNAUTHORIZED");
+            assertThat(body.path("message").asText()).isEqualTo("未认证");
+            assertThat(body.path("correlationId").asText()).hasSize(22).matches("[A-Za-z0-9_-]{22}");
+        } catch (Exception ex) {
+            throw new AssertionError("响应不是有效 UTF-8 JSON 错误", ex);
+        }
     }
 
     private static byte[] pdfBytes() { return "%PDF-1.7\ncontent".getBytes(StandardCharsets.US_ASCII); }
