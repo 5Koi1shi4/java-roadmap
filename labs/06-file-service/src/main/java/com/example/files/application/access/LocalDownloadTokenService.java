@@ -37,7 +37,8 @@ public final class LocalDownloadTokenService {
         if (encoded.length < 32) throw new IllegalArgumentException("download signing secret must be at least 32 bytes");
         this.secret = encoded.clone();
         this.clock = clock == null ? Clock.systemUTC() : clock;
-        if (maxTtl == null || maxTtl.isZero() || maxTtl.isNegative() || maxTtl.compareTo(MAX_TTL) > 0) {
+        if (maxTtl == null || maxTtl.isZero() || maxTtl.isNegative() || maxTtl.getNano() != 0
+            || maxTtl.compareTo(MAX_TTL) > 0) {
             throw new IllegalArgumentException("invalid token maximum TTL");
         }
         this.maxTtl = maxTtl;
@@ -59,12 +60,11 @@ public final class LocalDownloadTokenService {
 
     public String issue(long actorId, UUID fileId, Duration ttl) {
         if (actorId <= 0 || fileId == null) throw new IllegalArgumentException("invalid token identity");
-        if (ttl == null || ttl.isZero() || ttl.isNegative() || ttl.compareTo(maxTtl) > 0) {
+        if (ttl == null || ttl.isZero() || ttl.isNegative() || ttl.getNano() != 0 || ttl.compareTo(maxTtl) > 0) {
             throw new IllegalArgumentException("token ttl must be positive and no more than 2 minutes");
         }
-        Instant expires = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.SECONDS)
-            .plusSeconds(ttl.getSeconds());
-        return issue(actorId, fileId, expires);
+        Instant issuedAt = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+        return issueAt(actorId, fileId, issuedAt.plusSeconds(ttl.getSeconds()));
     }
 
     public String issue(long actorId, UUID fileId, Instant expiresAt) {
@@ -74,6 +74,10 @@ public final class LocalDownloadTokenService {
             || Duration.between(issuedAt, expiresAt).compareTo(maxTtl) > 0) {
             throw new IllegalArgumentException("invalid token expiry");
         }
+        return issueAt(actorId, fileId, expiresAt);
+    }
+
+    private String issueAt(long actorId, UUID fileId, Instant expiresAt) {
         byte[] nonce = new byte[NONCE_BYTES];
         random.nextBytes(nonce);
         String payload = "1|" + fileId + "|" + actorId + "|" + expiresAt.getEpochSecond()

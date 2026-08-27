@@ -63,6 +63,7 @@ public final class DownloadService {
         this.transactions = transactions;
         this.tokens = tokens;
         if (maxLinkTtl == null || maxLinkTtl.isZero() || maxLinkTtl.isNegative()
+            || maxLinkTtl.getNano() != 0
             || maxLinkTtl.compareTo(LocalDownloadTokenService.MAX_TTL) > 0) {
             throw new IllegalArgumentException("invalid maximum link TTL");
         }
@@ -103,8 +104,8 @@ public final class DownloadService {
                 SafeDisplayName.from(view.displayName()).value(), view.mediaType(), view.size(), content);
         } catch (RuntimeException | IOException ex) {
             closeQuietly(opened);
-            recordResult(correlationId, actorId, fileId, AuditAction.DOWNLOAD_FAILED,
-                "FAILED", classify(ex));
+            recordFailed(actorId, fileId, correlationId, classify(ex));
+            if (ex instanceof StorageObjectNotFoundException) throw new ResourceHiddenException();
             if (ex instanceof RuntimeException runtime) throw runtime;
             throw new java.io.UncheckedIOException((IOException) ex);
         }
@@ -125,7 +126,7 @@ public final class DownloadService {
     }
 
     public void recordFailed(long actorId, UUID fileId, CorrelationId correlationId, String failureCode) {
-        String code = failureCode == null ? "STREAM_FAILED" : failureCode;
+        String code = DownloadFailureReason.fromCode(failureCode).name();
         try {
             recordResult(correlationId, actorId, fileId, AuditAction.DOWNLOAD_FAILED, "FAILED", code);
         } finally {

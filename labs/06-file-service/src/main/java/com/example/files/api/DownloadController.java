@@ -4,6 +4,7 @@ import com.example.files.api.security.RequesterIdentity;
 import com.example.files.api.security.RequesterIdentityResolver;
 import com.example.files.api.security.RequesterUnauthenticatedException;
 import com.example.files.application.access.DownloadDescriptor;
+import com.example.files.application.access.DownloadFailureReason;
 import com.example.files.application.access.DownloadService;
 import com.example.files.application.audit.CorrelationId;
 import org.springframework.http.HttpHeaders;
@@ -130,29 +131,57 @@ public final class DownloadController {
             } catch (IOException | RuntimeException ex) {
                 if (failure == null) failure = ex;
             }
-            if (failure == null) {
-                try { downloads.recordCompleted(actorId, fileId, correlationId(request)); }
-                catch (RuntimeException ex) { failure = ex; }
-            }
             if (failure != null) {
-                recordFailure(actorId, fileId, request, "STREAM_FAILED");
-                finished.set(true);
+                if (finished.compareAndSet(false, true)) {
+                    recordFailure(actorId, fileId, request, "STREAM_FAILED");
+                }
                 if (failure instanceof IOException io) throw io;
                 if (failure instanceof RuntimeException runtime) throw runtime;
                 throw new IllegalStateException(failure);
             }
-            finished.set(true);
+            // 终态只能由一个回调认领；异步超时已先认领时禁止写入 COMPLETED。
+            if (!finished.compareAndSet(false, true)) return;
+            try {
+                downloads.recordCompleted(actorId, fileId, correlationId(request));
+            } catch (RuntimeException ex) {
+                // 成功审计失败时由同一终态所有者补写失败审计和失败指标。
+                recordFailure(actorId, fileId, request, "STREAM_FAILED");
+                throw ex;
+            }
         };
         if (request != null) {
-            WebAsyncUtils.getAsyncManager(request).registerCallableInterceptor("download-close-" + fileId,
-                new CallableProcessingInterceptor() {
-                    @Override public <T> void afterCompletion(NativeWebRequest ignored, Callable<T> task) {
-                        if (finished.compareAndSet(false, true)) {
-                            try { descriptor.close(); } catch (IOException ignoredClose) { }
-                            recordFailure(actorId, fileId, request, "ASYNC_ABORTED");
+            try {
+                WebAsyncUtils.getAsyncManager(request).registerCallableInterceptor("download-close-" + fileId,
+                    new CallableProcessingInterceptor() {
+                        private void abort() {
+                            if (finished.compareAndSet(false, true)) {
+                                try { descriptor.close(); } catch (IOException | RuntimeException ignoredClose) { }
+                                recordFailure(actorId, fileId, request, "ASYNC_ABORTED");
+                            }
                         }
-                    }
-                });
+
+                        @Override public <T> Object handleTimeout(NativeWebRequest ignored, Callable<T> task) {
+                            abort();
+                            return RESULT_NONE;
+                        }
+
+                        @Override public <T> Object handleError(NativeWebRequest ignored, Callable<T> task,
+                                                                 Throwable failure) {
+                            abort();
+                            return RESULT_NONE;
+                        }
+
+                        @Override public <T> void afterCompletion(NativeWebRequest ignored, Callable<T> task) {
+                            abort();
+                        }
+                    });
+            } catch (RuntimeException ex) {
+                if (finished.compareAndSet(false, true)) {
+                    try { descriptor.close(); } catch (IOException | RuntimeException ignoredClose) { }
+                    recordFailure(actorId, fileId, request, "ASYNC_ABORTED");
+                }
+                throw ex;
+            }
         }
         return ResponseEntity.ok().headers(headers).body(body);
     }
@@ -173,11 +202,12 @@ public final class DownloadController {
     }
 
     private void recordFailure(long actorId, UUID fileId, HttpServletRequest request, String code) {
+        String safeCode = DownloadFailureReason.fromCode(code).name();
         try {
-            downloads.recordFailed(actorId, fileId, correlationId(request), code);
+            downloads.recordFailed(actorId, fileId, correlationId(request), safeCode);
         } catch (RuntimeException ex) {
             LOG.warn("download failure audit unavailable correlationId={} fileId={} failureCode={}",
-                correlationId(request).value(), fileId, code);
+                correlationId(request).value(), fileId, safeCode);
         }
     }
 

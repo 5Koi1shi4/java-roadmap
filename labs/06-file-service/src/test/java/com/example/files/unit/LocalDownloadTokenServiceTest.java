@@ -55,6 +55,8 @@ class LocalDownloadTokenServiceTest {
             .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> service.issue(7L, FILE, Duration.ofSeconds(121)))
             .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> service.issue(7L, FILE, Duration.ofMillis(1)))
+            .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

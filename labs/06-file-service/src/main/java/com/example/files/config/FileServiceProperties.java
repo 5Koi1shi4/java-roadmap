@@ -95,6 +95,9 @@ public record FileServiceProperties(
             require(maxLinkTtl, "download.maxLinkTtl");
             require(localHmacSecret, "download.localHmacSecret");
             positive(maxLinkTtl, "download.maxLinkTtl");
+            if (maxLinkTtl.getNano() != 0) {
+                throw new IllegalArgumentException("download.maxLinkTtl must be an integer number of seconds");
+            }
             if (maxLinkTtl.compareTo(SECURITY_MAX_LINK_TTL) > 0) {
                 throw new IllegalArgumentException("download.maxLinkTtl must not exceed 2 minutes");
             }

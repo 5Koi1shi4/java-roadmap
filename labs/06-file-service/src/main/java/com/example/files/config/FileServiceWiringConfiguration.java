@@ -25,7 +25,6 @@ import com.example.files.infrastructure.persistence.JdbcCleanupTaskRepository;
 import com.example.files.infrastructure.persistence.JdbcFileRepository;
 import com.example.files.infrastructure.persistence.JdbcUploadSessionRepository;
 import com.example.files.infrastructure.storage.LocalObjectStorage;
-import com.example.files.api.DownloadController;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.context.annotation.Bean;
@@ -37,6 +36,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import javax.sql.DataSource;
 import java.time.Clock;
+import io.micrometer.core.instrument.MeterRegistry;
 
 /**
  * 生产上传链路的明确 Spring 组装点。每个端口均绑定真实 JDBC、文件存储和事务实现，
@@ -113,14 +113,8 @@ public class FileServiceWiringConfiguration {
     }
 
     @Bean
-    public DownloadTelemetry downloadTelemetry() {
-        return new DefaultDownloadTelemetry();
-    }
-
-    @Bean
-    public DownloadController downloadController(DownloadService downloads,
-                                                 com.example.files.api.security.RequesterIdentityResolver identities) {
-        return new DownloadController(downloads, identities);
+    public DownloadTelemetry downloadTelemetry(ObjectProvider<MeterRegistry> registry) {
+        return new DefaultDownloadTelemetry(registry.getIfAvailable());
     }
 
     @Bean
