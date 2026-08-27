@@ -26,7 +26,7 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
 
-/** Streaming download and actor-bound local link HTTP boundary. */
+/** 流式下载与身份绑定本地链接的 HTTP 边界。 */
 @RestController
 @RequestMapping
 public final class DownloadController {
@@ -44,42 +44,19 @@ public final class DownloadController {
         RequesterIdentity identity = identity(request);
         UUID id = UUID.fromString(fileId);
         DownloadDescriptor descriptor = downloads.authorizeDownload(identity.userId(), id, correlationId(request));
-        HttpHeaders headers = downloadHeaders(descriptor);
-        StreamingResponseBody body = output -> {
-            boolean completed = false;
-            try (descriptor) {
-                byte[] buffer = new byte[8192];
-                int n;
-                while ((n = descriptor.content().read(buffer)) != -1) {
-                    if (n > 0) output.write(buffer, 0, n);
-                }
-                output.flush();
-                completed = true;
-                downloads.recordCompleted(identity.userId(), id, correlationId(request));
-            } catch (IOException | RuntimeException ex) {
-                if (!completed) {
-                    try {
-                        downloads.recordFailed(identity.userId(), id, correlationId(request), "STREAM_FAILED");
-                    } catch (RuntimeException ignored) { }
-                }
-                if (ex instanceof IOException io) throw io;
-                throw ex;
-            }
-        };
-        return ResponseEntity.ok().headers(headers).body(body);
+        return responseForDescriptor(descriptor, identity.userId(), id, request);
     }
 
     @PostMapping(path = "/api/files/{fileId}/download-links", produces = "application/json;charset=UTF-8")
     public ResponseEntity<DownloadLinkResponse> issueLink(@PathVariable String fileId,
-                                                           @RequestParam(name = "ttlSeconds", required = false) Long ttlSeconds,
+                                                           @RequestParam(name = "ttlSeconds", required = false) String ttlSeconds,
                                                            @RequestBody(required = false) Map<String, Object> body,
                                                            HttpServletRequest request) {
         RequesterIdentity identity = identity(request);
         UUID id = UUID.fromString(fileId);
-        long seconds = ttlSeconds == null ? bodySeconds(body) : ttlSeconds;
-        if (seconds <= 0) seconds = 120;
-        DownloadService.DownloadLink link = downloads.issueLink(identity.userId(), id,
-            Duration.ofSeconds(seconds), correlationId(request));
+        Duration ttl = ttlSeconds == null && (body == null || body.get("ttlSeconds") == null)
+            ? downloads.defaultLinkTtl() : Duration.ofSeconds(ttlSeconds == null ? bodySeconds(body) : strictSeconds(ttlSeconds));
+        DownloadService.DownloadLink link = downloads.issueLink(identity.userId(), id, ttl, correlationId(request));
         return ResponseEntity.ok().contentType(new MediaType(MediaType.APPLICATION_JSON, StandardCharsets.UTF_8))
             .body(new DownloadLinkResponse(link.url(), link.expiresAt()));
     }
@@ -87,24 +64,8 @@ public final class DownloadController {
     @GetMapping("/api/local-downloads/{token}")
     public ResponseEntity<StreamingResponseBody> redeem(@PathVariable String token, HttpServletRequest request) {
         RequesterIdentity identity = identity(request);
-        UUID tokenFile = null;
         DownloadDescriptor descriptor = downloads.redeem(token, identity.userId(), correlationId(request));
-        HttpHeaders headers = downloadHeaders(descriptor);
-        StreamingResponseBody body = output -> {
-            try (descriptor) {
-                byte[] buffer = new byte[8192];
-                int n;
-                while ((n = descriptor.content().read(buffer)) != -1) if (n > 0) output.write(buffer, 0, n);
-                output.flush();
-                downloads.recordCompleted(identity.userId(), descriptor.fileId(), correlationId(request));
-            } catch (IOException | RuntimeException ex) {
-                try { downloads.recordFailed(identity.userId(), descriptor.fileId(), correlationId(request), "STREAM_FAILED"); }
-                catch (RuntimeException ignored) { }
-                if (ex instanceof IOException io) throw io;
-                throw ex;
-            }
-        };
-        return ResponseEntity.ok().headers(headers).body(body);
+        return responseForDescriptor(descriptor, identity.userId(), descriptor.fileId(), request);
     }
 
     private RequesterIdentity identity(HttpServletRequest request) {
@@ -132,11 +93,70 @@ public final class DownloadController {
         return headers;
     }
 
+    private ResponseEntity<StreamingResponseBody> responseForDescriptor(DownloadDescriptor descriptor,
+                                                                          long actorId, UUID fileId,
+                                                                          HttpServletRequest request) {
+        HttpHeaders headers;
+        try {
+            headers = downloadHeaders(descriptor);
+        } catch (RuntimeException ex) {
+            try { descriptor.close(); } catch (IOException ignored) { }
+            try { downloads.recordFailed(actorId, fileId, correlationId(request), "HEADER_FAILED"); }
+            catch (RuntimeException ignored) { }
+            throw ex;
+        }
+        StreamingResponseBody body = output -> {
+            Throwable failure = null;
+            try {
+                byte[] buffer = new byte[8192];
+                int n;
+                while ((n = descriptor.content().read(buffer)) != -1) {
+                    if (n > 0) output.write(buffer, 0, n);
+                }
+                output.flush();
+            } catch (IOException | RuntimeException ex) {
+                failure = ex;
+            }
+            try {
+                descriptor.close();
+            } catch (IOException | RuntimeException ex) {
+                if (failure == null) failure = ex;
+            }
+            if (failure == null) {
+                try { downloads.recordCompleted(actorId, fileId, correlationId(request)); }
+                catch (RuntimeException ex) { failure = ex; }
+            }
+            if (failure != null) {
+                try { downloads.recordFailed(actorId, fileId, correlationId(request), "STREAM_FAILED"); }
+                catch (RuntimeException ignored) { }
+                if (failure instanceof IOException io) throw io;
+                if (failure instanceof RuntimeException runtime) throw runtime;
+                throw new IllegalStateException(failure);
+            }
+        };
+        return ResponseEntity.ok().headers(headers).body(body);
+    }
+
     private static long bodySeconds(Map<String, Object> body) {
-        if (body == null || body.isEmpty() || body.get("ttlSeconds") == null) return 120;
+        if (body == null || body.isEmpty() || body.get("ttlSeconds") == null) {
+            throw new IllegalArgumentException("ttlSeconds is required");
+        }
         Object value = body.get("ttlSeconds");
-        if (value instanceof Number number) return number.longValue();
+        if (value instanceof Number number) {
+            if (number instanceof Byte || number instanceof Short || number instanceof Integer || number instanceof Long) {
+                return number.longValue();
+            }
+            throw new IllegalArgumentException("ttlSeconds must be an integer");
+        }
         try { return Long.parseLong(value.toString()); }
+        catch (NumberFormatException ex) { throw new IllegalArgumentException("invalid ttlSeconds"); }
+    }
+
+    private static long strictSeconds(String value) {
+        if (value == null || !value.matches("[1-9][0-9]*")) {
+            throw new IllegalArgumentException("ttlSeconds must be a positive integer");
+        }
+        try { return Long.parseLong(value); }
         catch (NumberFormatException ex) { throw new IllegalArgumentException("invalid ttlSeconds"); }
     }
 }

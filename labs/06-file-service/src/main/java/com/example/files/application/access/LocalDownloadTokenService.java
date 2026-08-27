@@ -13,7 +13,7 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.UUID;
 
-/** Short-lived, actor-bound token for the local download endpoint. */
+/** 本地下载端点使用的短时、身份绑定令牌。 */
 public final class LocalDownloadTokenService {
     public static final Duration MAX_TTL = Duration.ofMinutes(2);
     private static final int NONCE_BYTES = 16;
@@ -21,17 +21,26 @@ public final class LocalDownloadTokenService {
     private final byte[] secret;
     private final Clock clock;
     private final SecureRandom random;
+    private final Duration maxTtl;
 
     public LocalDownloadTokenService(String secret) {
         this(secret, Clock.systemUTC());
     }
 
     public LocalDownloadTokenService(String secret, Clock clock) {
+        this(secret, clock, MAX_TTL);
+    }
+
+    public LocalDownloadTokenService(String secret, Clock clock, Duration maxTtl) {
         if (secret == null) throw new IllegalArgumentException("download signing secret is required");
         byte[] encoded = secret.getBytes(StandardCharsets.UTF_8);
         if (encoded.length < 32) throw new IllegalArgumentException("download signing secret must be at least 32 bytes");
         this.secret = encoded.clone();
         this.clock = clock == null ? Clock.systemUTC() : clock;
+        if (maxTtl == null || maxTtl.isZero() || maxTtl.isNegative() || maxTtl.compareTo(MAX_TTL) > 0) {
+            throw new IllegalArgumentException("invalid token maximum TTL");
+        }
+        this.maxTtl = maxTtl;
         this.random = new SecureRandom();
     }
 
@@ -44,12 +53,13 @@ public final class LocalDownloadTokenService {
     }
 
     public LocalDownloadTokenService(FileServiceProperties.Download download, Clock clock) {
-        this(download == null ? null : download.localHmacSecret(), clock);
+        this(download == null ? null : download.localHmacSecret(), clock,
+            download == null ? null : download.maxLinkTtl());
     }
 
     public String issue(long actorId, UUID fileId, Duration ttl) {
         if (actorId <= 0 || fileId == null) throw new IllegalArgumentException("invalid token identity");
-        if (ttl == null || ttl.isZero() || ttl.isNegative() || ttl.compareTo(MAX_TTL) > 0) {
+        if (ttl == null || ttl.isZero() || ttl.isNegative() || ttl.compareTo(maxTtl) > 0) {
             throw new IllegalArgumentException("token ttl must be positive and no more than 2 minutes");
         }
         Instant expires = clock.instant().plus(ttl);
@@ -73,6 +83,7 @@ public final class LocalDownloadTokenService {
     public Claims verify(String token, long actorId) {
         if (actorId <= 0 || token == null || token.isBlank()) throw invalid();
         try {
+            if (token.length() > 512) throw invalid();
             String[] parts = token.split("\\.", -1);
             if (parts.length != 2 || parts[0].isEmpty() || parts[1].isEmpty()) throw invalid();
             byte[] payloadBytes = decode(parts[0]);
@@ -114,7 +125,9 @@ public final class LocalDownloadTokenService {
 
     private static byte[] decode(String value) {
         if (!value.matches("[A-Za-z0-9_-]+")) throw invalid();
-        return Base64.getUrlDecoder().decode(value);
+        byte[] decoded = Base64.getUrlDecoder().decode(value);
+        if (!encode(decoded).equals(value)) throw invalid();
+        return decoded;
     }
 
     private static long parsePositiveLong(String value) {

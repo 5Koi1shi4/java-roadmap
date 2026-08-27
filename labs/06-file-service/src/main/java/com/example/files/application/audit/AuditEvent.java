@@ -6,7 +6,7 @@ import java.util.UUID;
 /** 审计事件数据；不允许携带令牌、对象 Key、哈希或原始异常。 */
 public record AuditEvent(CorrelationId correlationId, long actorId, AuditAction action,
                          UUID fileId, Long targetUserId, String result,
-                         String failureCode, String clientTraceId, Instant createdAt) {
+                         String failureCode, String clientTraceId, Instant createdAt, Instant expiresAt) {
     public AuditEvent {
         if (correlationId == null || actorId <= 0 || action == null
             || result == null || result.isBlank() || result.length() > 24 || createdAt == null) {
@@ -25,6 +25,13 @@ public record AuditEvent(CorrelationId correlationId, long actorId, AuditAction 
 
     public AuditEvent(CorrelationId correlationId, long actorId, AuditAction action,
                       UUID fileId, Long targetUserId, String result, String failureCode) {
-        this(correlationId, actorId, action, fileId, targetUserId, result, failureCode, null, Instant.now());
+        this(correlationId, actorId, action, fileId, targetUserId, result, failureCode, null, Instant.now(), null);
+    }
+
+    public AuditEvent(CorrelationId correlationId, long actorId, AuditAction action,
+                      UUID fileId, Long targetUserId, String result, String failureCode,
+                      String clientTraceId, Instant createdAt) {
+        this(correlationId, actorId, action, fileId, targetUserId, result, failureCode,
+            clientTraceId, createdAt, null);
     }
 }

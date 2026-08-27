@@ -57,6 +57,17 @@ class LocalDownloadTokenServiceTest {
             .isInstanceOf(IllegalArgumentException.class);
     }
 
+    @Test
+    void rejectsNonCanonicalBase64Parts() {
+        LocalDownloadTokenService service = service();
+        String token = service.issue(7L, FILE, Duration.ofSeconds(30));
+        String[] parts = token.split("\\.");
+        // 即使解码字节相同，也不得接受非规范的末尾 Base64 字符。
+        String nonCanonicalPayload = parts[0] + "A";
+        assertThatThrownBy(() -> service.verify(nonCanonicalPayload + "." + parts[1], 7L))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
     private static LocalDownloadTokenService service() {
         return new LocalDownloadTokenService(SECRET, Clock.fixed(NOW, ZoneOffset.UTC));
     }

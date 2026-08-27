@@ -19,4 +19,9 @@ class SafeDisplayNameTest {
         assertThatThrownBy(() -> SafeDisplayName.from(" \t\r\n "))
             .isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test
+    void asciiFallbackKeepsExtensionWhenNameHasNoAsciiStem() {
+        assertThat(SafeDisplayName.from("资料.pdf").asciiFallback()).isEqualTo("download.pdf");
+    }
 }

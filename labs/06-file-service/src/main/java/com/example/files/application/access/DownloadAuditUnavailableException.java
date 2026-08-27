@@ -1,6 +1,6 @@
 package com.example.files.application.access;
 
-/** Fail-closed marker for an unavailable mandatory download audit sink. */
+/** 强制下载审计不可用时的 fail-close 标记。 */
 public final class DownloadAuditUnavailableException extends RuntimeException {
     public DownloadAuditUnavailableException(Throwable cause) { super(cause); }
 }

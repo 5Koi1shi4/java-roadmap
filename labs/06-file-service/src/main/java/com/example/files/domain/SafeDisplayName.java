@@ -71,6 +71,7 @@ public record SafeDisplayName(String value) {
         String normalized = Normalizer.normalize(value, Normalizer.Form.NFKD)
             .replaceAll("[^\\p{ASCII}]", "");
         String fallback = normalized.replaceAll("[^A-Za-z0-9._ -]", "_").trim();
+        if (fallback.startsWith(".")) fallback = "download" + fallback;
         return fallback.isEmpty() ? "download" : fallback;
     }
 

@@ -8,10 +8,7 @@ public interface FileAccessRepository {
     /** 必须使用一条存在性和权限合并查询，且不可返回不可读文件元数据。 */
     AccessDecision findAccess(long actorId, UUID fileId);
 
-    /**
-     * Resolves the physical target only after the caller has committed its
-     * authorization audit. Implementations must repeat the current ACL check.
-     */
+    /** 调用方提交授权审计后才解析物理目标；实现必须重复当前 ACL 检查。 */
     default Optional<DownloadTarget> findDownloadTarget(long actorId, UUID fileId) {
         return Optional.empty();
     }
@@ -42,7 +39,7 @@ public interface FileAccessRepository {
         throw new UnsupportedOperationException("delete is not supported");
     }
 
-    /** Physical storage capability intentionally kept separate from FileView. */
+    /** 物理存储能力与逻辑 FileView 分离，避免普通元数据泄露。 */
     record DownloadTarget(FileView view, String objectKey) {
         public DownloadTarget {
             if (view == null || objectKey == null || objectKey.isBlank()) {

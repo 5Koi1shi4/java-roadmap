@@ -34,6 +34,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import javax.sql.DataSource;
+import java.time.Clock;
 
 /**
  * 生产上传链路的明确 Spring 组装点。每个端口均绑定真实 JDBC、文件存储和事务实现，
@@ -90,16 +91,22 @@ public class FileServiceWiringConfiguration {
 
     @Bean
     @ConditionalOnExpression("'${file.download.local-hmac-secret:}'.length() >= 32")
-    public LocalDownloadTokenService localDownloadTokenService(FileServiceProperties properties) {
-        return new LocalDownloadTokenService(properties.download());
+    public LocalDownloadTokenService localDownloadTokenService(FileServiceProperties properties, Clock downloadClock) {
+        return new LocalDownloadTokenService(properties.download(), downloadClock);
+    }
+
+    @Bean
+    public Clock downloadClock() {
+        return Clock.systemUTC();
     }
 
     @Bean
     public DownloadService downloadService(FileAccessRepository repository, AuditRecorder audits,
                                            ObjectStorage storage, TransactionTemplate transactionTemplate,
-                                           ObjectProvider<LocalDownloadTokenService> tokens) {
+                                           ObjectProvider<LocalDownloadTokenService> tokens,
+                                           FileServiceProperties properties, Clock downloadClock) {
         return new DownloadService(repository, audits, storage, transactionTemplate,
-            tokens.getIfAvailable());
+            tokens.getIfAvailable(), properties.download().maxLinkTtl(), downloadClock);
     }
 
     @Bean

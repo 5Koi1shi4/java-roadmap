@@ -15,11 +15,11 @@ import java.io.InputStream;
 import java.io.SequenceInputStream;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Supplier;
+import java.time.Clock;
 
-/** Coordinates short authorization transactions and streaming object reads. */
+/** 协调短授权事务与对象流读取。 */
 public final class DownloadService {
     private static final int PREFETCH_BYTES = 8192;
     private final FileAccessRepository access;
@@ -27,41 +27,57 @@ public final class DownloadService {
     private final ObjectStorage storage;
     private final TransactionTemplate transactions;
     private final LocalDownloadTokenService tokens;
+    private final Duration maxLinkTtl;
+    private final Clock clock;
 
     public DownloadService(FileAccessRepository access, AuditRecorder audits, ObjectStorage storage) {
-        this(access, audits, storage, null, null);
+        this(access, audits, storage, null, null, LocalDownloadTokenService.MAX_TTL, Clock.systemUTC());
     }
 
     public DownloadService(FileAccessRepository access, AuditRecorder audits, ObjectStorage storage,
                            TransactionTemplate transactions) {
-        this(access, audits, storage, transactions, null);
+        this(access, audits, storage, transactions, null, LocalDownloadTokenService.MAX_TTL, Clock.systemUTC());
     }
 
     public DownloadService(FileAccessRepository access, AuditRecorder audits, ObjectStorage storage,
                            TransactionTemplate transactions, LocalDownloadTokenService tokens) {
+        this(access, audits, storage, transactions, tokens, LocalDownloadTokenService.MAX_TTL, Clock.systemUTC());
+    }
+
+    public DownloadService(FileAccessRepository access, AuditRecorder audits, ObjectStorage storage,
+                           TransactionTemplate transactions, LocalDownloadTokenService tokens,
+                           Duration maxLinkTtl, Clock clock) {
         this.access = java.util.Objects.requireNonNull(access, "access");
         this.audits = java.util.Objects.requireNonNull(audits, "audits");
         this.storage = java.util.Objects.requireNonNull(storage, "storage");
         this.transactions = transactions;
         this.tokens = tokens;
+        if (maxLinkTtl == null || maxLinkTtl.isZero() || maxLinkTtl.isNegative()
+            || maxLinkTtl.compareTo(LocalDownloadTokenService.MAX_TTL) > 0) {
+            throw new IllegalArgumentException("invalid maximum link TTL");
+        }
+        this.maxLinkTtl = maxLinkTtl;
+        this.clock = clock == null ? Clock.systemUTC() : clock;
     }
 
-    /** Authorize and pre-open the stream; no successful HTTP response can start before this returns. */
+    /** 授权并预打开流；该方法返回前不得开始成功 HTTP 响应。 */
     public DownloadDescriptor authorizeDownload(long actorId, UUID fileId, CorrelationId correlationId) {
         require(actorId, fileId, correlationId);
-        FileView view = inTransaction(() -> {
+        Outcome<FileView> outcome = inTransaction(() -> {
             AccessDecision decision = access.findAccess(actorId, fileId);
             if (decision == null || !decision.readable() || decision.view() == null) {
                 record(correlationId, actorId, AuditAction.DOWNLOAD_AUTHORIZED, fileId,
                     "DENIED", "ACCESS_DENIED");
-                throw new ResourceHiddenException();
+                return Outcome.<FileView>denied();
             }
             record(correlationId, actorId, AuditAction.DOWNLOAD_AUTHORIZED, fileId,
                 "SUCCESS", null);
-            return decision.view();
+                return Outcome.success(decision.view());
         });
+        if (outcome.hidden()) throw new ResourceHiddenException();
+        FileView view = outcome.value();
 
-        // Deliberately resolve the physical key after the authorization audit transaction commits.
+        // 只有授权审计事务提交后才解析物理 key。
         FileAccessRepository.DownloadTarget target = access.findDownloadTarget(actorId, fileId)
             .filter(candidate -> candidate.view().fileId().equals(view.fileId()))
             .orElseThrow(ResourceHiddenException::new);
@@ -105,21 +121,22 @@ public final class DownloadService {
     public DownloadLink issueLink(long actorId, UUID fileId, Duration ttl, CorrelationId correlationId) {
         require(actorId, fileId, correlationId);
         if (tokens == null) throw new IllegalStateException("local download signing is unavailable");
-        if (ttl == null || ttl.isZero() || ttl.isNegative() || ttl.compareTo(LocalDownloadTokenService.MAX_TTL) > 0) {
+        if (ttl == null || ttl.isZero() || ttl.isNegative() || ttl.compareTo(maxLinkTtl) > 0) {
             throw new IllegalArgumentException("link ttl must be positive and no more than 2 minutes");
         }
-        FileView view = inTransaction(() -> {
+        Instant expiresAt = clock.instant().plusSeconds(ttl.getSeconds());
+        Outcome<FileView> outcome = inTransaction(() -> {
             AccessDecision decision = access.findAccess(actorId, fileId);
             if (decision == null || !decision.readable() || decision.view() == null) {
                 record(correlationId, actorId, AuditAction.DOWNLOAD_LINK_ISSUED, fileId,
                     "DENIED", "ACCESS_DENIED");
-                throw new ResourceHiddenException();
+                return Outcome.<FileView>denied();
             }
             record(correlationId, actorId, AuditAction.DOWNLOAD_LINK_ISSUED, fileId,
-                "SUCCESS", null);
-            return decision.view();
+                "SUCCESS", null, expiresAt);
+            return Outcome.success(decision.view());
         });
-        Instant expiresAt = Instant.now().plus(ttl);
+        if (outcome.hidden()) throw new ResourceHiddenException();
         String token = tokens.issue(actorId, fileId, ttl);
         return new DownloadLink("/api/local-downloads/" + token, expiresAt);
     }
@@ -128,6 +145,10 @@ public final class DownloadService {
                                   Duration ttl, CorrelationId correlationId) {
         if (actor == null) throw new IllegalArgumentException("identity is required");
         return issueLink(actor.userId(), fileId, ttl, correlationId);
+    }
+
+    public Duration defaultLinkTtl() {
+        return maxLinkTtl;
     }
 
     public DownloadDescriptor redeem(String token, long actorId, CorrelationId correlationId) {
@@ -162,9 +183,14 @@ public final class DownloadService {
 
     private void record(CorrelationId correlationId, long actorId, AuditAction action, UUID fileId,
                         String result, String failureCode) {
+        record(correlationId, actorId, action, fileId, result, failureCode, null);
+    }
+
+    private void record(CorrelationId correlationId, long actorId, AuditAction action, UUID fileId,
+                        String result, String failureCode, Instant expiresAt) {
         try {
             audits.record(new AuditEvent(correlationId, actorId, action, fileId, null,
-                result, failureCode, null, Instant.now()));
+                result, failureCode, null, clock.instant(), expiresAt));
         } catch (RuntimeException ex) {
             throw new DownloadAuditUnavailableException(ex);
         }
@@ -187,5 +213,10 @@ public final class DownloadService {
     private static void closeQuietly(InputStream input) {
         if (input == null) return;
         try { input.close(); } catch (IOException ignored) { }
+    }
+
+    private record Outcome<T>(T value, boolean hidden) {
+        static <T> Outcome<T> success(T value) { return new Outcome<>(value, false); }
+        static <T> Outcome<T> denied() { return new Outcome<>(null, true); }
     }
 }

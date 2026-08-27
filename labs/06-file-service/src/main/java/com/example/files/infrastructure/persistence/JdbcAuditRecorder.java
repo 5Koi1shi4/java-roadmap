@@ -16,9 +16,9 @@ public final class JdbcAuditRecorder implements AuditRecorder {
     public void record(AuditEvent event) {
         if (event == null) throw new IllegalArgumentException("audit event must not be null");
         jdbc.update("INSERT INTO file_audit_event(correlation_id,actor_id,action,file_id,target_user_id,result,"
-                + "failure_code,client_trace_id,created_at) VALUES(?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP(6))",
+                + "failure_code,client_trace_id,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP(6),?)",
             event.correlationId().value(), event.actorId(), event.action().name(),
             event.fileId() == null ? null : event.fileId().toString(), event.targetUserId(), event.result(),
-            event.failureCode(), event.clientTraceId());
+            event.failureCode(), event.clientTraceId(), event.expiresAt());
     }
 }
