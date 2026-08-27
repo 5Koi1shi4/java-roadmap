@@ -7,8 +7,6 @@ import com.example.files.application.upload.TemporaryObject;
 import com.example.files.application.upload.UploadRejectedException;
 import com.example.files.config.FileServiceProperties;
 import io.minio.BucketExistsArgs;
-import io.minio.CopyObjectArgs;
-import io.minio.CopySource;
 import io.minio.GetBucketLifecycleArgs;
 import io.minio.GetObjectArgs;
 import io.minio.GetPresignedObjectUrlArgs;
@@ -30,33 +28,23 @@ import io.minio.messages.Status;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.time.Duration;
-import java.time.Instant;
-import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
-import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
 /** MinIO 对象存储适配器：只接受不透明 UUID key，并保持上传可恢复语义。 */
 public final class MinioObjectStorage implements ObjectStorage {
     private static final Pattern KEY = Pattern.compile("(?:tmp|blobs)/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
     private static final Duration MAX_TTL = Duration.ofMinutes(2);
-    private static final long MINIO_PART_SIZE = 10L * 1024L * 1024L;
+    // 应用上限是 20 MiB；使用单 part 让 If-None-Match 条件覆盖整个正式 PUT。
+    private static final long MINIO_PART_SIZE = 20L * 1024L * 1024L;
 
     private final MinioClient client;
     private final String bucket;
-    private final String endpoint;
-    private final String accessKey;
-    private final String secretKey;
     private final Duration maxLinkTtl;
     private final StorageFailureClassifier failures = new StorageFailureClassifier();
 
@@ -81,9 +69,6 @@ public final class MinioObjectStorage implements ObjectStorage {
         }
         this.client = client;
         this.bucket = storage.minioBucket();
-        this.endpoint = storage.minioEndpoint();
-        this.accessKey = storage.minioAccessKey();
-        this.secretKey = storage.minioSecretKey();
         this.maxLinkTtl = maxLinkTtl;
     }
 
@@ -93,9 +78,6 @@ public final class MinioObjectStorage implements ObjectStorage {
         if (!bucket.matches("[a-z0-9][a-z0-9.-]{2,62}")) throw new IllegalArgumentException("invalid MinIO bucket");
         this.client = client;
         this.bucket = bucket;
-        this.endpoint = null;
-        this.accessKey = null;
-        this.secretKey = null;
         this.maxLinkTtl = MAX_TTL;
     }
 
@@ -151,24 +133,23 @@ public final class MinioObjectStorage implements ObjectStorage {
     public void commit(String tempKey, String objectKey) {
         validateKey(tempKey, "tmp");
         validateKey(objectKey, "blobs");
+        StorageObjectMetadata sourceMetadata = stat(tempKey);
         try {
-            try {
-                client.statObject(StatObjectArgs.builder().bucket(bucket).object(objectKey).build());
-                throw new IllegalStateException("destination object already exists");
-            } catch (ErrorResponseException ex) {
-                if (!isNotFound(ex)) throw ex;
+            // 目标不存在检查必须由服务端原子条件完成，避免 stat→copy 的 TOCTOU 覆盖窗口。
+            try (InputStream source = open(tempKey)) {
+                client.putObject(PutObjectArgs.builder().bucket(bucket).object(objectKey)
+                    .headers(Map.of("If-None-Match", "*"))
+                    .stream(source, sourceMetadata.size(), MINIO_PART_SIZE)
+                    .contentType("application/octet-stream").build());
             }
-            client.copyObject(CopyObjectArgs.builder().bucket(bucket).object(objectKey)
-                .source(CopySource.builder().bucket(bucket).object(tempKey).build()).build());
             try {
                 client.removeObject(RemoveObjectArgs.builder().bucket(bucket).object(tempKey).build());
             } catch (Exception cleanupFailure) {
-                // Copy 已经是正式提交；调用方将该可补偿错误交给清理/恢复状态机。
-                throw new StorageCleanupException(cleanupFailure);
+                // 正式对象已条件创建成功；UploadService 随后的幂等删除/清理任务负责补偿 temp。
+                // 不抛出，避免上层重复 finalize 或把已成功的正式对象误判为提交失败。
             }
-        } catch (StorageCleanupException ex) {
-            throw ex;
         } catch (Exception ex) {
+            if (isConflict(ex)) throw new StorageConflictException();
             throw failure("commit", ex);
         }
     }
@@ -226,12 +207,7 @@ public final class MinioObjectStorage implements ObjectStorage {
         try {
             String url = client.getPresignedObjectUrl(GetPresignedObjectUrlArgs.builder()
                 .method(Method.GET).bucket(bucket).object(objectKey)
-                .expiry((int) ttl.toSeconds()).build());
-            // SDK 8.6.0 没有 extraQueryParams；对无响应头场景直接使用其签名。
-            // 需要响应头时使用同样凭据重新计算 SigV4，保证 query 仍被签名。
-            if (!safeHeaders.isEmpty() && endpoint != null && accessKey != null && secretKey != null) {
-                return Optional.of(URI.create(presignWithResponseHeaders(objectKey, ttl, safeHeaders)));
-            }
+                .expiry((int) ttl.toSeconds()).extraQueryParams(safeHeaders).build());
             return Optional.of(URI.create(url));
         } catch (Exception ex) {
             throw failure("presign", ex);
@@ -270,6 +246,8 @@ public final class MinioObjectStorage implements ObjectStorage {
             Object builder = MinioClient.class.getMethod("builder").invoke(null);
             builder = builder.getClass().getMethod("endpoint", String.class)
                 .invoke(builder, storage.minioEndpoint());
+            builder = builder.getClass().getMethod("region", String.class)
+                .invoke(builder, storage.minioRegion());
             builder = builder.getClass().getMethod("credentials", String.class, String.class)
                 .invoke(builder, storage.minioAccessKey(), storage.minioSecretKey());
             MinioClient client = (MinioClient) builder.getClass().getMethod("build").invoke(builder);
@@ -290,6 +268,18 @@ public final class MinioObjectStorage implements ObjectStorage {
         String code = ex.errorResponse() == null ? "" : ex.errorResponse().code();
         return status == 404 || "NoSuchKey".equalsIgnoreCase(code) || "NoSuchObject".equalsIgnoreCase(code)
             || "NoSuchBucket".equalsIgnoreCase(code);
+    }
+
+    private static boolean isConflict(Throwable error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (current instanceof ErrorResponseException response) {
+                int status = httpStatus(response);
+                String code = response.errorResponse() == null ? "" : response.errorResponse().code();
+                if (status == 409 || status == 412 || "PreconditionFailed".equalsIgnoreCase(code)
+                    || "ConditionalRequestConflict".equalsIgnoreCase(code)) return true;
+            }
+        }
+        return false;
     }
 
     private static int httpStatus(ErrorResponseException exception) {
@@ -314,60 +304,6 @@ public final class MinioObjectStorage implements ObjectStorage {
             result.put(key.startsWith("response-") ? key : "response-" + key, entry.getValue());
         }
         return Map.copyOf(result);
-    }
-
-    private String presignWithResponseHeaders(String objectKey, Duration ttl, Map<String, String> headers) {
-        // MinIO 默认 region 为 us-east-1；路径采用稳定 path-style，适用于 compose/Testcontainers。
-        Instant now = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
-        ZonedDateTime utc = now.atZone(ZoneOffset.UTC);
-        String date = utc.format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd"));
-        String amzDate = utc.format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'"));
-        String credential = accessKey + "/" + date + "/us-east-1/s3/aws4_request";
-        Map<String, String> query = new LinkedHashMap<>();
-        query.put("X-Amz-Algorithm", "AWS4-HMAC-SHA256");
-        query.put("X-Amz-Credential", credential);
-        query.put("X-Amz-Date", amzDate);
-        query.put("X-Amz-Expires", Long.toString(ttl.toSeconds()));
-        query.put("X-Amz-SignedHeaders", "host");
-        query.putAll(headers);
-        String canonicalQuery = query.entrySet().stream().sorted(Map.Entry.comparingByKey())
-            .map(e -> encode(e.getKey()) + "=" + encode(e.getValue())).reduce((a, b) -> a + "&" + b).orElse("");
-        URI base = URI.create(endpoint);
-        String path = "/" + bucket + "/" + encodePath(objectKey);
-        String host = base.getHost() + (base.getPort() > 0 ? ":" + base.getPort() : "");
-        String canonicalRequest = "GET\n" + path + "\n" + canonicalQuery + "\nhost:" + host + "\n\nhost\nUNSIGNED-PAYLOAD";
-        String scope = date + "/us-east-1/s3/aws4_request";
-        String stringToSign = "AWS4-HMAC-SHA256\n" + amzDate + "\n" + scope + "\n" + hex(sha256(canonicalRequest.getBytes(StandardCharsets.UTF_8)));
-        byte[] signingKey = hmac(hmac(hmac(hmac(("AWS4" + secretKey).getBytes(StandardCharsets.UTF_8), date), "us-east-1"), "s3"), "aws4_request");
-        query.put("X-Amz-Signature", hex(hmac(signingKey, stringToSign)));
-        String signedQuery = query.entrySet().stream().sorted(Map.Entry.comparingByKey())
-            .map(e -> encode(e.getKey()) + "=" + encode(e.getValue())).reduce((a, b) -> a + "&" + b).orElse("");
-        return base.getScheme() + "://" + host + path + "?" + signedQuery;
-    }
-
-    private static String encodePath(String value) {
-        return java.util.Arrays.stream(value.split("/", -1)).map(MinioObjectStorage::encode)
-            .reduce((a, b) -> a + "/" + b).orElse("");
-    }
-    private static String encode(String value) {
-        return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20").replace("%7E", "~");
-    }
-    private static byte[] sha256(byte[] bytes) {
-        try { return MessageDigest.getInstance("SHA-256").digest(bytes); }
-        catch (Exception ex) { throw new IllegalStateException("SHA-256 unavailable", ex); }
-    }
-    private static byte[] hmac(byte[] key, String value) { return hmac(key, value.getBytes(StandardCharsets.UTF_8)); }
-    private static byte[] hmac(byte[] key, byte[] value) {
-        try {
-            javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
-            mac.init(new javax.crypto.spec.SecretKeySpec(key, "HmacSHA256"));
-            return mac.doFinal(value);
-        } catch (Exception ex) { throw new IllegalStateException("HMAC unavailable", ex); }
-    }
-    private static String hex(byte[] bytes) {
-        StringBuilder result = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) result.append(String.format("%02x", b));
-        return result.toString();
     }
 
     private static final class LimitedInputStream extends InputStream {

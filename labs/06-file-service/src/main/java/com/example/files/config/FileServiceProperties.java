@@ -110,12 +110,14 @@ public record FileServiceProperties(
 
     public record Storage(String type, String localRoot, String minioEndpoint,
                           String minioAccessKey, String minioSecretKey, String minioBucket,
+                          String minioRegion,
                           Duration minioConnectTimeout, Duration minioReadTimeout,
                           Duration minioWriteTimeout) {
         /** 保持本地适配器调用方兼容；MinIO 超时采用安全的短默认值。 */
         public Storage(String type, String localRoot, String minioEndpoint,
                        String minioAccessKey, String minioSecretKey, String minioBucket) {
             this(type, localRoot, minioEndpoint, minioAccessKey, minioSecretKey, minioBucket,
+                "us-east-1",
                 Duration.ofSeconds(5), Duration.ofSeconds(30), Duration.ofSeconds(30));
         }
 
@@ -126,6 +128,7 @@ public record FileServiceProperties(
             require(minioAccessKey, "storage.minioAccessKey");
             require(minioSecretKey, "storage.minioSecretKey");
             require(minioBucket, "storage.minioBucket");
+            require(minioRegion, "storage.minioRegion");
             require(minioConnectTimeout, "storage.minioConnectTimeout");
             require(minioReadTimeout, "storage.minioReadTimeout");
             require(minioWriteTimeout, "storage.minioWriteTimeout");
@@ -155,6 +158,9 @@ public record FileServiceProperties(
                 if (!minioBucket.matches("[a-z0-9][a-z0-9.-]{2,62}")) {
                     throw new IllegalArgumentException("storage.minioBucket has invalid format");
                 }
+                if (!minioRegion.matches("[a-z0-9-]{1,32}")) {
+                    throw new IllegalArgumentException("storage.minioRegion has invalid format");
+                }
             }
             positive(minioConnectTimeout, "storage.minioConnectTimeout");
             positive(minioReadTimeout, "storage.minioReadTimeout");
@@ -167,6 +173,7 @@ public record FileServiceProperties(
             return "Storage[type=" + type + ", localRoot=" + localRoot
                 + ", minioEndpoint=" + minioEndpoint + ", minioAccessKey=" + minioAccessKey
                 + ", minioSecretKey=<redacted>, minioBucket=" + minioBucket
+                + ", minioRegion=" + minioRegion
                 + ", minioConnectTimeout=" + minioConnectTimeout
                 + ", minioReadTimeout=" + minioReadTimeout
                 + ", minioWriteTimeout=" + minioWriteTimeout + "]";

@@ -1,6 +1,8 @@
 package com.example.files.infrastructure.storage;
 
 import io.minio.errors.ErrorResponseException;
+import io.minio.errors.InvalidResponseException;
+import io.minio.errors.ServerException;
 
 import java.io.IOException;
 import java.net.SocketTimeoutException;
@@ -23,6 +25,12 @@ public final class StorageFailureClassifier {
                 }
                 return FailureClass.PERMANENT;
             }
+            if (current instanceof ServerException server) {
+                int status = server.statusCode();
+                return status == 408 || status == 429 || status >= 500
+                    ? FailureClass.RETRYABLE : FailureClass.PERMANENT;
+            }
+            if (current instanceof InvalidResponseException) return FailureClass.RETRYABLE;
             if (current instanceof SocketTimeoutException || current instanceof IOException) {
                 return FailureClass.RETRYABLE;
             }
