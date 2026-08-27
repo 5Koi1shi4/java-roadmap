@@ -16,6 +16,7 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -68,9 +69,10 @@ class MinioObjectStorageIT extends SharedStorageContainers {
         storage.writeTemporary(tempA, new ByteArrayInputStream(a), 1024);
         storage.writeTemporary(tempB, new ByteArrayInputStream(b), 1024);
         ExecutorService executor = Executors.newFixedThreadPool(2);
+        CyclicBarrier overlap = new CyclicBarrier(2);
         try {
-            var first = executor.submit((Callable<Boolean>) () -> commitWithoutFailure(tempA, destination));
-            var second = executor.submit((Callable<Boolean>) () -> commitWithoutFailure(tempB, destination));
+            var first = executor.submit((Callable<Boolean>) () -> commitWithoutFailure(tempA, destination, overlap));
+            var second = executor.submit((Callable<Boolean>) () -> commitWithoutFailure(tempB, destination, overlap));
             assertThat(first.get()).isNotEqualTo(second.get());
             byte[] expected = first.get() ? a : b;
             assertThat(storage.open(destination).readAllBytes()).containsExactly(expected);
@@ -86,7 +88,12 @@ class MinioObjectStorageIT extends SharedStorageContainers {
         byte[] bytes = "formal-object".getBytes(StandardCharsets.US_ASCII);
         storage.writeTemporary(temp, new ByteArrayInputStream(bytes), 1024);
         denyTemporaryDeletes();
-        storage.commit(temp, object);
+        MinioObjectStorage unprivilegedStorage = new MinioObjectStorage(anonymousMinioClient(), minioStorage());
+        assertThatThrownBy(() -> unprivilegedStorage.delete(temp))
+            .isInstanceOf(com.example.files.infrastructure.storage.StorageUnavailableException.class)
+            .satisfies(error -> assertThat(((com.example.files.infrastructure.storage.StorageUnavailableException) error)
+                .failureClass()).isEqualTo(com.example.files.infrastructure.storage.StorageFailureClassifier.FailureClass.PERMANENT));
+        unprivilegedStorage.commit(temp, object);
         assertThat(storage.open(object).readAllBytes()).containsExactly(bytes);
         assertThat(storage.exists(temp)).isTrue();
         allowTemporaryDeletes();
@@ -111,8 +118,9 @@ class MinioObjectStorageIT extends SharedStorageContainers {
         assertThat(rule.expiration().days()).isEqualTo(1);
     }
 
-    private boolean commitWithoutFailure(String temp, String destination) {
+    private boolean commitWithoutFailure(String temp, String destination, CyclicBarrier overlap) throws Exception {
         try {
+            overlap.await();
             storage.commit(temp, destination);
             return true;
         } catch (StorageConflictException expected) {

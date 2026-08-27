@@ -35,6 +35,11 @@ public record FileServiceProperties(
 
     @ConstructorBinding
     public FileServiceProperties {
+        // Earlier fixtures predate the nested storage block. Keep those callers
+        // source-compatible while retaining a concrete, type-safe local default.
+        if (storage == null) {
+            storage = defaultLocalStorage();
+        }
         require(maxSize, "maxSize");
         require(uploadSessionTtl, "uploadSessionTtl");
         require(stagingLease, "stagingLease");
@@ -121,6 +126,7 @@ public record FileServiceProperties(
                 Duration.ofSeconds(5), Duration.ofSeconds(30), Duration.ofSeconds(30));
         }
 
+        @ConstructorBinding
         public Storage {
             require(type, "storage.type");
             require(localRoot, "storage.localRoot");
@@ -194,5 +200,9 @@ public record FileServiceProperties(
         if (value == null) {
             throw new IllegalArgumentException(name + " must not be null");
         }
+    }
+
+    private static Storage defaultLocalStorage() {
+        return new Storage("local", "./data/files", "http://localhost:9000", "", "", "secure-files");
     }
 }

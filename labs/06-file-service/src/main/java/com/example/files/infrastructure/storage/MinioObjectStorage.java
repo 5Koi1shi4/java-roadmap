@@ -88,7 +88,7 @@ public final class MinioObjectStorage implements ObjectStorage {
                 client.makeBucket(MakeBucketArgs.builder().bucket(bucket).build());
             }
             LifecycleRule rule = new LifecycleRule(Status.ENABLED, null,
-                new Expiration((ZonedDateTime) null, 1, false), new RuleFilter("tmp/"),
+                new Expiration((ZonedDateTime) null, 1, null), new RuleFilter("tmp/"),
                 "temporary-object-expiry", null, null, null);
             client.setBucketLifecycle(SetBucketLifecycleArgs.builder().bucket(bucket)
                 .config(new LifecycleConfiguration(List.of(rule))).build());
@@ -240,7 +240,8 @@ public final class MinioObjectStorage implements ObjectStorage {
     }
 
     private static MinioClient buildClient(FileServiceProperties.Storage storage) {
-        if (storage == null || !"minio".equals(storage.type())) throw new IllegalArgumentException("MinIO storage configuration is required");
+        if (storage == null || !"minio".equals(storage.type())) throw new IllegalArgumentException(
+            "MinIO storage configuration is required");
         try {
             // 通过反射选择 String endpoint，避免 SDK 8.6 的可选 OkHttp overload 污染编译类路径。
             Object builder = MinioClient.class.getMethod("builder").invoke(null);

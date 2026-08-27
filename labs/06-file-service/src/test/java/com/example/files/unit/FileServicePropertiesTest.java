@@ -37,6 +37,23 @@ class FileServicePropertiesTest {
         assertThat(storage.toString()).doesNotContain("super-secret").contains("<redacted>");
     }
 
+    @Test
+    void legacyFixtureWithNullStorageUsesTypeSafeLocalDefaults() {
+        FileServiceProperties properties = new FileServiceProperties(
+            DataSize.ofMegabytes(20),
+            Duration.ofHours(1),
+            Duration.ofMinutes(2),
+            new FileServiceProperties.Cleanup(50, Duration.ofSeconds(30), List.of(Duration.ofSeconds(5)), 5,
+                Duration.ofHours(24)),
+            new FileServiceProperties.Download(Duration.ofMinutes(2), ""),
+            new FileServiceProperties.Identity(false),
+            null);
+
+        assertThat(properties.storage()).isNotNull();
+        assertThat(properties.storage().type()).isEqualTo("local");
+        assertThat(properties.storage().localRoot()).isNotBlank();
+    }
+
     private static FileServiceProperties propertiesWithMaxSize(DataSize maxSize) {
         return new FileServiceProperties(
             maxSize,

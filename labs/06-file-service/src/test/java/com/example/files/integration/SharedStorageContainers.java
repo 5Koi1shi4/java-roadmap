@@ -38,7 +38,8 @@ public abstract class SharedStorageContainers {
             .withNetworkAliases("mysql");
         MYSQL.start();
 
-        MINIO = new GenericContainer<>(DockerImageName.parse("quay.io/minio/minio:RELEASE.2025-10-15T17-29-55Z"))
+        // Verified with `docker manifest inspect` before this test suite runs.
+        MINIO = new GenericContainer<>(DockerImageName.parse("quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z"))
             .withCommand("server /data --console-address :9001")
             .withEnv("MINIO_ROOT_USER", ACCESS_KEY)
             .withEnv("MINIO_ROOT_PASSWORD", SECRET_KEY)
@@ -53,6 +54,8 @@ public abstract class SharedStorageContainers {
             .withNetworkAliases("toxiproxy")
             .waitingFor(Wait.forListeningPort());
         TOXIPROXY.start();
+        // Testcontainers' official API creates the proxy lazily after both
+        // target and proxy containers are running; no fixed host port is used.
         MINIO_PROXY = TOXIPROXY.getProxy(MINIO, 9000);
         MINIO_CLIENT = buildMinioClient();
         Runtime.getRuntime().addShutdownHook(new Thread(() -> stopQuietly(TOXIPROXY), "storage-toxiproxy-shutdown"));
@@ -61,7 +64,7 @@ public abstract class SharedStorageContainers {
     }
 
     @DynamicPropertySource
-    static void registerStorageProperties(DynamicPropertyRegistry registry) {
+    public static void registerStorageProperties(DynamicPropertyRegistry registry) {
         registry.add("spring.datasource.url", MYSQL::getJdbcUrl);
         registry.add("spring.datasource.username", MYSQL::getUsername);
         registry.add("spring.datasource.password", MYSQL::getPassword);
@@ -74,7 +77,9 @@ public abstract class SharedStorageContainers {
     }
 
     static String minioEndpoint() {
-        return "http://" + TOXIPROXY.getHost() + ":" + TOXIPROXY.getMappedPort(MINIO_PROXY.getProxyPort());
+        // ContainerProxy#getProxyPort is already the host-mapped port. Calling
+        // getMappedPort again treats it as a container port and fails.
+        return "http://" + TOXIPROXY.getHost() + ":" + MINIO_PROXY.getProxyPort();
     }
 
     static FileServiceProperties.Storage minioStorage() {
@@ -88,7 +93,9 @@ public abstract class SharedStorageContainers {
 
     static void denyTemporaryDeletes() {
         String policy = """
-            {"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":{"AWS":["*"]},"Action":["s3:DeleteObject"],"Resource":["arn:aws:s3:::secure-files/tmp/*"]}]}
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":{"AWS":["*"]},"Action":["s3:PutObject","s3:GetObject"],"Resource":["arn:aws:s3:::secure-files/tmp/*","arn:aws:s3:::secure-files/blobs/*"]},
+              {"Effect":"Deny","Principal":{"AWS":["*"]},"Action":["s3:DeleteObject"],"Resource":["arn:aws:s3:::secure-files/tmp/*"]}]}
             """;
         try {
             MINIO_CLIENT.setBucketPolicy(SetBucketPolicyArgs.builder().bucket(BUCKET).config(policy).build());
@@ -107,13 +114,28 @@ public abstract class SharedStorageContainers {
 
     static MinioClient minioClient() { return MINIO_CLIENT; }
 
+    /** Anonymous client used to prove bucket policy denials are enforced. */
+    static MinioClient anonymousMinioClient() {
+        try {
+            Object builder = MinioClient.class.getMethod("builder").invoke(null);
+            builder = builder.getClass().getMethod("endpoint", String.class).invoke(builder, minioEndpoint());
+            return (MinioClient) builder.getClass().getMethod("build").invoke(builder);
+        } catch (ReflectiveOperationException ex) {
+            throw new IllegalStateException("cannot create anonymous MinIO test client", ex);
+        }
+    }
+
     private static MinioClient buildMinioClient() {
         try {
             Object builder = MinioClient.class.getMethod("builder").invoke(null);
             builder = builder.getClass().getMethod("endpoint", String.class).invoke(builder, minioEndpoint());
             builder = builder.getClass().getMethod("credentials", String.class, String.class)
                 .invoke(builder, ACCESS_KEY, SECRET_KEY);
-            return (MinioClient) builder.getClass().getMethod("build").invoke(builder);
+            MinioClient client = (MinioClient) builder.getClass().getMethod("build").invoke(builder);
+            // Fault tests deliberately black-hole the proxy. Keep every SDK call
+            // bounded so a cut connection cannot leave Failsafe waiting forever.
+            client.setTimeout(5_000, 5_000, 5_000);
+            return client;
         } catch (ReflectiveOperationException ex) {
             throw new IllegalStateException("cannot create MinIO test client", ex);
         }

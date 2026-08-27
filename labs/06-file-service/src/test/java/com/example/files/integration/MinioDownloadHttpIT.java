@@ -9,6 +9,8 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.http.*;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
 
@@ -22,13 +24,26 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /** 真实 Spring RANDOM_PORT、MySQL、MinIO 和代理端点的下载链路验收。 */
 @SpringBootTest(classes = FileServiceApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-    properties = {"file.identity.trusted-header-enabled=true"})
+    properties = {"file.identity.trusted-header-enabled=true", "file.storage.type=minio"})
 @ActiveProfiles("test")
 class MinioDownloadHttpIT extends SharedStorageContainers {
     @Autowired private TestRestTemplate client;
     @Autowired private ObjectMapper objectMapper;
     @Autowired private org.springframework.context.ApplicationContext context;
     @Autowired private org.springframework.jdbc.core.JdbcTemplate jdbc;
+
+    @DynamicPropertySource
+    static void registerMinioProperties(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.url", MYSQL::getJdbcUrl);
+        registry.add("spring.datasource.username", MYSQL::getUsername);
+        registry.add("spring.datasource.password", MYSQL::getPassword);
+        registry.add("file.storage.type", () -> "minio");
+        registry.add("file.storage.minio-endpoint", SharedStorageContainers::minioEndpoint);
+        registry.add("file.storage.minio-access-key", () -> ACCESS_KEY);
+        registry.add("file.storage.minio-secret-key", () -> SECRET_KEY);
+        registry.add("file.storage.minio-bucket", () -> BUCKET);
+        registry.add("file.storage.minio-region", () -> "us-east-1");
+    }
 
     @Test
     void minioBeanUploadsAuditsAndServesPresignedBytesThroughProxy() throws Exception {
