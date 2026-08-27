@@ -16,18 +16,18 @@ import java.util.Enumeration;
 @Component
 public final class CorrelationIdFilter extends OncePerRequestFilter {
     public static final String CORRELATION_ID_ATTRIBUTE = "file.correlationId";
-    public static final String CORRELATION_ID_OBJECT_ATTRIBUTE = "file.correlationIdObject";
     public static final String CLIENT_TRACE_ID_ATTRIBUTE = "file.clientTraceId";
     public static final String CORRELATION_ID_HEADER = "X-Correlation-Id";
     public static final String MDC_KEY = "correlationId";
+    public static final String CLIENT_TRACE_MDC_KEY = "clientTraceId";
     private static final String CLIENT_TRACE_HEADER = "X-Client-Trace-Id";
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
                                     FilterChain filterChain) throws ServletException, IOException {
         CorrelationId correlationId = CorrelationId.random();
-        request.setAttribute(CORRELATION_ID_ATTRIBUTE, correlationId.value());
-        request.setAttribute(CORRELATION_ID_OBJECT_ATTRIBUTE, correlationId);
+        request.setAttribute(CORRELATION_ID_ATTRIBUTE, correlationId);
+        request.removeAttribute(CLIENT_TRACE_ID_ATTRIBUTE);
         response.setHeader(CORRELATION_ID_HEADER, correlationId.value());
         String clientTrace = singleHeader(request, CLIENT_TRACE_HEADER);
         if (clientTrace != null && clientTrace.matches("[A-Za-z0-9._:-]{1,128}")) {
@@ -35,9 +35,14 @@ public final class CorrelationIdFilter extends OncePerRequestFilter {
         }
         try {
             MDC.put(MDC_KEY, correlationId.value());
+            if (clientTrace != null && clientTrace.matches("[A-Za-z0-9._:-]{1,128}")) {
+                MDC.put(CLIENT_TRACE_MDC_KEY, clientTrace);
+            }
             filterChain.doFilter(request, response);
         } finally {
             MDC.remove(MDC_KEY);
+            MDC.remove(CLIENT_TRACE_MDC_KEY);
+            request.removeAttribute(CLIENT_TRACE_ID_ATTRIBUTE);
         }
     }
 

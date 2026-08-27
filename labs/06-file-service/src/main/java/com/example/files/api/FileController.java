@@ -6,7 +6,6 @@ import com.example.files.api.security.RequesterUnauthenticatedException;
 import com.example.files.application.audit.CorrelationId;
 import com.example.files.application.upload.UploadCommand;
 import com.example.files.application.upload.UploadService;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -23,7 +22,6 @@ import java.nio.charset.StandardCharsets;
 /** 安全上传 HTTP 边界；协议层只把流和已解析身份传给应用服务。 */
 @RestController
 @RequestMapping(path = "/api/files")
-@ConditionalOnBean(UploadService.class)
 public final class FileController {
     private final UploadService uploadService;
     private final RequesterIdentityResolver identityResolver;
@@ -58,9 +56,6 @@ public final class FileController {
     private static CorrelationId correlationId(HttpServletRequest request) {
         Object value = request == null ? null : request.getAttribute(CorrelationIdFilter.CORRELATION_ID_ATTRIBUTE);
         if (value instanceof CorrelationId id) return id;
-        if (value instanceof String text && CorrelationId.isValid(text)) return new CorrelationId(text);
-        Object objectValue = request == null ? null : request.getAttribute(CorrelationIdFilter.CORRELATION_ID_OBJECT_ATTRIBUTE);
-        if (objectValue instanceof CorrelationId id) return id;
         return CorrelationId.random();
     }
 }

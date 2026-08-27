@@ -1,0 +1,71 @@
+package com.example.files.unit;
+
+import com.example.files.api.FileController;
+import com.example.files.api.ApiExceptionHandler;
+import com.example.files.api.CorrelationIdFilter;
+import com.example.files.api.security.RequesterIdentityResolver;
+import com.example.files.application.upload.ObjectStorage;
+import com.example.files.application.upload.StagingWaitPolicy;
+import com.example.files.application.upload.UploadInspector;
+import com.example.files.application.upload.UploadService;
+import com.example.files.application.upload.UploadTransactionService;
+import com.example.files.application.upload.StagingRecoveryService;
+import com.example.files.config.FileServiceProperties;
+import com.example.files.config.FileServiceWiringConfiguration;
+import com.example.files.config.TrustedHeaderIdentityConfiguration;
+import com.example.files.infrastructure.persistence.JdbcAuditRecorder;
+import com.example.files.infrastructure.persistence.JdbcBlobRepository;
+import com.example.files.infrastructure.persistence.JdbcCleanupTaskRepository;
+import com.example.files.infrastructure.persistence.JdbcFileRepository;
+import com.example.files.infrastructure.persistence.JdbcUploadSessionRepository;
+import com.example.files.infrastructure.storage.LocalObjectStorage;
+import org.junit.jupiter.api.Test;
+import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.jdbc.core.JdbcTemplate;
+
+import javax.sql.DataSource;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+
+class FileServiceWiringConfigurationTest {
+    @Test
+    void createsRealUploadGraphAndControllerFromSpringContext() {
+        DataSource dataSource = mock(DataSource.class);
+        new ApplicationContextRunner()
+            .withUserConfiguration(FileServiceWiringConfiguration.class, TrustedHeaderIdentityConfiguration.class,
+                FileController.class, ApiExceptionHandler.class, CorrelationIdFilter.class)
+            .withBean(FileServiceProperties.class, FileServiceWiringConfigurationTest::properties)
+            .withBean(DataSource.class, () -> dataSource)
+            .withBean(JdbcTemplate.class, () -> new JdbcTemplate(dataSource))
+            .withPropertyValues("spring.profiles.active=test", "file.identity.trusted-header-enabled=true")
+            .run(context -> {
+                assertThat(context.getStartupFailure()).isNull();
+                assertThat(context).hasSingleBean(JdbcUploadSessionRepository.class);
+                assertThat(context).hasSingleBean(JdbcBlobRepository.class);
+                assertThat(context).hasSingleBean(JdbcFileRepository.class);
+                assertThat(context).hasSingleBean(JdbcCleanupTaskRepository.class);
+                assertThat(context).hasSingleBean(JdbcAuditRecorder.class);
+                assertThat(context).hasSingleBean(UploadInspector.class);
+                assertThat(context).hasSingleBean(ObjectStorage.class);
+                assertThat(context).hasSingleBean(StagingWaitPolicy.class);
+                assertThat(context).hasSingleBean(UploadTransactionService.class);
+                assertThat(context).hasSingleBean(UploadService.class);
+                assertThat(context).hasSingleBean(StagingRecoveryService.class);
+                assertThat(context).hasSingleBean(RequesterIdentityResolver.class);
+                assertThat(context).hasSingleBean(FileController.class);
+            });
+    }
+
+    private static FileServiceProperties properties() {
+        return new FileServiceProperties(FileServiceProperties.SECURITY_MAX_SIZE,
+            java.time.Duration.ofHours(1), java.time.Duration.ofMinutes(2),
+            java.time.Duration.ofSeconds(5), java.time.Duration.ofMillis(100),
+            new FileServiceProperties.Cleanup(50, java.time.Duration.ofSeconds(30),
+                java.util.List.of(java.time.Duration.ofSeconds(5)), 5, java.time.Duration.ofHours(24)),
+            new FileServiceProperties.Download(java.time.Duration.ofMinutes(2), ""),
+            new FileServiceProperties.Identity(true), new FileServiceProperties.Storage("local",
+                "target/wiring-test-storage", "http://localhost:9000", "", "", "secure-files"),
+            new FileServiceProperties.Maintenance(false));
+    }
+}

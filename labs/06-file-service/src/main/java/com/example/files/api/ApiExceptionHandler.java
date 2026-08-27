@@ -72,7 +72,6 @@ public final class ApiExceptionHandler {
     private static String correlationIdValue(HttpServletRequest request) {
         Object value = request == null ? null : request.getAttribute(CorrelationIdFilter.CORRELATION_ID_ATTRIBUTE);
         if (value instanceof com.example.files.application.audit.CorrelationId id) return id.value();
-        if (value instanceof String text && com.example.files.application.audit.CorrelationId.isValid(text)) return text;
         return com.example.files.application.audit.CorrelationId.random().value();
     }
 }
