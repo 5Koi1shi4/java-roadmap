@@ -157,6 +157,30 @@ public final class JdbcUploadSessionRepository implements UploadSessionRepositor
     }
 
     @Override
+    public boolean claimExpiredForRecovery(UUID sessionId, UUID expectedOwnerToken, String expectedTempKey,
+                                           UUID newOwnerToken, Duration lease) {
+        if (sessionId == null || expectedOwnerToken == null || expectedTempKey == null || expectedTempKey.isBlank()
+            || newOwnerToken == null || lease == null || lease.isNegative() || lease.isZero()) {
+            throw new IllegalArgumentException("invalid fenced recovery claim arguments");
+        }
+        return jdbc.update("UPDATE upload_session SET owner_token=?,lease_until=TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6)),"
+                + "expires_at=GREATEST(expires_at,TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6))),"
+                + "updated_at=CURRENT_TIMESTAMP(6) WHERE session_id=? AND temp_key=? AND owner_token=? "
+                + "AND status IN ('VALIDATED','FINALIZING') AND lease_until<=CURRENT_TIMESTAMP(6) "
+                + "AND expires_at<=CURRENT_TIMESTAMP(6)",
+            newOwnerToken.toString(), micros(lease), micros(lease), sessionId.toString(), expectedTempKey,
+            expectedOwnerToken.toString()) == 1;
+    }
+
+    @Override
+    public boolean isExpiredAtDatabaseTime(UUID sessionId) {
+        if (sessionId == null) throw new IllegalArgumentException("sessionId must not be null");
+        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM upload_session WHERE session_id=? AND expires_at<=CURRENT_TIMESTAMP(6)",
+            Integer.class, sessionId.toString());
+        return Integer.valueOf(1).equals(count);
+    }
+
+    @Override
     public Optional<UploadSession> findForUpdate(UUID sessionId) {
         return findInternal(sessionId, true);
     }

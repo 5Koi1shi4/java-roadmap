@@ -8,6 +8,7 @@ import com.example.files.application.access.LocalDownloadTokenService;
 import com.example.files.application.access.DownloadTelemetry;
 import com.example.files.application.access.DefaultDownloadTelemetry;
 import com.example.files.application.cleanup.CleanupTaskRepository;
+import com.example.files.application.cleanup.LocalTemporaryFallbackCleaner;
 import com.example.files.application.upload.BlobRepository;
 import com.example.files.application.upload.FileRepository;
 import com.example.files.application.upload.ObjectStorage;
@@ -70,6 +71,13 @@ public class FileServiceWiringConfiguration {
     @Bean
     public JdbcCleanupTaskRepository cleanupTaskRepository(JdbcTemplate jdbc, TransactionTemplate transactionTemplate) {
         return new JdbcCleanupTaskRepository(jdbc, transactionTemplate);
+    }
+
+    /** 本地存储才装配兜底清理；MinIO 永远不扫描本地文件系统。 */
+    @Bean
+    @ConditionalOnExpression("'${file.storage.type:local}' == 'local'")
+    public LocalTemporaryFallbackCleaner localTemporaryFallbackCleaner(FileServiceProperties properties) {
+        return new LocalTemporaryFallbackCleaner(properties);
     }
 
     @Bean

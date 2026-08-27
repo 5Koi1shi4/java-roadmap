@@ -65,15 +65,19 @@ public final class StorageCleanupService {
         UUID sessionId;
         try { sessionId = UUID.fromString(task.targetId()); } catch (IllegalArgumentException bad) { return markFailure(task, bad); }
         UploadSession session = sessions.find(sessionId).orElse(null);
-        if (session == null || terminal(session.status())) {
-            return deleteAndComplete(task);
-        }
+        if (session == null || !task.objectKey().equals(session.tempKey())) return markRetry(task, "cleanup target mismatch");
+        if (terminal(session.status())) return deleteAndComplete(task);
         // RECEIVING 永远不能被扫描删除；VALIDATED/FINALIZING 只能在数据库租约条件接管后清理。
         if (session.status() == UploadSessionStatus.RECEIVING) return markRetry(task, "active upload session");
+        if (!sessions.isExpiredAtDatabaseTime(sessionId)) return markRetry(task, "upload session ttl is active");
         UUID takeover = UUID.randomUUID();
-        if (!sessions.claimExpiredForRecovery(sessionId, takeover, lease)) return markRetry(task, "upload session lease is active");
+        if (!sessions.claimExpiredForRecovery(sessionId, session.ownerToken(), session.tempKey(), takeover, lease)) {
+            return markRetry(task, "upload session lease or fencing condition is not satisfied");
+        }
         UploadSession claimed = sessions.find(sessionId).orElse(null);
-        if (claimed == null || !takeover.equals(claimed.ownerToken())) return markRetry(task, "upload session takeover fenced");
+        if (claimed == null || !takeover.equals(claimed.ownerToken()) || !task.objectKey().equals(claimed.tempKey())) {
+            return markRetry(task, "upload session takeover fenced");
+        }
         return deleteAndComplete(task);
     }
 

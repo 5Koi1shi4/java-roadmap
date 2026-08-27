@@ -129,7 +129,7 @@ public final class JdbcCleanupTaskRepository implements CleanupTaskRepository {
         if (delay == null || delay.isZero() || delay.isNegative()) throw new IllegalArgumentException("delay must be positive");
         return jdbc.update("UPDATE storage_cleanup_task SET status='NEW',attempt_count=attempt_count+1,last_error=?,"
                 + "available_at=TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6)),owner=NULL,claim_token=NULL,lease_until=NULL "
-                + "WHERE task_id=? AND status='PROCESSING' AND claim_token=? AND attempt_count<5",
+                + "WHERE task_id=? AND status='PROCESSING' AND claim_token=?",
             safeError(error), JdbcUploadSessionRepository.micros(delay), taskId.toString(), claimToken.toString()) == 1;
     }
 
@@ -160,7 +160,18 @@ public final class JdbcCleanupTaskRepository implements CleanupTaskRepository {
             return jdbc.update("UPDATE storage_cleanup_task SET status='COMPLETED',completed_at=CURRENT_TIMESTAMP(6),owner=NULL,claim_token=NULL,lease_until=NULL "
                     + "WHERE task_id=? AND status='PROCESSING' AND claim_token=?", taskId.toString(), claimToken.toString()) == 1;
         };
-        return transactionTemplate == null ? operation.get() : Boolean.TRUE.equals(transactionTemplate.execute(status -> operation.get()));
+        if (transactionTemplate == null) {
+            if (!operation.get()) throw new IllegalStateException("cleanup atomic completion fenced");
+            return true;
+        }
+        return Boolean.TRUE.equals(transactionTemplate.execute(status -> {
+            if (!operation.get()) {
+                // task token 失效时必须回滚 Blob 的 DELETED 更新，交给新 owner 重试。
+                status.setRollbackOnly();
+                throw new IllegalStateException("cleanup atomic completion fenced");
+            }
+            return true;
+        }));
     }
 
     private static void requireToken(UUID taskId, UUID token) {

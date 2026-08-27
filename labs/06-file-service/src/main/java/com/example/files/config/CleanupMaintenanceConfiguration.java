@@ -10,7 +10,6 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 /** 清理调度仅在明确启用时装配，防止默认路由和后台任务意外暴露。 */
 @Configuration(proxyBeanMethods = false)
 @EnableScheduling
-@Profile({"local", "test"})
 @ConditionalOnProperty(prefix = "file.maintenance", name = "enabled", havingValue = "true")
 public class CleanupMaintenanceConfiguration {
     @Bean public StorageCleanupService storageCleanupService(JdbcCleanupTaskRepository tasks, ObjectStorage storage,
@@ -19,7 +18,10 @@ public class CleanupMaintenanceConfiguration {
     }
     @Bean public ExpiredUploadService expiredUploadService(com.example.files.application.upload.StagingRecoveryService recovery,
             FileServiceProperties properties) { return new ExpiredUploadService(recovery, properties); }
-    @Bean public com.example.files.observability.CleanupScheduler cleanupScheduler(StorageCleanupService service) {
-        return new com.example.files.observability.CleanupScheduler(service);
+    @Bean public com.example.files.observability.CleanupScheduler cleanupScheduler(StorageCleanupService service,
+            ExpiredUploadService expiredUploadService,
+            org.springframework.beans.factory.ObjectProvider<LocalTemporaryFallbackCleaner> fallback) {
+        return new com.example.files.observability.CleanupScheduler(service, expiredUploadService, fallback.getIfAvailable());
     }
+
 }

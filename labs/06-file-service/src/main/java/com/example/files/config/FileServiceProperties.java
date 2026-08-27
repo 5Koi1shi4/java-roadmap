@@ -75,11 +75,17 @@ public record FileServiceProperties(
     }
 
     public record Cleanup(int batchSize, Duration lease, List<Duration> retryDelays,
-                          int maxAttempts, Duration temporaryObjectFallbackAge) {
+                          int maxAttempts, Duration temporaryObjectFallbackAge, Duration schedule) {
+        public Cleanup(int batchSize, Duration lease, List<Duration> retryDelays,
+                       int maxAttempts, Duration temporaryObjectFallbackAge) {
+            this(batchSize, lease, retryDelays, maxAttempts, temporaryObjectFallbackAge, Duration.ofMinutes(1));
+        }
+        @ConstructorBinding
         public Cleanup {
             require(lease, "cleanup.lease");
             require(retryDelays, "cleanup.retryDelays");
             require(temporaryObjectFallbackAge, "cleanup.temporaryObjectFallbackAge");
+            require(schedule, "cleanup.schedule");
             if (batchSize <= 0 || batchSize > 50) {
                 throw new IllegalArgumentException("cleanup.batchSize must be between 1 and 50");
             }
@@ -91,6 +97,7 @@ public record FileServiceProperties(
                 throw new IllegalArgumentException("cleanup.maxAttempts must be between 1 and 5");
             }
             positive(temporaryObjectFallbackAge, "cleanup.temporaryObjectFallbackAge");
+            positive(schedule, "cleanup.schedule");
             retryDelays = List.copyOf(retryDelays);
         }
     }

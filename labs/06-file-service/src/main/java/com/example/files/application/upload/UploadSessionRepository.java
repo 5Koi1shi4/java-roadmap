@@ -39,4 +39,15 @@ public interface UploadSessionRepository {
     List<UploadSession> findExpiredForRecovery(int batchSize);
 
     boolean claimExpiredForRecovery(UUID sessionId, UUID newOwnerToken, Duration lease);
+
+    /** 清理临时对象时以旧 owner 与 temp key fencing，并要求数据库 TTL 已到期。 */
+    default boolean claimExpiredForRecovery(UUID sessionId, UUID expectedOwnerToken, String expectedTempKey,
+                                            UUID newOwnerToken, Duration lease) {
+        return claimExpiredForRecovery(sessionId, newOwnerToken, lease);
+    }
+
+    /** 使用数据库当前时间判断 TTL 是否已到期，不使用应用服务器时钟。 */
+    default boolean isExpiredAtDatabaseTime(UUID sessionId) {
+        throw new UnsupportedOperationException("database expiry probe is not supported");
+    }
 }
