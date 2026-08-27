@@ -20,4 +20,9 @@ public record FileResponse(UUID fileId, String displayName, String mediaType,
         return new FileResponse(result.fileId(), result.displayName(), result.mediaType(),
             result.size(), result.createdAt());
     }
+
+    public static FileResponse from(com.example.files.application.access.FileView view) {
+        if (view == null) throw new IllegalArgumentException("file view is required");
+        return new FileResponse(view.fileId(), view.displayName(), view.mediaType(), view.size(), view.createdAt());
+    }
 }

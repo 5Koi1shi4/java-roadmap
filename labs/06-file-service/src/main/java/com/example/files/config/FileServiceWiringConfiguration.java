@@ -1,6 +1,8 @@
 package com.example.files.config;
 
 import com.example.files.application.audit.AuditRecorder;
+import com.example.files.application.access.FileAccessRepository;
+import com.example.files.application.access.FileAccessService;
 import com.example.files.application.cleanup.CleanupTaskRepository;
 import com.example.files.application.upload.BlobRepository;
 import com.example.files.application.upload.FileRepository;
@@ -13,6 +15,7 @@ import com.example.files.application.upload.UploadSessionRepository;
 import com.example.files.application.upload.UploadTransactionService;
 import com.example.files.application.upload.StagingRecoveryService;
 import com.example.files.infrastructure.persistence.JdbcAuditRecorder;
+import com.example.files.infrastructure.persistence.JdbcFileAccessRepository;
 import com.example.files.infrastructure.persistence.JdbcBlobRepository;
 import com.example.files.infrastructure.persistence.JdbcCleanupTaskRepository;
 import com.example.files.infrastructure.persistence.JdbcFileRepository;
@@ -50,6 +53,11 @@ public class FileServiceWiringConfiguration {
     }
 
     @Bean
+    public JdbcFileAccessRepository fileAccessRepository(JdbcTemplate jdbc) {
+        return new JdbcFileAccessRepository(jdbc);
+    }
+
+    @Bean
     public JdbcCleanupTaskRepository cleanupTaskRepository(JdbcTemplate jdbc) {
         return new JdbcCleanupTaskRepository(jdbc);
     }
@@ -67,6 +75,12 @@ public class FileServiceWiringConfiguration {
     @Bean
     public TransactionTemplate fileTransactionTemplate(PlatformTransactionManager transactionManager) {
         return new TransactionTemplate(transactionManager);
+    }
+
+    @Bean
+    public FileAccessService fileAccessService(FileAccessRepository repository, AuditRecorder audits,
+                                               TransactionTemplate transactionTemplate) {
+        return new FileAccessService(repository, audits, transactionTemplate);
     }
 
     @Bean

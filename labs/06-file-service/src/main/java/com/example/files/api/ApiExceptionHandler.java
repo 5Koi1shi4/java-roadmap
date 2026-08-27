@@ -4,6 +4,7 @@ import com.example.files.api.security.RequesterUnauthenticatedException;
 import com.example.files.application.upload.StorageCoordinationUnavailableException;
 import com.example.files.application.upload.StorageObjectNotFoundException;
 import com.example.files.application.upload.UploadRejectedException;
+import com.example.files.application.access.ResourceHiddenException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpHeaders;
@@ -28,6 +29,12 @@ public final class ApiExceptionHandler {
     public ResponseEntity<ApiError> handleUnauthorized(RequesterUnauthenticatedException ex,
                                                         HttpServletRequest request) {
         return response(HttpStatus.UNAUTHORIZED, "UNAUTHORIZED", "未认证", request);
+    }
+
+    @ExceptionHandler(ResourceHiddenException.class)
+    public ResponseEntity<ApiError> handleHidden(ResourceHiddenException ex, HttpServletRequest request) {
+        return response(HttpStatus.NOT_FOUND, ResourceHiddenException.CODE,
+            ResourceHiddenException.MESSAGE, request);
     }
 
     @ExceptionHandler(MaxUploadSizeExceededException.class)
