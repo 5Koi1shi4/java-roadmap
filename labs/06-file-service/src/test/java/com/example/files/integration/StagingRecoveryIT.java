@@ -34,6 +34,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
     /** 真实 MySQL 下验证过期 STAGING 对象缺失时的 fencing 与补偿入队。 */
 class StagingRecoveryIT extends SharedMySqlContainer {
     private static JdbcTemplate jdbc;
+    private static DriverManagerDataSource dataSource;
     private static JdbcUploadSessionRepository sessions;
     private static JdbcBlobRepository blobs;
     private static UploadTransactionService transactions;
@@ -43,7 +44,7 @@ class StagingRecoveryIT extends SharedMySqlContainer {
     @BeforeAll
     static void prepare() throws Exception {
         Flyway.configure().dataSource(MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword()).load().migrate();
-        DriverManagerDataSource dataSource = new DriverManagerDataSource(MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword());
+        dataSource = new DriverManagerDataSource(MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword());
         jdbc = new JdbcTemplate(dataSource);
         sessions = new JdbcUploadSessionRepository(jdbc);
         blobs = new JdbcBlobRepository(jdbc);
@@ -74,7 +75,6 @@ class StagingRecoveryIT extends SharedMySqlContainer {
             session.sessionId().toString());
         jdbc.update("UPDATE stored_blob SET staging_lease_until=TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP(6)) WHERE id=?",
             reservation.blobId());
-
         StagingRecoveryService recovery = new StagingRecoveryService(sessions, blobs, transactions, storage, cleanup,
             Duration.ofSeconds(2));
         assertThat(recovery.recoverExpired(10, "recovery-worker")).isZero();
@@ -129,8 +129,7 @@ class StagingRecoveryIT extends SharedMySqlContainer {
         storage.commit(session.tempKey(), reservation.objectKey());
         AuditRecorder failingAudit = event -> { throw new IllegalStateException("injected audit failure"); };
         UploadTransactionService failing = new UploadTransactionService(sessions, blobs, new JdbcFileRepository(jdbc),
-            failingAudit, new TransactionTemplate(new DataSourceTransactionManager(
-                new DriverManagerDataSource(MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword()))), testProperties());
+            failingAudit, new TransactionTemplate(new DataSourceTransactionManager(dataSource)), testProperties());
         assertThatThrownBy(() -> failing.finalizeUpload(reservation.sessionId(), reservation.ownerToken(), reservation.blobId()))
             .isInstanceOf(IllegalStateException.class);
         jdbc.update("UPDATE upload_session SET lease_until=TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP(6)) WHERE session_id=?",

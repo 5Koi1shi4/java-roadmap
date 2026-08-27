@@ -32,8 +32,8 @@ public abstract class SharedMySqlContainer {
 
     /** 集成测试显式注入短租约配置，避免生产默认值污染测试时序。 */
     protected static FileServiceProperties testProperties() {
-        return new FileServiceProperties(DataSize.ofMegabytes(20), Duration.ofMinutes(10), Duration.ofSeconds(2),
-            Duration.ofSeconds(2), Duration.ofMillis(10),
+        return new FileServiceProperties(DataSize.ofMegabytes(20), Duration.ofMinutes(10), Duration.ofSeconds(10),
+            Duration.ofSeconds(5), Duration.ofMillis(10),
             new FileServiceProperties.Cleanup(50, Duration.ofSeconds(5), List.of(Duration.ofMillis(50)), 3,
                 Duration.ofMinutes(5)),
             new FileServiceProperties.Download(Duration.ofMinutes(2), ""),

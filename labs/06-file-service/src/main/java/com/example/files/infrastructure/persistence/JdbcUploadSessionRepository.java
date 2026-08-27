@@ -80,6 +80,18 @@ public final class JdbcUploadSessionRepository implements UploadSessionRepositor
     }
 
     @Override
+    public boolean renewLease(UUID sessionId, UUID ownerToken, Duration lease) {
+        if (sessionId == null || ownerToken == null || lease == null || lease.isNegative() || lease.isZero()) {
+            throw new IllegalArgumentException("invalid lease renewal arguments");
+        }
+        return jdbc.update("UPDATE upload_session SET lease_until=TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6)),"
+                + "updated_at=CURRENT_TIMESTAMP(6) WHERE session_id=? AND owner_token=? "
+                + "AND status IN ('VALIDATED','FINALIZING') AND lease_until>CURRENT_TIMESTAMP(6) "
+                + "AND expires_at>CURRENT_TIMESTAMP(6)",
+            micros(lease), sessionId.toString(), ownerToken.toString()) == 1;
+    }
+
+    @Override
     public boolean takeOverExpired(UUID oldSessionId, UUID oldOwnerToken, UUID newSessionId,
                                    UUID newOwnerToken, long blobId, Duration lease) {
         if (oldSessionId == null || oldOwnerToken == null || newSessionId == null

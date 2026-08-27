@@ -9,6 +9,7 @@ import com.example.files.application.upload.StagingWaitPolicy;
 import com.example.files.application.upload.TemporaryObject;
 import com.example.files.application.upload.UploadCommand;
 import com.example.files.application.upload.UploadFailureClassifier;
+import com.example.files.application.upload.UploadInspector;
 import com.example.files.application.upload.UploadResult;
 import com.example.files.application.upload.UploadService;
 import com.example.files.application.upload.UploadTransactionService;
@@ -103,6 +104,38 @@ class UploadServiceTest {
         assertThat(transactions.failureCalls).isZero();
     }
 
+    @Test
+    void renewsOwnedSessionAndBlobBeforeCommit() {
+        byte[] pdf = "%PDF-1.7 renew-owned".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        RecordingStorage storage = new RecordingStorage();
+        FakeTransactions transactions = new FakeTransactions();
+        UploadService service = new UploadService(transactions, new UploadInspector(), storage,
+            new StagingWaitPolicy(Duration.ofSeconds(1), Duration.ofMillis(1)),
+            new NoopCleanupTasks(), new UploadFailureClassifier());
+
+        service.upload(new UploadCommand(7L, "renew.pdf", "application/pdf", pdf.length,
+            new ByteArrayInputStream(pdf), CorrelationId.random()));
+
+        assertThat(transactions.renewOwnedCalls).isOne();
+    }
+
+    @Test
+    void renewsOnlyWaitingSessionBeforeEachPoll() {
+        byte[] pdf = "%PDF-1.7 renew-waiting".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        RecordingStorage storage = new RecordingStorage();
+        FakeTransactions transactions = new FakeTransactions();
+        transactions.waitOnce = true;
+        UploadService service = new UploadService(transactions, new UploadInspector(), storage,
+            new StagingWaitPolicy(Duration.ofSeconds(1), Duration.ofMillis(1)),
+            new NoopCleanupTasks(), new UploadFailureClassifier());
+
+        service.upload(new UploadCommand(7L, "renew-wait.pdf", "application/pdf", pdf.length,
+            new ByteArrayInputStream(pdf), CorrelationId.random()));
+
+        assertThat(transactions.renewWaitingCalls).isOne();
+        assertThat(transactions.renewOwnedCalls).isOne();
+    }
+
     private static final class FakeTransactions implements UploadService.Transactions {
         private final UUID sessionId = UUID.randomUUID();
         private final UUID token = UUID.randomUUID();
@@ -112,6 +145,8 @@ class UploadServiceTest {
         private String committedObjectKey;
         private boolean failFinalize;
         private int failureCalls;
+        private int renewWaitingCalls;
+        private int renewOwnedCalls;
         private CorrelationId lastCorrelationId;
         private final UploadSession session = UploadSession.newSession(sessionId, 7L, "tmp/" + UUID.randomUUID(),
             token, SafeDisplayName.from("report.pdf"), "application/pdf", Duration.ofHours(1),
@@ -143,6 +178,8 @@ class UploadServiceTest {
             return attachReadyBlob(reservation);
         }
         @Override public void recordFailure(UUID id, UUID owner, String failureCode) { failureCalls++; }
+        @Override public boolean renewWaiting(UUID id, UUID owner) { renewWaitingCalls++; return true; }
+        @Override public boolean renewOwned(BlobReservation.Owned reservation) { renewOwnedCalls++; return true; }
     }
 
     private static final class RecordingStorage implements ObjectStorage {

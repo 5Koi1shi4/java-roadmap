@@ -23,6 +23,10 @@ class FileServicePropertiesTest {
             .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> propertiesWithStaging(Duration.ofSeconds(1), Duration.ofSeconds(1)))
             .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> propertiesWithLease(Duration.ofSeconds(5), Duration.ofSeconds(5), Duration.ofMillis(100)))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> propertiesWithLease(Duration.ofSeconds(5), Duration.ofSeconds(11), Duration.ofMillis(100)))
+            .isInstanceOf(IllegalArgumentException.class);
     }
 
     private static FileServiceProperties propertiesWithMaxSize(DataSize maxSize) {
@@ -47,6 +51,17 @@ class FileServicePropertiesTest {
     private static FileServiceProperties propertiesWithStaging(Duration wait, Duration poll) {
         return new FileServiceProperties(
             DataSize.ofMegabytes(20), Duration.ofHours(1), Duration.ofMinutes(2), wait, poll,
+            new FileServiceProperties.Cleanup(50, Duration.ofSeconds(30),
+                List.of(Duration.ofSeconds(5)), 5, Duration.ofHours(24)),
+            new FileServiceProperties.Download(Duration.ofMinutes(2), ""),
+            new FileServiceProperties.Identity(false),
+            new FileServiceProperties.Storage("local", "./data/files", "http://localhost:9000", "", "", "secure-files"),
+            new FileServiceProperties.Maintenance(false));
+    }
+
+    private static FileServiceProperties propertiesWithLease(Duration ttl, Duration lease, Duration poll) {
+        return new FileServiceProperties(
+            DataSize.ofMegabytes(20), ttl, lease, Duration.ofSeconds(5), poll,
             new FileServiceProperties.Cleanup(50, Duration.ofSeconds(30),
                 List.of(Duration.ofSeconds(5)), 5, Duration.ofHours(24)),
             new FileServiceProperties.Download(Duration.ofMinutes(2), ""),

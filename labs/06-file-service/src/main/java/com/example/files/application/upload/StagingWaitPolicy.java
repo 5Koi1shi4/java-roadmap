@@ -3,6 +3,7 @@ package com.example.files.application.upload;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.function.Supplier;
+import java.util.function.BooleanSupplier;
 
 /** 对 STAGING 领取结果进行短查询、有界等待；每次解析都在调用方短事务中完成。 */
 public final class StagingWaitPolicy {
@@ -26,8 +27,19 @@ public final class StagingWaitPolicy {
     /** 等待期间只保留不可携带能力的 Waiting；获得 Granted 后立即返回。 */
     public BlobReservation.Granted awaitOwnershipOrReady(BlobReservation initial,
                                                            Supplier<BlobReservation> resolver) {
+        return awaitOwnershipOrReady(initial, resolver, () -> true);
+    }
+
+    /**
+     * 等待者每轮查询前只续自己的 session lease。回调返回 false 表示 session
+     * 已被接管或过期，不能继续使用旧 token 轮询。
+     */
+    public BlobReservation.Granted awaitOwnershipOrReady(BlobReservation initial,
+                                                           Supplier<BlobReservation> resolver,
+                                                           BooleanSupplier keepAlive) {
         Objects.requireNonNull(initial, "initial");
         Objects.requireNonNull(resolver, "resolver");
+        Objects.requireNonNull(keepAlive, "keepAlive");
         if (initial instanceof BlobReservation.Granted granted) return granted;
         long deadline = System.nanoTime() + timeout.toNanos();
         BlobReservation current = initial;
@@ -37,6 +49,9 @@ public final class StagingWaitPolicy {
             } catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
                 throw new StorageCoordinationUnavailableException("staging wait interrupted", interrupted);
+            }
+            if (!keepAlive.getAsBoolean()) {
+                throw new StorageCoordinationUnavailableException("upload session lease lost while waiting");
             }
             current = resolver.get();
             if (current instanceof BlobReservation.Granted granted) return granted;

@@ -135,6 +135,19 @@ public final class JdbcBlobRepository implements BlobRepository {
     }
 
     @Override
+    public boolean renewStagingLease(long blobId, UUID sessionId, UUID ownerToken, Duration lease) {
+        if (blobId <= 0 || sessionId == null || ownerToken == null || lease == null
+            || lease.isNegative() || lease.isZero()) {
+            throw new IllegalArgumentException("invalid staging lease renewal arguments");
+        }
+        return jdbc.update("UPDATE stored_blob SET staging_lease_until=TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6)),"
+                + "updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='STAGING' "
+                + "AND staging_session_id=? AND staging_owner_token=? "
+                + "AND staging_lease_until>CURRENT_TIMESTAMP(6)",
+            JdbcUploadSessionRepository.micros(lease), blobId, sessionId.toString(), ownerToken.toString()) == 1;
+    }
+
+    @Override
     public boolean takeOverExpiredStaging(long blobId, UUID sessionId, UUID newToken, Duration lease) {
         if (blobId <= 0 || sessionId == null || newToken == null || lease == null || lease.isNegative() || lease.isZero()) {
             throw new IllegalArgumentException("invalid takeover arguments");

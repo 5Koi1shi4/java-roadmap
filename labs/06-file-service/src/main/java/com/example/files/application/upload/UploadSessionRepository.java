@@ -19,6 +19,9 @@ public interface UploadSessionRepository {
 
     boolean bindBlob(UUID sessionId, UUID ownerToken, long blobId);
 
+    /** 只延长当前 session 自身 lease；不会改变其绑定 Blob 的 owner。 */
+    boolean renewLease(UUID sessionId, UUID ownerToken, Duration lease);
+
     boolean markCompleted(UUID sessionId, UUID ownerToken, UUID fileId);
 
     /** 以 owner token fencing 记录有限失败分类。 */

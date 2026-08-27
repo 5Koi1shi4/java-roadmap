@@ -31,6 +31,9 @@ public interface BlobRepository {
 
     boolean markReady(long blobId, UUID sessionId, UUID ownerToken);
 
+    /** 以 session + blob owner token 双重 fencing 延长 STAGING lease。 */
+    boolean renewStagingLease(long blobId, UUID sessionId, UUID ownerToken, Duration lease);
+
     boolean takeOverExpiredStaging(long blobId, UUID sessionId, UUID newToken, Duration lease);
 
     default boolean takeOverExpiredStaging(long blobId, UUID oldSessionId, UUID oldOwnerToken,

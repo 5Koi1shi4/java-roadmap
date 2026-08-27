@@ -25,6 +25,12 @@ public final class UploadService {
         UploadResult attachReadyBlob(BlobReservation.ReadyReuse reservation);
         UploadResult attachReadyBlob(BlobReservation.ReadyReuse reservation, CorrelationId correlationId);
         void recordFailure(java.util.UUID sessionId, java.util.UUID ownerToken, String failureCode);
+
+        /** 等待者只续自己的 session lease，不能延长其他 blob owner。 */
+        default boolean renewWaiting(java.util.UUID sessionId, java.util.UUID ownerToken) { return true; }
+
+        /** Owned 提交前必须以 session+blob token 双 fencing 续租。 */
+        default boolean renewOwned(BlobReservation.Owned reservation) { return true; }
     }
 
     private final Transactions transactions;
@@ -95,12 +101,16 @@ public final class UploadService {
             reservation = transactions.reserve(session.sessionId(), session.ownerToken(), inspected);
             if (reservation instanceof BlobReservation.Waiting) {
                 reservation = waitPolicy.awaitOwnershipOrReady(reservation,
-                    () -> transactions.resolve(session.sessionId(), session.ownerToken(), inspected));
+                    () -> transactions.resolve(session.sessionId(), session.ownerToken(), inspected),
+                    () -> transactions.renewWaiting(session.sessionId(), session.ownerToken()));
             }
             UploadResult result;
             if (reservation instanceof BlobReservation.ReadyReuse ready) {
                 result = transactions.attachReadyBlob(ready, command.correlationId());
             } else if (reservation instanceof BlobReservation.Owned owned) {
+                if (!transactions.renewOwned(owned)) {
+                    throw new StorageCoordinationUnavailableException("upload lease lost before object commit");
+                }
                 storage.commit(temporary.key(), owned.objectKey());
                 result = transactions.finalizeUpload(owned, command.correlationId());
             } else {

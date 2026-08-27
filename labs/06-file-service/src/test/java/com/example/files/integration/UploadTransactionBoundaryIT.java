@@ -125,6 +125,7 @@ class UploadTransactionBoundaryIT extends SharedMySqlContainer {
         @Override public Optional<BlobReservation> resolveExisting(UUID sessionId, UUID ownerToken, InspectedUpload upload) { return Optional.empty(); }
         @Override public Optional<com.example.files.domain.StoredBlob> findByHashForUpdate(String hash) { return Optional.empty(); }
         @Override public boolean markReady(long blobId, UUID sessionId, UUID ownerToken) { return false; }
+        @Override public boolean renewStagingLease(long blobId, UUID sessionId, UUID ownerToken, Duration lease) { return false; }
         @Override public boolean takeOverExpiredStaging(long blobId, UUID sessionId, UUID token, Duration lease) { return false; }
         @Override public boolean restageDeleted(long blobId, UUID sessionId, UUID token, String key, Duration lease) { return false; }
         @Override public boolean markPendingDeleteFromRecovery(long blobId, UUID sessionId, UUID token) { return false; }

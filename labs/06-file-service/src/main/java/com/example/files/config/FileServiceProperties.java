@@ -55,6 +55,14 @@ public record FileServiceProperties(
         if (stagingPollInterval.compareTo(stagingWaitTimeout) >= 0) {
             throw new IllegalArgumentException("stagingPollInterval must be less than stagingWaitTimeout");
         }
+        Duration leaseBudget = stagingWaitTimeout.plus(stagingPollInterval);
+        if (stagingLease.compareTo(leaseBudget) <= 0) {
+            throw new IllegalArgumentException("stagingLease must exceed the wait timeout and one poll interval");
+        }
+        Duration sessionBudget = stagingWaitTimeout.plus(stagingLease);
+        if (uploadSessionTtl.compareTo(sessionBudget) <= 0) {
+            throw new IllegalArgumentException("uploadSessionTtl must exceed staging wait and lease budgets");
+        }
     }
 
     public long maxBytes() {

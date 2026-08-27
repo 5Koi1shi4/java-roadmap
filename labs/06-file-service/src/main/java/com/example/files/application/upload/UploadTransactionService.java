@@ -219,6 +219,40 @@ public final class UploadTransactionService implements UploadService.Transaction
         });
     }
 
+    /**
+     * 等待者只续自己的 session lease。该事务不触碰 Blob 行，因而不会延长
+     * 当前 STAGING owner 的 lease，也不会改变其 token fencing。
+     */
+    @Override
+    public boolean renewWaiting(UUID sessionId, UUID ownerToken) {
+        if (configuredLease == null) throw new IllegalStateException("staging lease must be configured explicitly");
+        Boolean renewed = transactionTemplate.execute(status ->
+            sessions.renewLease(sessionId, ownerToken, configuredLease));
+        return Boolean.TRUE.equals(renewed);
+    }
+
+    /**
+     * 提交正式对象前以固定锁序同时续租 session 与其 STAGING Blob。
+     * 任一条件更新失败都回滚另一侧，避免产生半续租的错误状态。
+     */
+    @Override
+    public boolean renewOwned(BlobReservation.Owned reservation) {
+        if (reservation == null) throw new IllegalArgumentException("reservation is required");
+        if (configuredLease == null) throw new IllegalStateException("staging lease must be configured explicitly");
+        Boolean renewed = transactionTemplate.execute(status -> {
+            if (!sessions.renewLease(reservation.sessionId(), reservation.ownerToken(), configuredLease)) {
+                status.setRollbackOnly();
+                return false;
+            }
+            if (!blobs.renewStagingLease(reservation.blobId(), reservation.sessionId(), reservation.ownerToken(), configuredLease)) {
+                status.setRollbackOnly();
+                return false;
+            }
+            return true;
+        });
+        return Boolean.TRUE.equals(renewed);
+    }
+
     /** 旧令牌或过期租约只能得到 false，不得覆盖新 owner 的状态。 */
     public boolean tryFinalize(UUID sessionId, UUID ownerToken, long blobId) {
         try {
