@@ -5,6 +5,7 @@ import com.example.files.application.upload.StorageCoordinationUnavailableExcept
 import com.example.files.application.upload.StorageObjectNotFoundException;
 import com.example.files.application.upload.UploadRejectedException;
 import com.example.files.application.access.ResourceHiddenException;
+import com.example.files.application.access.DownloadAuditUnavailableException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpHeaders;
@@ -36,6 +37,12 @@ public final class ApiExceptionHandler {
     public ResponseEntity<ApiError> handleHidden(ResourceHiddenException ex, HttpServletRequest request) {
         return response(HttpStatus.NOT_FOUND, ResourceHiddenException.CODE,
             ResourceHiddenException.MESSAGE, request);
+    }
+
+    @ExceptionHandler(DownloadAuditUnavailableException.class)
+    public ResponseEntity<Void> handleDownloadAuditUnavailable(DownloadAuditUnavailableException ex,
+                                                                HttpServletRequest request) {
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).build();
     }
 
     @ExceptionHandler(MaxUploadSizeExceededException.class)

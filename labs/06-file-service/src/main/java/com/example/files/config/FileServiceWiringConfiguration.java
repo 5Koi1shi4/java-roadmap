@@ -3,6 +3,8 @@ package com.example.files.config;
 import com.example.files.application.audit.AuditRecorder;
 import com.example.files.application.access.FileAccessRepository;
 import com.example.files.application.access.FileAccessService;
+import com.example.files.application.access.DownloadService;
+import com.example.files.application.access.LocalDownloadTokenService;
 import com.example.files.application.cleanup.CleanupTaskRepository;
 import com.example.files.application.upload.BlobRepository;
 import com.example.files.application.upload.FileRepository;
@@ -21,6 +23,9 @@ import com.example.files.infrastructure.persistence.JdbcCleanupTaskRepository;
 import com.example.files.infrastructure.persistence.JdbcFileRepository;
 import com.example.files.infrastructure.persistence.JdbcUploadSessionRepository;
 import com.example.files.infrastructure.storage.LocalObjectStorage;
+import com.example.files.api.DownloadController;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnExpression;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -81,6 +86,26 @@ public class FileServiceWiringConfiguration {
     public FileAccessService fileAccessService(FileAccessRepository repository, AuditRecorder audits,
                                                TransactionTemplate transactionTemplate) {
         return new FileAccessService(repository, audits, transactionTemplate);
+    }
+
+    @Bean
+    @ConditionalOnExpression("'${file.download.local-hmac-secret:}'.length() >= 32")
+    public LocalDownloadTokenService localDownloadTokenService(FileServiceProperties properties) {
+        return new LocalDownloadTokenService(properties.download());
+    }
+
+    @Bean
+    public DownloadService downloadService(FileAccessRepository repository, AuditRecorder audits,
+                                           ObjectStorage storage, TransactionTemplate transactionTemplate,
+                                           ObjectProvider<LocalDownloadTokenService> tokens) {
+        return new DownloadService(repository, audits, storage, transactionTemplate,
+            tokens.getIfAvailable());
+    }
+
+    @Bean
+    public DownloadController downloadController(DownloadService downloads,
+                                                 com.example.files.api.security.RequesterIdentityResolver identities) {
+        return new DownloadController(downloads, identities);
     }
 
     @Bean

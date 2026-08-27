@@ -41,6 +41,25 @@ public final class JdbcFileAccessRepository implements FileAccessRepository {
         }
     }
 
+    @Override
+    public Optional<DownloadTarget> findDownloadTarget(long actorId, UUID fileId) {
+        if (actorId <= 0 || fileId == null) throw new IllegalArgumentException("invalid download arguments");
+        String sql = "SELECT f.file_id,f.owner_id,f.display_name,b.media_type,b.size_bytes,f.created_at,b.object_key "
+            + "FROM stored_file f JOIN stored_blob b ON b.id=f.blob_id "
+            + "WHERE f.file_id=? AND f.status='ACTIVE' AND b.status='READY' "
+            + "AND (f.owner_id=? OR EXISTS (SELECT 1 FROM file_grant g "
+            + "WHERE g.file_id=f.file_id AND g.grantee_user_id=?))";
+        try {
+            return Optional.ofNullable(jdbc.queryForObject(sql, (rs, row) -> new DownloadTarget(
+                new FileView(UUID.fromString(rs.getString("file_id")), rs.getLong("owner_id"),
+                    rs.getString("display_name"), rs.getString("media_type"), rs.getLong("size_bytes"),
+                    JdbcUploadSessionRepository.instant(rs, "created_at")), rs.getString("object_key")),
+                fileId.toString(), actorId, actorId));
+        } catch (EmptyResultDataAccessException e) {
+            return Optional.empty();
+        }
+    }
+
     /** 锁定逻辑文件行并允许 owner 对已删除文件执行幂等删除。 */
     @Override
     public boolean isOwnerForUpdate(long actorId, UUID fileId) {
