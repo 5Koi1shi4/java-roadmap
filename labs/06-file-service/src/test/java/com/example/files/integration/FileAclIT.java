@@ -14,6 +14,9 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -50,6 +53,11 @@ class FileAclIT extends SharedMySqlContainer {
         access.grantRead(7L, fileId, 8L, c);
         assertThat(access.getMetadata(8L, fileId, c).fileId()).isEqualTo(fileId);
         assertThatThrownBy(() -> access.grantRead(8L, fileId, 9L, c)).isInstanceOf(ResourceHiddenException.class);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM file_audit_event WHERE action='ACCESS_GRANTED' AND result='DENIED'", Integer.class)).isOne();
+        assertThatThrownBy(() -> access.getMetadata(9L, fileId, c)).isInstanceOf(ResourceHiddenException.class);
+        assertThatThrownBy(() -> access.revokeRead(9L, fileId, 8L, c)).isInstanceOf(ResourceHiddenException.class);
+        assertThatThrownBy(() -> access.delete(9L, fileId, c)).isInstanceOf(ResourceHiddenException.class);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM file_audit_event WHERE result='DENIED'", Integer.class)).isEqualTo(4);
         access.delete(7L, fileId, c);
         access.delete(7L, fileId, c);
         assertThat(jdbc.queryForObject("SELECT reference_count FROM stored_blob", Long.class)).isZero();
@@ -69,6 +77,38 @@ class FileAclIT extends SharedMySqlContainer {
         assertThat(jdbc.queryForObject("SELECT status FROM stored_file WHERE file_id=?", String.class, fileId.toString())).isEqualTo("ACTIVE");
         assertThat(jdbc.queryForObject("SELECT reference_count FROM stored_blob", Long.class)).isOne();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM storage_cleanup_task", Integer.class)).isZero();
+    }
+
+    @Test
+    void auditFailureClosesReadGrantAndRevoke() {
+        UUID fileId = seedFile(12L);
+        var failing = new FileAccessService(new JdbcFileAccessRepository(jdbc), event -> {
+            throw new IllegalStateException("audit unavailable");
+        }, new TransactionTemplate(new org.springframework.jdbc.datasource.DataSourceTransactionManager(dataSource)));
+        assertThatThrownBy(() -> failing.getMetadata(12L, fileId, CorrelationId.random()))
+            .isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> failing.grantRead(12L, fileId, 13L, CorrelationId.random()))
+            .isInstanceOf(IllegalStateException.class);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM file_grant", Integer.class)).isZero();
+        assertThatThrownBy(() -> failing.revokeRead(12L, fileId, 13L, CorrelationId.random()))
+            .isInstanceOf(IllegalStateException.class);
+        assertThat(jdbc.queryForObject("SELECT reference_count FROM stored_blob", Long.class)).isOne();
+    }
+
+    @Test
+    void concurrentDeleteDecrementsReferenceOnceAndQueuesOneTask() throws Exception {
+        UUID fileId = seedFile(31L);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            var first = pool.submit(() -> access.delete(31L, fileId, CorrelationId.random()));
+            var second = pool.submit(() -> access.delete(31L, fileId, CorrelationId.random()));
+            first.get(10, TimeUnit.SECONDS);
+            second.get(10, TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(jdbc.queryForObject("SELECT reference_count FROM stored_blob", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM storage_cleanup_task", Integer.class)).isOne();
     }
 
     private UUID seedFile(long owner) {

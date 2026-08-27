@@ -4,6 +4,7 @@ import com.example.files.api.ApiExceptionHandler;
 import com.example.files.api.CorrelationIdFilter;
 import com.example.files.api.FileController;
 import com.example.files.application.cleanup.CleanupTaskRepository;
+import com.example.files.application.access.FileAccessService;
 import com.example.files.application.upload.ObjectStorage;
 import com.example.files.application.upload.StorageCoordinationUnavailableException;
 import com.example.files.application.upload.UploadFailureClassifier;
@@ -79,6 +80,11 @@ class StorageUnavailableHttpIT {
 
     @TestConfiguration(proxyBeanMethods = false)
     static class TestBeans {
+        @Bean
+        FileAccessService unavailableFileAccessService() {
+            return org.mockito.Mockito.mock(FileAccessService.class);
+        }
+
         @Bean
         UploadService unavailableUploadService() {
             UploadService.Transactions transactions = new UploadService.Transactions() {

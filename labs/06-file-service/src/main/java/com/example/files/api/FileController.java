@@ -17,7 +17,6 @@ import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
-import org.springframework.beans.factory.ObjectProvider;
 
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
@@ -34,13 +33,6 @@ public final class FileController {
     private final FileAccessService accessService;
 
     @org.springframework.beans.factory.annotation.Autowired
-    public FileController(UploadService uploadService, RequesterIdentityResolver identityResolver,
-                          ObjectProvider<FileAccessService> accessServices) {
-        this.uploadService = java.util.Objects.requireNonNull(uploadService, "uploadService");
-        this.identityResolver = java.util.Objects.requireNonNull(identityResolver, "identityResolver");
-        this.accessService = accessServices.getIfAvailable();
-    }
-
     public FileController(UploadService uploadService, RequesterIdentityResolver identityResolver,
                           FileAccessService accessService) {
         this.uploadService = java.util.Objects.requireNonNull(uploadService, "uploadService");

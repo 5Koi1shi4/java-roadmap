@@ -36,10 +36,10 @@ public final class FileAccessService {
         return inTransaction(() -> {
             AccessDecision decision = repository.findAccess(actorId, fileId);
             if (decision == null || !decision.readable() || decision.view() == null) {
-                denied(correlationId, actorId, fileId, null, AuditAction.FILE_ACCESSED);
+                return denied(correlationId, actorId, fileId, null, AuditAction.FILE_ACCESSED);
             }
             record(correlationId, actorId, AuditAction.FILE_ACCESSED, fileId, null, "SUCCESS", null);
-            return decision.view();
+            return Outcome.success(decision.view());
         });
     }
 
@@ -49,11 +49,11 @@ public final class FileAccessService {
         if (actorId == granteeId) throw new IllegalArgumentException("cannot grant access to owner");
         inTransaction(() -> {
             if (!repository.isActiveOwnerForUpdate(actorId, fileId)) {
-                denied(correlationId, actorId, fileId, granteeId, AuditAction.ACCESS_GRANTED);
+                return denied(correlationId, actorId, fileId, granteeId, AuditAction.ACCESS_GRANTED);
             }
             repository.grant(actorId, fileId, granteeId);
             record(correlationId, actorId, AuditAction.ACCESS_GRANTED, fileId, granteeId, "SUCCESS", null);
-            return null;
+            return Outcome.success(null);
         });
     }
 
@@ -63,11 +63,11 @@ public final class FileAccessService {
         if (actorId == granteeId) throw new IllegalArgumentException("cannot revoke owner access");
         inTransaction(() -> {
             if (!repository.isActiveOwnerForUpdate(actorId, fileId)) {
-                denied(correlationId, actorId, fileId, granteeId, AuditAction.ACCESS_REVOKED);
+                return denied(correlationId, actorId, fileId, granteeId, AuditAction.ACCESS_REVOKED);
             }
             repository.revoke(actorId, fileId, granteeId);
             record(correlationId, actorId, AuditAction.ACCESS_REVOKED, fileId, granteeId, "SUCCESS", null);
-            return null;
+            return Outcome.success(null);
         });
     }
 
@@ -75,11 +75,11 @@ public final class FileAccessService {
         requireActorAndFile(actorId, fileId, correlationId);
         inTransaction(() -> {
             if (!repository.isOwnerForUpdate(actorId, fileId)) {
-                denied(correlationId, actorId, fileId, null, AuditAction.FILE_DELETED);
+                return denied(correlationId, actorId, fileId, null, AuditAction.FILE_DELETED);
             }
             repository.delete(actorId, fileId);
             record(correlationId, actorId, AuditAction.FILE_DELETED, fileId, null, "SUCCESS", null);
-            return null;
+            return Outcome.success(null);
         });
     }
 
@@ -89,11 +89,11 @@ public final class FileAccessService {
         return getMetadata(actor.userId(), fileId, correlationId);
     }
 
-    private void denied(CorrelationId correlationId, long actorId, UUID fileId, Long target,
+    private <T> Outcome<T> denied(CorrelationId correlationId, long actorId, UUID fileId, Long target,
                         AuditAction action) {
-        // 审计先写入；写入失败时异常向上传播，事务回滚并由 HTTP 层映射 503。
+        // 先写入拒绝审计并返回事务结果；事务提交后由 inTransaction 统一抛隐藏异常。
         record(correlationId, actorId, action, fileId, target, "DENIED", "ACCESS_DENIED");
-        throw new ResourceHiddenException();
+        return Outcome.hiddenOutcome();
     }
 
     private void record(CorrelationId correlationId, long actorId, AuditAction action, UUID fileId,
@@ -102,11 +102,16 @@ public final class FileAccessService {
             result, failureCode, null, Instant.now()));
     }
 
-    private <T> T inTransaction(Supplier<T> operation) {
-        if (transactions == null) return operation.get();
-        T result = transactions.execute(status -> operation.get());
-        if (result == null) return null;
-        return result;
+    private <T> T inTransaction(Supplier<Outcome<T>> operation) {
+        Outcome<T> outcome = transactions == null ? operation.get() : transactions.execute(status -> operation.get());
+        if (outcome == null) throw new IllegalStateException("access transaction returned no outcome");
+        if (outcome.hidden()) throw new ResourceHiddenException();
+        return outcome.value();
+    }
+
+    private record Outcome<T>(T value, boolean hidden) {
+        static <T> Outcome<T> success(T value) { return new Outcome<>(value, false); }
+        static <T> Outcome<T> hiddenOutcome() { return new Outcome<>(null, true); }
     }
 
     private static void requireActorAndFile(long actorId, UUID fileId, CorrelationId correlationId) {

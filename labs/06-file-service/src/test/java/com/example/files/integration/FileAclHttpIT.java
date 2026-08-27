@@ -57,10 +57,21 @@ class FileAclHttpIT extends SharedMySqlContainer {
         assertThat(missing.getStatusCode().value()).isEqualTo(404);
         assertThat(withoutCorrelation(denied.getBody())).isEqualTo(withoutCorrelation(missing.getBody()));
 
+        assertBadRequest(client.exchange("/api/files/" + fileId + "/grants/700", HttpMethod.DELETE,
+            new HttpEntity<>(owner), String.class));
+        assertBadRequest(client.exchange("/api/files/" + fileId + "/grants/not-a-number", HttpMethod.PUT,
+            new HttpEntity<>(owner), String.class));
+        assertBadRequest(client.exchange("/api/files/" + fileId + "/grants/0", HttpMethod.PUT,
+            new HttpEntity<>(owner), String.class));
+        assertBadRequest(client.exchange("/api/files/" + fileId + "/grants/999999999999999999999", HttpMethod.PUT,
+            new HttpEntity<>(owner), String.class));
+
         assertThat(client.exchange("/api/files/" + fileId, HttpMethod.DELETE, new HttpEntity<>(owner), String.class)
             .getStatusCode().value()).isEqualTo(204);
-        assertThat(client.exchange("/api/files/" + fileId, HttpMethod.GET, new HttpEntity<>(owner), String.class)
-            .getStatusCode().value()).isEqualTo(404);
+        ResponseEntity<String> deleted = client.exchange("/api/files/" + fileId, HttpMethod.GET,
+            new HttpEntity<>(owner), String.class);
+        assertThat(deleted.getStatusCode().value()).isEqualTo(404);
+        assertThat(withoutCorrelation(deleted.getBody())).isEqualTo(withoutCorrelation(missing.getBody()));
     }
 
     private String upload(long userId) throws Exception {
@@ -90,5 +101,12 @@ class FileAclHttpIT extends SharedMySqlContainer {
         JsonNode node = objectMapper.readTree(body);
         ((com.fasterxml.jackson.databind.node.ObjectNode) node).remove("correlationId");
         return node.toString();
+    }
+
+    private void assertBadRequest(ResponseEntity<String> response) {
+        assertThat(response.getStatusCode().value()).isEqualTo(400);
+        assertThat(response.getHeaders().getContentType().toString()).isEqualTo("application/json;charset=UTF-8");
+        assertThat(response.getBody()).contains("\"code\":\"INVALID_REQUEST\"")
+            .contains("\"message\":\"请求参数无效\"");
     }
 }
