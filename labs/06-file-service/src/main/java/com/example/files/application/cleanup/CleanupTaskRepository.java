@@ -5,6 +5,9 @@ import com.example.files.domain.StoredBlob;
 import com.example.files.application.upload.BlobReservation;
 
 import java.util.UUID;
+import java.time.Duration;
+import java.util.List;
+import com.example.files.application.upload.BlobRepository;
 
 /** 清理任务持久化端口；入队操作必须具备目标唯一性以支持重复补偿。 */
 public interface CleanupTaskRepository {
@@ -17,4 +20,30 @@ public interface CleanupTaskRepository {
 
     /** 通过已授权领取结果入队，避免调用方读取 Blob 物理元数据。 */
     void enqueueBlob(BlobReservation.Granted reservation);
+
+    /** 以数据库时间原子领取最多 batch 个任务；实现必须写入全新随机 token。 */
+    default List<ClaimedCleanup> claimBatch(String owner, int batchSize, Duration lease) {
+        throw new UnsupportedOperationException("cleanup claiming is not supported");
+    }
+
+    default ClaimedCleanup claimOne(String owner, Duration lease) {
+        List<ClaimedCleanup> claimed = claimBatch(owner, 1, lease);
+        return claimed.isEmpty() ? null : claimed.get(0);
+    }
+    default List<ClaimedCleanup> claimBatch(String owner, Duration lease, int batchSize) {
+        return claimBatch(owner, batchSize, lease);
+    }
+    default boolean retry(UUID taskId, UUID claimToken, Duration delay) {
+        return retry(taskId, claimToken, delay, null);
+    }
+
+    default boolean complete(UUID taskId, UUID claimToken) { throw new UnsupportedOperationException("cleanup completion is not supported"); }
+    default boolean retry(UUID taskId, UUID claimToken, Duration delay, String error) { throw new UnsupportedOperationException("cleanup retry is not supported"); }
+    default boolean fail(UUID taskId, UUID claimToken, String error) { throw new UnsupportedOperationException("cleanup failure is not supported"); }
+    default boolean resetFailed(UUID taskId) { throw new UnsupportedOperationException("cleanup maintenance is not supported"); }
+    /** Blob 状态与任务完成在同一短事务中发布；无实现时退回顺序 fencing。 */
+    default boolean completeBlobAndTask(BlobRepository blobs, long blobId, long generation, UUID blobToken,
+                                        UUID taskId, UUID claimToken) {
+        return blobs.completeDeletion(blobId, generation, blobToken) && complete(taskId, claimToken);
+    }
 }

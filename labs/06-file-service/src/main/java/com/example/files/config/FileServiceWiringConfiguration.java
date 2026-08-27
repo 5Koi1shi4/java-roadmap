@@ -68,8 +68,8 @@ public class FileServiceWiringConfiguration {
     }
 
     @Bean
-    public JdbcCleanupTaskRepository cleanupTaskRepository(JdbcTemplate jdbc) {
-        return new JdbcCleanupTaskRepository(jdbc);
+    public JdbcCleanupTaskRepository cleanupTaskRepository(JdbcTemplate jdbc, TransactionTemplate transactionTemplate) {
+        return new JdbcCleanupTaskRepository(jdbc, transactionTemplate);
     }
 
     @Bean

@@ -184,6 +184,9 @@ public final class JdbcBlobRepository implements BlobRepository {
     public boolean restageDeleted(long blobId, UUID sessionId, UUID ownerToken, String objectKey, Duration lease) {
         if (blobId <= 0 || sessionId == null || ownerToken == null || objectKey == null || objectKey.isBlank()
             || lease == null || lease.isZero() || lease.isNegative()) throw new IllegalArgumentException("invalid restaging arguments");
+        if (!objectKey.matches("blobs/[0-9a-fA-F-]{36}")) throw new IllegalArgumentException("objectKey must be a fresh blob key");
+        String previous = jdbc.queryForObject("SELECT object_key FROM stored_blob WHERE id=?", String.class, blobId);
+        if (objectKey.equals(previous)) throw new IllegalArgumentException("restaging must use a new object key");
         return jdbc.update("UPDATE stored_blob SET object_key=?,status='STAGING',generation=generation+1,cleanup_token=NULL,cleanup_lease_until=NULL,"
                 + "staging_session_id=?,staging_owner_token=?,staging_lease_until=TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6)),"
                 + "updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='DELETED' AND reference_count=0",
@@ -199,6 +202,26 @@ public final class JdbcBlobRepository implements BlobRepository {
                 + "(status='READY' AND EXISTS (SELECT 1 FROM upload_session WHERE session_id=? AND owner_token=? "
                 + "AND status='FINALIZING' AND blob_id=?)))",
             blobId, sessionId.toString(), ownerToken.toString(), sessionId.toString(), ownerToken.toString(), blobId) == 1;
+    }
+
+    @Override
+    public boolean claimDeletion(long blobId, long generation, UUID cleanupToken, Duration lease) {
+        if (blobId <= 0 || generation <= 0 || cleanupToken == null || lease == null || lease.isZero() || lease.isNegative()) {
+            throw new IllegalArgumentException("invalid blob deletion claim arguments");
+        }
+        return jdbc.update("UPDATE stored_blob SET status='DELETING',cleanup_token=?,"
+                + "cleanup_lease_until=TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6)),updated_at=CURRENT_TIMESTAMP(6) "
+                + "WHERE id=? AND generation=? AND reference_count=0 AND (status='PENDING_DELETE' OR "
+                + "(status='DELETING' AND cleanup_lease_until<=CURRENT_TIMESTAMP(6)))",
+            cleanupToken.toString(), JdbcUploadSessionRepository.micros(lease), blobId, generation) == 1;
+    }
+
+    @Override
+    public boolean completeDeletion(long blobId, long generation, UUID cleanupToken) {
+        if (blobId <= 0 || generation <= 0 || cleanupToken == null) throw new IllegalArgumentException("invalid blob deletion completion arguments");
+        return jdbc.update("UPDATE stored_blob SET status='DELETED',cleanup_token=NULL,cleanup_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) "
+                + "WHERE id=? AND generation=? AND status='DELETING' AND cleanup_token=?",
+            blobId, generation, cleanupToken.toString()) == 1;
     }
 
     private StoredBlob map(ResultSet rs, int row) throws SQLException {

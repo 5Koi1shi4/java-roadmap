@@ -6,6 +6,8 @@ file:
   staging-poll-interval: 100ms
   cleanup:
     batch-size: 50
+    # 调度周期由部署配置覆盖，避免代码中固定扫描频率。
+    schedule: 60000
     lease: 30s
     retry-delays: [5s, 30s, 2m, 10m]
     max-attempts: 5
