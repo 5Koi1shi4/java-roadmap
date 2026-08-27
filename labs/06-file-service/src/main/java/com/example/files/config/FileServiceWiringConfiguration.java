@@ -60,7 +60,7 @@ public class FileServiceWiringConfiguration {
     }
 
     @Bean
-    public PlatformTransactionManager fileTransactionManager(DataSource dataSource) {
+    public DataSourceTransactionManager fileTransactionManager(DataSource dataSource) {
         return new DataSourceTransactionManager(dataSource);
     }
 
@@ -75,7 +75,7 @@ public class FileServiceWiringConfiguration {
     }
 
     @Bean
-    public ObjectStorage objectStorage(FileServiceProperties properties) {
+    public LocalObjectStorage objectStorage(FileServiceProperties properties) {
         FileServiceProperties.Storage storage = properties.storage();
         if (!"local".equals(storage.type())) {
             throw new IllegalStateException("storage type is not implemented: " + storage.type());
