@@ -62,10 +62,21 @@ public final class LocalDownloadTokenService {
         if (ttl == null || ttl.isZero() || ttl.isNegative() || ttl.compareTo(maxTtl) > 0) {
             throw new IllegalArgumentException("token ttl must be positive and no more than 2 minutes");
         }
-        Instant expires = clock.instant().plus(ttl);
+        Instant expires = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.SECONDS)
+            .plusSeconds(ttl.getSeconds());
+        return issue(actorId, fileId, expires);
+    }
+
+    public String issue(long actorId, UUID fileId, Instant expiresAt) {
+        Instant issuedAt = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+        if (actorId <= 0 || fileId == null || expiresAt == null
+            || expiresAt.getNano() != 0 || !expiresAt.isAfter(issuedAt)
+            || Duration.between(issuedAt, expiresAt).compareTo(maxTtl) > 0) {
+            throw new IllegalArgumentException("invalid token expiry");
+        }
         byte[] nonce = new byte[NONCE_BYTES];
         random.nextBytes(nonce);
-        String payload = "1|" + fileId + "|" + actorId + "|" + expires.getEpochSecond()
+        String payload = "1|" + fileId + "|" + actorId + "|" + expiresAt.getEpochSecond()
             + "|" + encode(nonce);
         String payloadPart = encode(payload.getBytes(StandardCharsets.UTF_8));
         return payloadPart + "." + encode(sign(payload.getBytes(StandardCharsets.UTF_8)));
@@ -73,6 +84,10 @@ public final class LocalDownloadTokenService {
 
     public String issue(UUID fileId, long actorId, Duration ttl) {
         return issue(actorId, fileId, ttl);
+    }
+
+    public String issue(UUID fileId, long actorId, Instant expiresAt) {
+        return issue(actorId, fileId, expiresAt);
     }
 
     public String issue(long actorId, UUID fileId, Duration ttl,

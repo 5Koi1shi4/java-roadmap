@@ -18,9 +18,12 @@ import java.time.Instant;
 import java.util.UUID;
 import java.util.function.Supplier;
 import java.time.Clock;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** 协调短授权事务与对象流读取。 */
 public final class DownloadService {
+    private static final Logger LOG = LoggerFactory.getLogger(DownloadService.class);
     private static final int PREFETCH_BYTES = 8192;
     private final FileAccessRepository access;
     private final AuditRecorder audits;
@@ -29,24 +32,31 @@ public final class DownloadService {
     private final LocalDownloadTokenService tokens;
     private final Duration maxLinkTtl;
     private final Clock clock;
+    private final DownloadTelemetry telemetry;
 
     public DownloadService(FileAccessRepository access, AuditRecorder audits, ObjectStorage storage) {
-        this(access, audits, storage, null, null, LocalDownloadTokenService.MAX_TTL, Clock.systemUTC());
+        this(access, audits, storage, null, null, LocalDownloadTokenService.MAX_TTL, Clock.systemUTC(), new DefaultDownloadTelemetry());
     }
 
     public DownloadService(FileAccessRepository access, AuditRecorder audits, ObjectStorage storage,
                            TransactionTemplate transactions) {
-        this(access, audits, storage, transactions, null, LocalDownloadTokenService.MAX_TTL, Clock.systemUTC());
+        this(access, audits, storage, transactions, null, LocalDownloadTokenService.MAX_TTL, Clock.systemUTC(), new DefaultDownloadTelemetry());
     }
 
     public DownloadService(FileAccessRepository access, AuditRecorder audits, ObjectStorage storage,
                            TransactionTemplate transactions, LocalDownloadTokenService tokens) {
-        this(access, audits, storage, transactions, tokens, LocalDownloadTokenService.MAX_TTL, Clock.systemUTC());
+        this(access, audits, storage, transactions, tokens, LocalDownloadTokenService.MAX_TTL, Clock.systemUTC(), new DefaultDownloadTelemetry());
     }
 
     public DownloadService(FileAccessRepository access, AuditRecorder audits, ObjectStorage storage,
                            TransactionTemplate transactions, LocalDownloadTokenService tokens,
                            Duration maxLinkTtl, Clock clock) {
+        this(access, audits, storage, transactions, tokens, maxLinkTtl, clock, new DefaultDownloadTelemetry());
+    }
+
+    public DownloadService(FileAccessRepository access, AuditRecorder audits, ObjectStorage storage,
+                           TransactionTemplate transactions, LocalDownloadTokenService tokens,
+                           Duration maxLinkTtl, Clock clock, DownloadTelemetry telemetry) {
         this.access = java.util.Objects.requireNonNull(access, "access");
         this.audits = java.util.Objects.requireNonNull(audits, "audits");
         this.storage = java.util.Objects.requireNonNull(storage, "storage");
@@ -58,6 +68,7 @@ public final class DownloadService {
         }
         this.maxLinkTtl = maxLinkTtl;
         this.clock = clock == null ? Clock.systemUTC() : clock;
+        this.telemetry = telemetry == null ? new DefaultDownloadTelemetry() : telemetry;
     }
 
     /** 授权并预打开流；该方法返回前不得开始成功 HTTP 响应。 */
@@ -114,17 +125,26 @@ public final class DownloadService {
     }
 
     public void recordFailed(long actorId, UUID fileId, CorrelationId correlationId, String failureCode) {
-        recordResult(correlationId, actorId, fileId, AuditAction.DOWNLOAD_FAILED, "FAILED",
-            failureCode == null ? "STREAM_FAILED" : failureCode);
+        String code = failureCode == null ? "STREAM_FAILED" : failureCode;
+        try {
+            recordResult(correlationId, actorId, fileId, AuditAction.DOWNLOAD_FAILED, "FAILED", code);
+        } finally {
+            try { telemetry.failed(fileId, correlationId, code); }
+            catch (RuntimeException ex) {
+                LOG.warn("download telemetry unavailable correlationId={} fileId={} failureCode={}",
+                    correlationId.value(), fileId, code);
+            }
+        }
     }
 
     public DownloadLink issueLink(long actorId, UUID fileId, Duration ttl, CorrelationId correlationId) {
         require(actorId, fileId, correlationId);
         if (tokens == null) throw new IllegalStateException("local download signing is unavailable");
-        if (ttl == null || ttl.isZero() || ttl.isNegative() || ttl.compareTo(maxLinkTtl) > 0) {
+        if (ttl == null || ttl.isZero() || ttl.isNegative() || ttl.getNano() != 0 || ttl.compareTo(maxLinkTtl) > 0) {
             throw new IllegalArgumentException("link ttl must be positive and no more than 2 minutes");
         }
-        Instant expiresAt = clock.instant().plusSeconds(ttl.getSeconds());
+        Instant issuedAt = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+        Instant expiresAt = issuedAt.plusSeconds(ttl.getSeconds());
         Outcome<FileView> outcome = inTransaction(() -> {
             AccessDecision decision = access.findAccess(actorId, fileId);
             if (decision == null || !decision.readable() || decision.view() == null) {
@@ -137,7 +157,7 @@ public final class DownloadService {
             return Outcome.success(decision.view());
         });
         if (outcome.hidden()) throw new ResourceHiddenException();
-        String token = tokens.issue(actorId, fileId, ttl);
+        String token = tokens.issue(actorId, fileId, expiresAt);
         return new DownloadLink("/api/local-downloads/" + token, expiresAt);
     }
 
@@ -157,6 +177,7 @@ public final class DownloadService {
         try {
             claims = tokens.verify(token, actorId);
         } catch (IllegalArgumentException ex) {
+            recordTokenDenied(actorId, correlationId);
             throw new ResourceHiddenException();
         }
         return authorizeDownload(actorId, claims.fileId(), correlationId);
@@ -164,6 +185,13 @@ public final class DownloadService {
 
     public DownloadDescriptor redeemToken(String token, long actorId, CorrelationId correlationId) {
         return redeem(token, actorId, correlationId);
+    }
+
+    private void recordTokenDenied(long actorId, CorrelationId correlationId) {
+        inTransaction(() -> {
+            record(correlationId, actorId, AuditAction.DOWNLOAD_TOKEN_DENIED, null, "DENIED", "INVALID_TOKEN");
+            return Boolean.TRUE;
+        });
     }
 
     public record DownloadLink(String url, Instant expiresAt) {

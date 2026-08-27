@@ -17,6 +17,9 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
+import org.springframework.web.context.request.async.CallableProcessingInterceptor;
+import org.springframework.web.context.request.async.WebAsyncUtils;
+import org.springframework.web.context.request.NativeWebRequest;
 
 import jakarta.servlet.http.HttpServletRequest;
 import java.io.IOException;
@@ -25,11 +28,16 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.Callable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** 流式下载与身份绑定本地链接的 HTTP 边界。 */
 @RestController
 @RequestMapping
 public final class DownloadController {
+    private static final Logger LOG = LoggerFactory.getLogger(DownloadController.class);
     private final DownloadService downloads;
     private final RequesterIdentityResolver identities;
 
@@ -101,10 +109,10 @@ public final class DownloadController {
             headers = downloadHeaders(descriptor);
         } catch (RuntimeException ex) {
             try { descriptor.close(); } catch (IOException ignored) { }
-            try { downloads.recordFailed(actorId, fileId, correlationId(request), "HEADER_FAILED"); }
-            catch (RuntimeException ignored) { }
+            recordFailure(actorId, fileId, request, "HEADER_FAILED");
             throw ex;
         }
+        AtomicBoolean finished = new AtomicBoolean();
         StreamingResponseBody body = output -> {
             Throwable failure = null;
             try {
@@ -127,13 +135,25 @@ public final class DownloadController {
                 catch (RuntimeException ex) { failure = ex; }
             }
             if (failure != null) {
-                try { downloads.recordFailed(actorId, fileId, correlationId(request), "STREAM_FAILED"); }
-                catch (RuntimeException ignored) { }
+                recordFailure(actorId, fileId, request, "STREAM_FAILED");
+                finished.set(true);
                 if (failure instanceof IOException io) throw io;
                 if (failure instanceof RuntimeException runtime) throw runtime;
                 throw new IllegalStateException(failure);
             }
+            finished.set(true);
         };
+        if (request != null) {
+            WebAsyncUtils.getAsyncManager(request).registerCallableInterceptor("download-close-" + fileId,
+                new CallableProcessingInterceptor() {
+                    @Override public <T> void afterCompletion(NativeWebRequest ignored, Callable<T> task) {
+                        if (finished.compareAndSet(false, true)) {
+                            try { descriptor.close(); } catch (IOException ignoredClose) { }
+                            recordFailure(actorId, fileId, request, "ASYNC_ABORTED");
+                        }
+                    }
+                });
+        }
         return ResponseEntity.ok().headers(headers).body(body);
     }
 
@@ -150,6 +170,15 @@ public final class DownloadController {
         }
         try { return Long.parseLong(value.toString()); }
         catch (NumberFormatException ex) { throw new IllegalArgumentException("invalid ttlSeconds"); }
+    }
+
+    private void recordFailure(long actorId, UUID fileId, HttpServletRequest request, String code) {
+        try {
+            downloads.recordFailed(actorId, fileId, correlationId(request), code);
+        } catch (RuntimeException ex) {
+            LOG.warn("download failure audit unavailable correlationId={} fileId={} failureCode={}",
+                correlationId(request).value(), fileId, code);
+        }
     }
 
     private static long strictSeconds(String value) {

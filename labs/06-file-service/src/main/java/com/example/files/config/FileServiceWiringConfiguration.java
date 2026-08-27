@@ -5,6 +5,8 @@ import com.example.files.application.access.FileAccessRepository;
 import com.example.files.application.access.FileAccessService;
 import com.example.files.application.access.DownloadService;
 import com.example.files.application.access.LocalDownloadTokenService;
+import com.example.files.application.access.DownloadTelemetry;
+import com.example.files.application.access.DefaultDownloadTelemetry;
 import com.example.files.application.cleanup.CleanupTaskRepository;
 import com.example.files.application.upload.BlobRepository;
 import com.example.files.application.upload.FileRepository;
@@ -104,9 +106,15 @@ public class FileServiceWiringConfiguration {
     public DownloadService downloadService(FileAccessRepository repository, AuditRecorder audits,
                                            ObjectStorage storage, TransactionTemplate transactionTemplate,
                                            ObjectProvider<LocalDownloadTokenService> tokens,
-                                           FileServiceProperties properties, Clock downloadClock) {
+                                           FileServiceProperties properties, Clock downloadClock,
+                                           DownloadTelemetry telemetry) {
         return new DownloadService(repository, audits, storage, transactionTemplate,
-            tokens.getIfAvailable(), properties.download().maxLinkTtl(), downloadClock);
+            tokens.getIfAvailable(), properties.download().maxLinkTtl(), downloadClock, telemetry);
+    }
+
+    @Bean
+    public DownloadTelemetry downloadTelemetry() {
+        return new DefaultDownloadTelemetry();
     }
 
     @Bean
