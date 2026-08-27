@@ -267,8 +267,7 @@ public final class MinioObjectStorage implements ObjectStorage {
     private static boolean isNotFound(ErrorResponseException ex) {
         int status = httpStatus(ex);
         String code = ex.errorResponse() == null ? "" : ex.errorResponse().code();
-        return status == 404 || "NoSuchKey".equalsIgnoreCase(code) || "NoSuchObject".equalsIgnoreCase(code)
-            || "NoSuchBucket".equalsIgnoreCase(code);
+        return status == 404 && ("NoSuchKey".equalsIgnoreCase(code) || "NoSuchObject".equalsIgnoreCase(code));
     }
 
     private static boolean isConflict(Throwable error) {

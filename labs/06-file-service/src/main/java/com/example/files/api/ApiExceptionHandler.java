@@ -6,6 +6,7 @@ import com.example.files.application.upload.StorageObjectNotFoundException;
 import com.example.files.application.upload.UploadRejectedException;
 import com.example.files.application.access.ResourceHiddenException;
 import com.example.files.application.access.DownloadAuditUnavailableException;
+import com.example.files.infrastructure.storage.StorageUnavailableException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpHeaders;
@@ -67,6 +68,7 @@ public final class ApiExceptionHandler {
     }
 
     @ExceptionHandler({StorageCoordinationUnavailableException.class, StorageObjectNotFoundException.class,
+        StorageUnavailableException.class,
         DataAccessException.class, UncheckedIOException.class})
     public ResponseEntity<ApiError> handleUnavailable(Exception ex, HttpServletRequest request) {
         return response(HttpStatus.SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE", "文件服务暂不可用", request);

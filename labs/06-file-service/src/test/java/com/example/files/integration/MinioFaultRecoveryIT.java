@@ -20,6 +20,7 @@ import org.springframework.test.context.DynamicPropertySource;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -44,6 +45,9 @@ class MinioFaultRecoveryIT extends SharedStorageContainers {
         registry.add("file.storage.minio-secret-key", () -> SECRET_KEY);
         registry.add("file.storage.minio-bucket", () -> BUCKET);
         registry.add("file.storage.minio-region", () -> "us-east-1");
+        registry.add("file.storage.minio-connect-timeout", () -> "5s");
+        registry.add("file.storage.minio-read-timeout", () -> "5s");
+        registry.add("file.storage.minio-write-timeout", () -> "5s");
     }
 
     MinioFaultRecoveryIT() { storage.initialize(); }
@@ -83,6 +87,7 @@ class MinioFaultRecoveryIT extends SharedStorageContainers {
     @Test
     void connectionCutDuringRealUploadLeavesNoActiveRowsAndRecoveredUploadIsReady() {
         byte[] bytes = "%PDF-1.7\ntemporary-retry".getBytes(StandardCharsets.US_ASCII);
+        long started = System.nanoTime();
         cutMinioConnection(true);
         assertThatThrownBy(() -> uploadService.upload(new UploadCommand(901L, "temporary-retry.pdf", "application/pdf",
             bytes.length, new ByteArrayInputStream(bytes), CorrelationId.random())))
@@ -90,6 +95,7 @@ class MinioFaultRecoveryIT extends SharedStorageContainers {
                 assertThat(unavailable.retryable()).isTrue();
                 assertThat(unavailable.failureClass()).isEqualTo(StorageFailureClassifier.FailureClass.RETRYABLE);
             });
+        assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofSeconds(12));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM stored_file WHERE status='ACTIVE'", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COALESCE(SUM(reference_count),0) FROM stored_blob", Long.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM upload_session WHERE status='FAILED'", Integer.class)).isOne();

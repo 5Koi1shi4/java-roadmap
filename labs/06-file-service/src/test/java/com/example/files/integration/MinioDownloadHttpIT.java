@@ -50,7 +50,9 @@ class MinioDownloadHttpIT extends SharedStorageContainers {
         byte[] bytes = "%PDF-1.7\nproxy-download".getBytes(StandardCharsets.US_ASCII);
         JsonNode upload = upload(77, "资料.pdf", bytes);
         String fileId = upload.path("fileId").asText();
-        assertThat(context.getBean(com.example.files.infrastructure.storage.MinioObjectStorage.class)).isNotNull();
+        assertThat(context.getBeansOfType(com.example.files.infrastructure.storage.MinioObjectStorage.class)).hasSize(1);
+        assertThat(context.getBeansOfType(com.example.files.infrastructure.storage.LocalObjectStorage.class)).isEmpty();
+        assertThat(context.getBeansOfType(com.example.files.application.upload.ObjectStorage.class)).hasSize(1);
 
         ResponseEntity<String> linkResponse = client.exchange("/api/files/" + fileId + "/download-links?ttlSeconds=120",
             HttpMethod.POST, new HttpEntity<>(headers(77)), String.class);

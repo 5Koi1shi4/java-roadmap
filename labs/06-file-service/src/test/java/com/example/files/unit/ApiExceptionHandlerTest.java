@@ -4,6 +4,8 @@ import com.example.files.api.ApiError;
 import com.example.files.api.ApiExceptionHandler;
 import com.example.files.application.upload.UploadRejectedException;
 import com.example.files.application.audit.CorrelationId;
+import com.example.files.infrastructure.storage.StorageFailureClassifier;
+import com.example.files.infrastructure.storage.StorageUnavailableException;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -34,6 +36,17 @@ class ApiExceptionHandlerTest {
 
         assertThat(response.getBody().correlationId()).isNotEqualTo("550e8400-e29b-41d4-a716-446655440000");
         assertThat(CorrelationId.isValid(response.getBody().correlationId())).isTrue();
+    }
+
+    @Test
+    void mapsUnknownBucketStorageFailureToSafe503() {
+        ResponseEntity<ApiError> response = handler.handleUnavailable(
+            new StorageUnavailableException("stat", StorageFailureClassifier.FailureClass.PERMANENT), request());
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(response.getBody()).extracting(ApiError::code, ApiError::message)
+            .containsExactly("SERVICE_UNAVAILABLE", "文件服务暂不可用");
+        assertThat(response.getBody().message()).doesNotContain("secure-files", "blobs/");
     }
 
     private static MockHttpServletRequest request() {

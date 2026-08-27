@@ -30,8 +30,8 @@ services:
       minio:
         condition: service_healthy
     ports: ["8666:8666", "8474:8474"]
-  # The application must use http://toxiproxy:8666; this service creates the
-  # data-plane route explicitly instead of relying on an endpoint variable.
+  # 容器内应用使用 http://toxiproxy:8666；该服务显式创建数据面路由，
+  # 不依赖宿主机 endpoint 配置。
   toxiproxy-init:
     image: curlimages/curl:8.10.1
     depends_on:

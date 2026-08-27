@@ -4,6 +4,8 @@ import com.example.files.application.upload.StorageObjectNotFoundException;
 import com.example.files.application.upload.TemporaryObject;
 import com.example.files.infrastructure.storage.MinioObjectStorage;
 import com.example.files.infrastructure.storage.StorageConflictException;
+import com.example.files.infrastructure.storage.StorageFailureClassifier;
+import com.example.files.infrastructure.storage.StorageUnavailableException;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -118,6 +120,26 @@ class MinioObjectStorageIT extends SharedStorageContainers {
         assertThat(rule.expiration().days()).isEqualTo(1);
     }
 
+    @Test
+    void unknownBucketIsPermanentStorageFailureForOpenStatAndDelete() {
+        String object = key("blobs");
+        MinioObjectStorage unknownBucket = new MinioObjectStorage(minioClient(),
+            new com.example.files.config.FileServiceProperties.Storage("minio", "target/minio-it-storage",
+                minioEndpoint(), ACCESS_KEY, SECRET_KEY, "bucket-does-not-exist"));
+
+        assertUnknownBucketFailure(() -> unknownBucket.open(object), object);
+        assertUnknownBucketFailure(() -> unknownBucket.stat(object), object);
+        assertUnknownBucketFailure(() -> unknownBucket.delete(object), object);
+    }
+
+    private static void assertUnknownBucketFailure(ThrowingOperation operation, String object) {
+        assertThatThrownBy(operation::run)
+            .isInstanceOfSatisfying(StorageUnavailableException.class, failure -> {
+                assertThat(failure.failureClass()).isEqualTo(StorageFailureClassifier.FailureClass.PERMANENT);
+                assertThat(failure.getMessage()).doesNotContain("bucket-does-not-exist").doesNotContain(object);
+            });
+    }
+
     private boolean commitWithoutFailure(String temp, String destination, CyclicBarrier overlap) throws Exception {
         try {
             overlap.await();
@@ -129,4 +151,7 @@ class MinioObjectStorageIT extends SharedStorageContainers {
     }
 
     private static String key(String namespace) { return namespace + "/" + UUID.randomUUID(); }
+
+    @FunctionalInterface
+    private interface ThrowingOperation { void run(); }
 }
