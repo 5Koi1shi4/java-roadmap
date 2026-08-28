@@ -2,6 +2,8 @@ package com.example.files.config;
 
 import com.example.files.application.cleanup.*;
 import com.example.files.application.upload.*;
+import com.example.files.api.CleanupMaintenanceController;
+import com.example.files.api.security.RequesterIdentityResolver;
 import com.example.files.infrastructure.persistence.JdbcCleanupTaskRepository;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.*;
@@ -24,4 +26,12 @@ public class CleanupMaintenanceConfiguration {
         return new com.example.files.observability.CleanupScheduler(service, expiredUploadService, fallback.getIfAvailable());
     }
 
+    /** 身份解析器存在时才注册维护路由，避免受限 profile 暴露匿名端点。 */
+    @Bean
+    @Profile({"local", "test"})
+    @ConditionalOnProperty(prefix = "file.identity", name = "trusted-header-enabled", havingValue = "true")
+    public CleanupMaintenanceController cleanupMaintenanceController(JdbcCleanupTaskRepository tasks,
+                                                                       RequesterIdentityResolver identities) {
+        return new CleanupMaintenanceController(tasks, identities);
+    }
 }

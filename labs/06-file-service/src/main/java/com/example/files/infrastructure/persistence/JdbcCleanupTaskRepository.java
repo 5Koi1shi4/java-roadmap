@@ -14,18 +14,12 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import com.example.files.application.cleanup.ClaimedCleanup;
 import com.example.files.application.cleanup.CleanupTaskType;
-import com.example.files.application.upload.BlobRepository;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /** 临时对象清理任务 JDBC 实现；唯一目标键保证补偿入队幂等。 */
 public final class JdbcCleanupTaskRepository implements CleanupTaskRepository {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactionTemplate;
-
-    public JdbcCleanupTaskRepository(JdbcTemplate jdbc) {
-        this.jdbc = java.util.Objects.requireNonNull(jdbc, "jdbc");
-        this.transactionTemplate = null;
-    }
 
     public JdbcCleanupTaskRepository(JdbcTemplate jdbc, TransactionTemplate transactionTemplate) {
         this.jdbc = java.util.Objects.requireNonNull(jdbc, "jdbc");
@@ -150,20 +144,19 @@ public final class JdbcCleanupTaskRepository implements CleanupTaskRepository {
     }
 
     @Override
-    public boolean completeBlobAndTask(BlobRepository ignored, long blobId, long generation, UUID blobToken,
+    public boolean completeBlobAndTask(long blobId, long generation, String objectKey, UUID blobToken,
                                        UUID taskId, UUID claimToken) {
-        if (blobId <= 0 || generation <= 0 || blobToken == null || taskId == null || claimToken == null) throw new IllegalArgumentException("invalid atomic completion arguments");
+        if (blobId <= 0 || generation <= 0 || objectKey == null || objectKey.isBlank() || blobToken == null || taskId == null || claimToken == null) throw new IllegalArgumentException("invalid atomic completion arguments");
         java.util.function.Supplier<Boolean> operation = () -> {
             int blob = jdbc.update("UPDATE stored_blob SET status='DELETED',cleanup_token=NULL,cleanup_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) "
-                    + "WHERE id=? AND generation=? AND status='DELETING' AND cleanup_token=?", blobId, generation, blobToken.toString());
+                + "WHERE id=? AND generation=? AND object_key=? AND status='DELETING' AND cleanup_token=?", blobId, generation, objectKey, blobToken.toString());
             if (blob != 1) return false;
             return jdbc.update("UPDATE storage_cleanup_task SET status='COMPLETED',completed_at=CURRENT_TIMESTAMP(6),owner=NULL,claim_token=NULL,lease_until=NULL "
-                    + "WHERE task_id=? AND status='PROCESSING' AND claim_token=?", taskId.toString(), claimToken.toString()) == 1;
+                    + "WHERE task_id=? AND task_type='BLOB_OBJECT' AND target_id=? AND target_generation=? AND object_key=? "
+                    + "AND status='PROCESSING' AND claim_token=?", taskId.toString(), Long.toString(blobId), generation,
+                objectKey, claimToken.toString()) == 1;
         };
-        if (transactionTemplate == null) {
-            if (!operation.get()) throw new IllegalStateException("cleanup atomic completion fenced");
-            return true;
-        }
+        if (transactionTemplate == null) throw new IllegalStateException("cleanup atomic completion requires an explicit transaction");
         return Boolean.TRUE.equals(transactionTemplate.execute(status -> {
             if (!operation.get()) {
                 // task token 失效时必须回滚 Blob 的 DELETED 更新，交给新 owner 重试。

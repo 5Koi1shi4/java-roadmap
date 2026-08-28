@@ -51,7 +51,7 @@ class ConcurrentDeduplicationIT extends SharedMySqlContainer {
         service = new UploadService(transactions, new UploadInspector(),
             new LocalObjectStorage(Files.createTempDirectory("dedup")),
             new StagingWaitPolicy(Duration.ofSeconds(5), Duration.ofMillis(10)),
-            new JdbcCleanupTaskRepository(jdbc), new UploadFailureClassifier());
+            new JdbcCleanupTaskRepository(jdbc, new TransactionTemplate(new DataSourceTransactionManager(dataSource))), new UploadFailureClassifier());
     }
 
     @BeforeEach

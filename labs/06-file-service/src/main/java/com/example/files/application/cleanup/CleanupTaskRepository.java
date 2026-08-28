@@ -7,7 +7,6 @@ import com.example.files.application.upload.BlobReservation;
 import java.util.UUID;
 import java.time.Duration;
 import java.util.List;
-import com.example.files.application.upload.BlobRepository;
 
 /** 清理任务持久化端口；入队操作必须具备目标唯一性以支持重复补偿。 */
 public interface CleanupTaskRepository {
@@ -41,9 +40,7 @@ public interface CleanupTaskRepository {
     default boolean retry(UUID taskId, UUID claimToken, Duration delay, String error) { throw new UnsupportedOperationException("cleanup retry is not supported"); }
     default boolean fail(UUID taskId, UUID claimToken, String error) { throw new UnsupportedOperationException("cleanup failure is not supported"); }
     default boolean resetFailed(UUID taskId) { throw new UnsupportedOperationException("cleanup maintenance is not supported"); }
-    /** Blob 状态与任务完成在同一短事务中发布；无实现时退回顺序 fencing。 */
-    default boolean completeBlobAndTask(BlobRepository blobs, long blobId, long generation, UUID blobToken,
-                                        UUID taskId, UUID claimToken) {
-        return blobs.completeDeletion(blobId, generation, blobToken) && complete(taskId, claimToken);
-    }
+    /** Blob 状态与任务完成必须由实现以同一显式事务发布。 */
+    boolean completeBlobAndTask(long blobId, long generation, String objectKey, UUID blobToken,
+                                UUID taskId, UUID claimToken);
 }

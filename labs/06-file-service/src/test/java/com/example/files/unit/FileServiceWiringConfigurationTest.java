@@ -6,6 +6,8 @@ import com.example.files.api.ApiExceptionHandler;
 import com.example.files.api.CorrelationIdFilter;
 import com.example.files.api.security.RequesterIdentityResolver;
 import com.example.files.application.upload.ObjectStorage;
+import com.example.files.application.upload.BlobRepository;
+import com.example.files.application.upload.UploadSessionRepository;
 import com.example.files.application.upload.StagingWaitPolicy;
 import com.example.files.application.upload.UploadInspector;
 import com.example.files.application.upload.UploadService;
@@ -13,6 +15,8 @@ import com.example.files.application.upload.UploadTransactionService;
 import com.example.files.application.upload.StagingRecoveryService;
 import com.example.files.config.FileServiceProperties;
 import com.example.files.config.FileServiceWiringConfiguration;
+import com.example.files.config.LocalFallbackConfiguration;
+import com.example.files.config.CleanupMaintenanceConfiguration;
 import com.example.files.config.TrustedHeaderIdentityConfiguration;
 import com.example.files.infrastructure.persistence.JdbcAuditRecorder;
 import com.example.files.infrastructure.persistence.JdbcBlobRepository;
@@ -20,6 +24,8 @@ import com.example.files.infrastructure.persistence.JdbcCleanupTaskRepository;
 import com.example.files.infrastructure.persistence.JdbcFileRepository;
 import com.example.files.infrastructure.persistence.JdbcUploadSessionRepository;
 import com.example.files.infrastructure.storage.LocalObjectStorage;
+import com.example.files.application.cleanup.LocalTemporaryFallbackCleaner;
+import com.example.files.observability.CleanupScheduler;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -62,6 +68,102 @@ class FileServiceWiringConfigurationTest {
                 assertThat(context).hasSingleBean(FileController.class);
                 assertThat(context.getBeansOfType(DownloadController.class)).hasSize(1);
                 assertThat(context).hasSingleBean(MeterRegistry.class);
+            });
+    }
+
+    @Test
+    void localFallbackIsPresentButMinioDoesNotInstallIt() {
+        new ApplicationContextRunner()
+            .withUserConfiguration(LocalFallbackConfiguration.class)
+            .withBean(FileServiceProperties.class, FileServiceWiringConfigurationTest::properties)
+            .withPropertyValues("file.storage.type=local")
+            .run(context -> assertThat(context).hasSingleBean(LocalTemporaryFallbackCleaner.class));
+
+        new ApplicationContextRunner()
+            .withUserConfiguration(LocalFallbackConfiguration.class)
+            .withBean(FileServiceProperties.class, FileServiceWiringConfigurationTest::properties)
+            .withPropertyValues("file.storage.type=minio")
+            .run(context -> assertThat(context).doesNotHaveBean(LocalTemporaryFallbackCleaner.class));
+    }
+
+    @Test
+    void maintenanceSchedulerKeepsLocalFallbackWiring() {
+        DataSource dataSource = mock(DataSource.class);
+        new ApplicationContextRunner()
+            .withUserConfiguration(FileServiceWiringConfiguration.class, CleanupMaintenanceConfiguration.class,
+                TrustedHeaderIdentityConfiguration.class)
+            .withBean(FileServiceProperties.class, FileServiceWiringConfigurationTest::properties)
+            .withBean(DataSource.class, () -> dataSource)
+            .withBean(JdbcTemplate.class, () -> new JdbcTemplate(dataSource))
+            .withPropertyValues("file.maintenance.enabled=true", "file.storage.type=local",
+                "file.identity.trusted-header-enabled=true", "spring.profiles.active=test", "file.cleanup.schedule=1m")
+            .run(context -> {
+                assertThat(context.getStartupFailure()).isNull();
+                assertThat(context).hasSingleBean(CleanupScheduler.class);
+                assertThat(context).hasSingleBean(LocalTemporaryFallbackCleaner.class);
+                assertThat(context).hasSingleBean(com.example.files.api.CleanupMaintenanceController.class);
+            });
+    }
+
+    @Test
+    void minioProfileKeepsSchedulerWithoutLocalFallback() {
+        new ApplicationContextRunner()
+            .withUserConfiguration(CleanupMaintenanceConfiguration.class)
+            .withBean(FileServiceProperties.class, FileServiceWiringConfigurationTest::properties)
+            .withBean(JdbcCleanupTaskRepository.class, () -> mock(JdbcCleanupTaskRepository.class))
+            .withBean(ObjectStorage.class, () -> mock(ObjectStorage.class))
+            .withBean(UploadSessionRepository.class, () -> mock(UploadSessionRepository.class))
+            .withBean(BlobRepository.class, () -> mock(BlobRepository.class))
+            .withBean(StagingRecoveryService.class, () -> mock(StagingRecoveryService.class))
+            .withPropertyValues("file.maintenance.enabled=true", "file.storage.type=minio",
+                "file.cleanup.schedule=1m")
+            .run(context -> {
+                assertThat(context.getStartupFailure()).isNull();
+                assertThat(context).hasSingleBean(CleanupScheduler.class);
+                assertThat(context).doesNotHaveBean(LocalTemporaryFallbackCleaner.class);
+            });
+    }
+
+    @Test
+    void maintenanceRouteRequiresEnabledTestProfileAndIdentityResolver() {
+        DataSource dataSource = mock(DataSource.class);
+        new ApplicationContextRunner()
+            .withUserConfiguration(FileServiceWiringConfiguration.class, CleanupMaintenanceConfiguration.class,
+                TrustedHeaderIdentityConfiguration.class)
+            .withBean(FileServiceProperties.class, FileServiceWiringConfigurationTest::properties)
+            .withBean(DataSource.class, () -> dataSource)
+            .withBean(JdbcTemplate.class, () -> new JdbcTemplate(dataSource))
+            .withPropertyValues("file.maintenance.enabled=false", "file.identity.trusted-header-enabled=true",
+                "spring.profiles.active=test", "file.cleanup.schedule=1m")
+            .run(context -> {
+                assertThat(context).doesNotHaveBean(CleanupScheduler.class);
+                assertThat(context).doesNotHaveBean(com.example.files.api.CleanupMaintenanceController.class);
+            });
+
+        new ApplicationContextRunner()
+            .withUserConfiguration(FileServiceWiringConfiguration.class, CleanupMaintenanceConfiguration.class,
+                TrustedHeaderIdentityConfiguration.class)
+            .withBean(FileServiceProperties.class, FileServiceWiringConfigurationTest::properties)
+            .withBean(DataSource.class, () -> dataSource)
+            .withBean(JdbcTemplate.class, () -> new JdbcTemplate(dataSource))
+            .withPropertyValues("file.maintenance.enabled=true", "file.identity.trusted-header-enabled=true",
+                "spring.profiles.active=prod", "file.cleanup.schedule=1m")
+            .run(context -> {
+                assertThat(context).hasSingleBean(CleanupScheduler.class);
+                assertThat(context).doesNotHaveBean(com.example.files.api.CleanupMaintenanceController.class);
+            });
+
+        new ApplicationContextRunner()
+            .withUserConfiguration(FileServiceWiringConfiguration.class, CleanupMaintenanceConfiguration.class,
+                TrustedHeaderIdentityConfiguration.class)
+            .withBean(FileServiceProperties.class, FileServiceWiringConfigurationTest::properties)
+            .withBean(DataSource.class, () -> dataSource)
+            .withBean(JdbcTemplate.class, () -> new JdbcTemplate(dataSource))
+            .withPropertyValues("file.maintenance.enabled=true", "file.identity.trusted-header-enabled=false",
+                "spring.profiles.active=test", "file.cleanup.schedule=1m")
+            .run(context -> {
+                assertThat(context).hasSingleBean(CleanupScheduler.class);
+                assertThat(context).doesNotHaveBean(com.example.files.api.CleanupMaintenanceController.class);
             });
     }
 

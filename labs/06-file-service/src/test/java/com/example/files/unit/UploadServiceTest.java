@@ -221,5 +221,6 @@ class UploadServiceTest {
         @Override public void enqueueTempIfEligible(UUID sessionId) { }
         @Override public void enqueueBlob(com.example.files.domain.StoredBlob blob) { }
         @Override public void enqueueBlob(BlobReservation.Granted reservation) { }
+        @Override public boolean completeBlobAndTask(long blobId, long generation, String objectKey, UUID blobToken, UUID taskId, UUID claimToken) { return false; }
     }
 }

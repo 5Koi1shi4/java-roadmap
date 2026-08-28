@@ -50,12 +50,12 @@ public interface BlobRepository {
     boolean markPendingDeleteFromRecovery(long blobId, UUID sessionId, UUID ownerToken);
 
     /** 清理任务 token/generation fencing：只允许当前代次进入 DELETING。 */
-    default boolean claimDeletion(long blobId, long generation, UUID cleanupToken, Duration lease) {
+    default boolean claimDeletion(long blobId, long generation, String objectKey, UUID cleanupToken, Duration lease) {
         throw new UnsupportedOperationException("blob cleanup claiming is not supported");
     }
 
     /** 删除对象后以同一 token/generation 发布 DELETED。 */
-    default boolean completeDeletion(long blobId, long generation, UUID cleanupToken) {
+    default boolean completeDeletion(long blobId, long generation, String objectKey, UUID cleanupToken) {
         throw new UnsupportedOperationException("blob cleanup completion is not supported");
     }
 }

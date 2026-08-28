@@ -25,7 +25,7 @@ class CleanupAtomicCompletionTest {
             return callback.doInTransaction(status);
         });
         JdbcCleanupTaskRepository repository = new JdbcCleanupTaskRepository(jdbc, tx);
-        assertThatThrownBy(() -> repository.completeBlobAndTask(mock(BlobRepository.class), 1, 1,
+        assertThatThrownBy(() -> repository.completeBlobAndTask(1, 1, "blobs/key",
             UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID()))
             .isInstanceOf(IllegalStateException.class);
         verify(status).setRollbackOnly();

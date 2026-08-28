@@ -48,7 +48,7 @@ class StagingRecoveryIT extends SharedMySqlContainer {
         jdbc = new JdbcTemplate(dataSource);
         sessions = new JdbcUploadSessionRepository(jdbc);
         blobs = new JdbcBlobRepository(jdbc);
-        cleanup = new JdbcCleanupTaskRepository(jdbc);
+        cleanup = new JdbcCleanupTaskRepository(jdbc, new TransactionTemplate(new DataSourceTransactionManager(dataSource)));
         transactions = new UploadTransactionService(sessions, blobs, new JdbcFileRepository(jdbc),
             new JdbcAuditRecorder(jdbc), new TransactionTemplate(new DataSourceTransactionManager(dataSource)), testProperties());
         storage = new LocalObjectStorage(Files.createTempDirectory("staging-recovery"));
@@ -103,6 +103,7 @@ class StagingRecoveryIT extends SharedMySqlContainer {
                 throw new IllegalStateException("injected cleanup database failure");
             }
             @Override public void enqueueBlob(com.example.files.application.upload.BlobReservation.Granted ignored) { }
+            @Override public boolean completeBlobAndTask(long blobId, long generation, String objectKey, UUID blobToken, UUID taskId, UUID claimToken) { return false; }
         };
         StagingRecoveryService recovery = new StagingRecoveryService(sessions, blobs, transactions, storage, failing,
             Duration.ofSeconds(2));

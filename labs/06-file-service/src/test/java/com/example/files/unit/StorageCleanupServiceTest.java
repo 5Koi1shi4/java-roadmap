@@ -31,6 +31,19 @@ class StorageCleanupServiceTest {
         assertThat(summary.retried()).isOne();
     }
 
+    @Test
+    void blobCleanupUsesTaskObjectKeyForBothDatabaseFences() {
+        Fixture f = new Fixture();
+        f.task = new ClaimedCleanup(f.task.taskId(), CleanupTaskType.BLOB_OBJECT, "7", 3,
+            "blobs/task-key", f.task.claimToken(), 0);
+        when(f.blobs.claimDeletion(eq(7L), eq(3L), eq("blobs/task-key"), any(), any())).thenReturn(true);
+        when(f.tasks.completeBlobAndTask(eq(7L), eq(3L), eq("blobs/task-key"), any(), eq(f.task.taskId()), eq(f.task.claimToken()))).thenReturn(true);
+        StorageCleanupService service = f.service();
+        assertThat(service.runBatch("worker").completed()).isOne();
+        verify(f.blobs).claimDeletion(eq(7L), eq(3L), eq("blobs/task-key"), any(), any());
+        verify(f.tasks).completeBlobAndTask(eq(7L), eq(3L), eq("blobs/task-key"), any(), eq(f.task.taskId()), eq(f.task.claimToken()));
+    }
+
     private static final class Fixture {
         final UUID sessionId = UUID.randomUUID();
         final CleanupTaskRepository tasks = mock(CleanupTaskRepository.class);

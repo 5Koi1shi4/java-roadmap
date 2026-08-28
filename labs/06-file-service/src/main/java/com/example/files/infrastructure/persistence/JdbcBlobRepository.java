@@ -205,23 +205,23 @@ public final class JdbcBlobRepository implements BlobRepository {
     }
 
     @Override
-    public boolean claimDeletion(long blobId, long generation, UUID cleanupToken, Duration lease) {
-        if (blobId <= 0 || generation <= 0 || cleanupToken == null || lease == null || lease.isZero() || lease.isNegative()) {
+    public boolean claimDeletion(long blobId, long generation, String objectKey, UUID cleanupToken, Duration lease) {
+        if (blobId <= 0 || generation <= 0 || objectKey == null || objectKey.isBlank() || cleanupToken == null || lease == null || lease.isZero() || lease.isNegative()) {
             throw new IllegalArgumentException("invalid blob deletion claim arguments");
         }
         return jdbc.update("UPDATE stored_blob SET status='DELETING',cleanup_token=?,"
                 + "cleanup_lease_until=TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6)),updated_at=CURRENT_TIMESTAMP(6) "
-                + "WHERE id=? AND generation=? AND reference_count=0 AND (status='PENDING_DELETE' OR "
+                + "WHERE id=? AND generation=? AND object_key=? AND reference_count=0 AND (status='PENDING_DELETE' OR "
                 + "(status='DELETING' AND cleanup_lease_until<=CURRENT_TIMESTAMP(6)))",
-            cleanupToken.toString(), JdbcUploadSessionRepository.micros(lease), blobId, generation) == 1;
+            cleanupToken.toString(), JdbcUploadSessionRepository.micros(lease), blobId, generation, objectKey) == 1;
     }
 
     @Override
-    public boolean completeDeletion(long blobId, long generation, UUID cleanupToken) {
-        if (blobId <= 0 || generation <= 0 || cleanupToken == null) throw new IllegalArgumentException("invalid blob deletion completion arguments");
+    public boolean completeDeletion(long blobId, long generation, String objectKey, UUID cleanupToken) {
+        if (blobId <= 0 || generation <= 0 || objectKey == null || objectKey.isBlank() || cleanupToken == null) throw new IllegalArgumentException("invalid blob deletion completion arguments");
         return jdbc.update("UPDATE stored_blob SET status='DELETED',cleanup_token=NULL,cleanup_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) "
-                + "WHERE id=? AND generation=? AND status='DELETING' AND cleanup_token=?",
-            blobId, generation, cleanupToken.toString()) == 1;
+                + "WHERE id=? AND generation=? AND object_key=? AND status='DELETING' AND cleanup_token=?",
+            blobId, generation, objectKey, cleanupToken.toString()) == 1;
     }
 
     private StoredBlob map(ResultSet rs, int row) throws SQLException {

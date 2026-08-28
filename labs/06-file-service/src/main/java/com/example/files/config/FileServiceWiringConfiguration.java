@@ -45,7 +45,7 @@ import io.micrometer.core.instrument.MeterRegistry;
  * 这样缺失基础设施时应用会在启动阶段失败，而不会由条件 Controller 隐藏配置错误。
  */
 @Configuration(proxyBeanMethods = false)
-@Import(ObjectStorageConfiguration.class)
+@Import({ObjectStorageConfiguration.class, LocalFallbackConfiguration.class})
 public class FileServiceWiringConfiguration {
 
     @Bean
@@ -71,13 +71,6 @@ public class FileServiceWiringConfiguration {
     @Bean
     public JdbcCleanupTaskRepository cleanupTaskRepository(JdbcTemplate jdbc, TransactionTemplate transactionTemplate) {
         return new JdbcCleanupTaskRepository(jdbc, transactionTemplate);
-    }
-
-    /** 本地存储才装配兜底清理；MinIO 永远不扫描本地文件系统。 */
-    @Bean
-    @ConditionalOnExpression("'${file.storage.type:local}' == 'local'")
-    public LocalTemporaryFallbackCleaner localTemporaryFallbackCleaner(FileServiceProperties properties) {
-        return new LocalTemporaryFallbackCleaner(properties);
     }
 
     @Bean

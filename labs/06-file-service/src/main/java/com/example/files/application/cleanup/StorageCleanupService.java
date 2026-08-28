@@ -85,7 +85,7 @@ public final class StorageCleanupService {
         long blobId;
         try { blobId = Long.parseLong(task.targetId()); } catch (NumberFormatException bad) { return markFailure(task, bad); }
         UUID token = UUID.randomUUID();
-        if (!blobs.claimDeletion(blobId, task.targetGeneration(), token, lease)) return markRetry(task, "blob deletion claim fenced");
+        if (!blobs.claimDeletion(blobId, task.targetGeneration(), task.objectKey(), token, lease)) return markRetry(task, "blob deletion claim fenced");
         boolean deleted = false;
         try {
             storage.delete(task.objectKey());
@@ -95,7 +95,7 @@ public final class StorageCleanupService {
         } catch (RuntimeException error) {
             return failure(task, error);
         }
-        if (!deleted || !tasks.completeBlobAndTask(blobs, blobId, task.targetGeneration(), token,
+        if (!deleted || !tasks.completeBlobAndTask(blobId, task.targetGeneration(), task.objectKey(), token,
             task.taskId(), task.claimToken())) {
             return markRetry(task, "blob deletion completion fenced");
         }

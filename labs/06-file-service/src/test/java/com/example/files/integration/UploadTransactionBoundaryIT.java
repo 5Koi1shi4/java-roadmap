@@ -59,7 +59,7 @@ class UploadTransactionBoundaryIT extends SharedMySqlContainer {
         storage = new ProbeStorage(new LocalObjectStorage(Files.createTempDirectory("upload-boundary")));
         service = new UploadService(transactions, new UploadInspector(), storage,
             new StagingWaitPolicy(Duration.ofSeconds(2), Duration.ofMillis(5)),
-            new JdbcCleanupTaskRepository(jdbc), new UploadFailureClassifier());
+            new JdbcCleanupTaskRepository(jdbc, new TransactionTemplate(new DataSourceTransactionManager(dataSource))), new UploadFailureClassifier());
     }
 
     @BeforeEach
@@ -105,7 +105,9 @@ class UploadTransactionBoundaryIT extends SharedMySqlContainer {
             new TransactionTemplate(new DataSourceTransactionManager(
                 new DriverManagerDataSource(MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword()))), testProperties());
         UploadService failingService = new UploadService(failingTransactions, new UploadInspector(), storage,
-            new StagingWaitPolicy(Duration.ofSeconds(2), Duration.ofMillis(5)), new JdbcCleanupTaskRepository(jdbc),
+            new StagingWaitPolicy(Duration.ofSeconds(2), Duration.ofMillis(5)),
+            new JdbcCleanupTaskRepository(jdbc, new TransactionTemplate(new DataSourceTransactionManager(
+                new DriverManagerDataSource(MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword())))),
             new UploadFailureClassifier());
         assertThatThrownBy(() -> failingService.upload(new UploadCommand(3L, "b-failure.pdf", "application/pdf", body.length,
             new java.io.ByteArrayInputStream(body), CorrelationId.random()))).isInstanceOf(RuntimeException.class);
