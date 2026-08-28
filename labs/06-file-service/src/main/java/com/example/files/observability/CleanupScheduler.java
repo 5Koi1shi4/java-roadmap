@@ -36,17 +36,16 @@ public final class CleanupScheduler {
             if (expiredUploads != null) expiredUploads.expireUploads(owner);
         } catch (RuntimeException current) {
             log.error("过期上传清理阶段失败，继续执行任务清理阶段", current);
-            runFallback(current);
             failure = current;
         }
         try {
             cleanup.runBatch(owner);
         } catch (RuntimeException current) {
             log.error("存储清理任务阶段失败", current);
-            runFallback(current);
             if (failure == null) failure = current;
             else failure.addSuppressed(current);
         }
+        if (failure != null) runFallback(failure);
         if (failure != null) throw failure;
     }
 

@@ -11,6 +11,7 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import java.time.Duration;
 import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** 真实 MySQL 验证清理任务 lease takeover 与 claim token fencing。 */
 class CleanupLeaseIT extends SharedMySqlContainer {
@@ -102,6 +103,34 @@ class CleanupLeaseIT extends SharedMySqlContainer {
         assertThat(jdbc.queryForObject("SELECT status FROM storage_cleanup_task WHERE task_id=?", String.class, current.taskId().toString())).isEqualTo("PROCESSING");
         assertThat(tasks.completeBlobAndTask(blobId, 1, key, currentBlobToken, current.taskId(), current.claimToken())).isTrue();
         assertThat(jdbc.queryForObject("SELECT status FROM stored_blob WHERE id=?", String.class, blobId)).isEqualTo("DELETED");
+        jdbc.update("DELETE FROM storage_cleanup_task WHERE task_id=?", taskId.toString());
+        jdbc.update("DELETE FROM stored_blob WHERE id=?", blobId);
+    }
+
+    @Test void atomicCompletionRollsBackBlobWhenTaskTokenIsFenced() {
+        String key = "blobs/" + UUID.randomUUID();
+        UUID blobToken = UUID.randomUUID();
+        UUID taskId = UUID.randomUUID();
+        UUID taskToken = UUID.randomUUID();
+        UUID wrongTaskToken = UUID.randomUUID();
+        jdbc.update("INSERT INTO stored_blob(content_hash,object_key,size_bytes,media_type,reference_count,status,generation,cleanup_token,cleanup_lease_until,created_at,updated_at) "
+                + "VALUES(?, ?, 4, 'text/plain', 0, 'DELETING', 1, ?, TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)), CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            UUID.randomUUID().toString().replace("-", ""), key, blobToken.toString());
+        long blobId = jdbc.queryForObject("SELECT id FROM stored_blob WHERE object_key=?", Long.class, key);
+        jdbc.update("INSERT INTO storage_cleanup_task(task_id,task_type,target_id,target_generation,object_key,status,owner,claim_token,lease_until,available_at,attempt_count,created_at) "
+                + "VALUES(?, 'BLOB_OBJECT', ?, 1, ?, 'PROCESSING', 'current-owner', ?, TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)), CURRENT_TIMESTAMP(6), 0, CURRENT_TIMESTAMP(6))",
+            taskId.toString(), Long.toString(blobId), key, taskToken.toString());
+
+        assertThatThrownBy(() -> tasks.completeBlobAndTask(blobId, 1, key, blobToken, taskId, wrongTaskToken))
+            .isInstanceOf(IllegalStateException.class);
+        assertThat(jdbc.queryForObject("SELECT status FROM stored_blob WHERE id=?", String.class, blobId)).isEqualTo("DELETING");
+        assertThat(jdbc.queryForObject("SELECT cleanup_token FROM stored_blob WHERE id=?", String.class, blobId)).isEqualTo(blobToken.toString());
+        assertThat(jdbc.queryForObject("SELECT status FROM storage_cleanup_task WHERE task_id=?", String.class, taskId.toString())).isEqualTo("PROCESSING");
+        assertThat(jdbc.queryForObject("SELECT claim_token FROM storage_cleanup_task WHERE task_id=?", String.class, taskId.toString())).isEqualTo(taskToken.toString());
+
+        assertThat(tasks.completeBlobAndTask(blobId, 1, key, blobToken, taskId, taskToken)).isTrue();
+        assertThat(jdbc.queryForObject("SELECT status FROM stored_blob WHERE id=?", String.class, blobId)).isEqualTo("DELETED");
+        assertThat(jdbc.queryForObject("SELECT status FROM storage_cleanup_task WHERE task_id=?", String.class, taskId.toString())).isEqualTo("COMPLETED");
         jdbc.update("DELETE FROM storage_cleanup_task WHERE task_id=?", taskId.toString());
         jdbc.update("DELETE FROM stored_blob WHERE id=?", blobId);
     }

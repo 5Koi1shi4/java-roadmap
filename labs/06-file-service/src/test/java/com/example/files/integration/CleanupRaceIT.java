@@ -26,6 +26,7 @@ import java.util.concurrent.*;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.awaitility.Awaitility.await;
 
 /** 真实 MySQL 与本地对象存储验证最后引用删除和同哈希重传的代次 fencing。 */
 class CleanupRaceIT extends SharedMySqlContainer {
@@ -76,19 +77,11 @@ class CleanupRaceIT extends SharedMySqlContainer {
             TransactionTemplate tx = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
             new FileAccessService(new JdbcFileAccessRepository(jdbc), new JdbcAuditRecorder(jdbc), tx)
                 .delete(oldOwner, oldFile.fileId(), CorrelationId.random());
-            // 以同一真实 MySQL 事务明确制造最后引用归零的 PENDING_DELETE 状态。
-            tx.executeWithoutResult(status -> {
-                jdbc.update("UPDATE stored_file SET status='DELETED',deleted_at=CURRENT_TIMESTAMP(6) WHERE file_id=? AND status='ACTIVE'", oldFileId);
-                jdbc.update("UPDATE stored_blob SET reference_count=0,status='PENDING_DELETE',updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", blobId);
-                jdbc.update("DELETE FROM storage_cleanup_task WHERE task_type='BLOB_OBJECT' AND target_id=?", Long.toString(blobId));
-                jdbc.update("INSERT INTO storage_cleanup_task(task_id,task_type,target_id,target_generation,object_key,status,available_at,attempt_count,created_at) "
-                    + "SELECT ?, 'BLOB_OBJECT', CAST(id AS CHAR), generation, object_key, 'NEW', CURRENT_TIMESTAMP(6), 0, CURRENT_TIMESTAMP(6) FROM stored_blob WHERE id=?",
-                    UUID.randomUUID().toString(), blobId);
-            });
-            // 初次上传临时对象已完成；避免历史补偿任务抢占本轮专门的 Blob 竞争窗口。
-            jdbc.update("DELETE FROM storage_cleanup_task WHERE task_type='TEMP_OBJECT'");
+            assertThat(jdbc.queryForObject("SELECT status FROM stored_file WHERE file_id=?", String.class, oldFileId)).isEqualTo("DELETED");
             assertThat(jdbc.queryForObject("SELECT status FROM stored_blob WHERE id=?", String.class, blobId)).isEqualTo("PENDING_DELETE");
-
+            assertThat(jdbc.queryForObject("SELECT reference_count FROM stored_blob WHERE id=?", Long.class, blobId)).isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM storage_cleanup_task WHERE task_type='BLOB_OBJECT' AND target_id=? AND target_generation=? AND object_key=? AND status='NEW'",
+                Integer.class, Long.toString(blobId), oldGeneration, oldKey)).isOne();
             storage.prepareOverlap(oldKey);
             StorageCleanupService cleaner = new StorageCleanupService(tasks, storage,
                 new JdbcUploadSessionRepository(jdbc), blobs, testProperties());
@@ -97,7 +90,8 @@ class CleanupRaceIT extends SharedMySqlContainer {
                 Future<CleanupSummary> cleanup = executor.submit(() -> cleaner.runBatch("race-cleaner-" + iteration));
                 assertThat(storage.deleteEntered.await(10, TimeUnit.SECONDS))
                     .as("cleaner must enter physical delete; task=%s blob=%s",
-                        jdbc.queryForObject("SELECT status FROM storage_cleanup_task", String.class),
+                        jdbc.queryForObject("SELECT status FROM storage_cleanup_task WHERE task_type='BLOB_OBJECT' AND target_id=? AND status='PROCESSING'",
+                            String.class, Long.toString(blobId)),
                         jdbc.queryForObject("SELECT status FROM stored_blob WHERE id=?", String.class, blobId))
                     .isTrue();
                 storage.oldBlobToken = UUID.fromString(jdbc.queryForObject("SELECT cleanup_token FROM stored_blob WHERE id=?", String.class, blobId));
@@ -105,8 +99,13 @@ class CleanupRaceIT extends SharedMySqlContainer {
                 storage.oldTaskToken = UUID.fromString(jdbc.queryForObject("SELECT claim_token FROM storage_cleanup_task WHERE task_id=?", String.class, storage.oldTaskId.toString()));
                 Future<UploadResult> retried = executor.submit(() -> uploads.upload(command(2000L + iteration, content)));
                 assertThat(storage.uploadStarted.await(10, TimeUnit.SECONDS)).isTrue();
+                await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+                    assertThat(jdbc.queryForObject("SELECT status FROM upload_session WHERE uploader_id=? ORDER BY created_at DESC LIMIT 1", String.class,
+                        2000L + iteration)).isIn("VALIDATED", "FINALIZING");
+                    assertThat(jdbc.queryForObject("SELECT status FROM stored_blob WHERE id=?", String.class, blobId)).isEqualTo("DELETING");
+                });
                 storage.releaseDelete.countDown();
-                assertThat(cleanup.get(20, TimeUnit.SECONDS).completed()).isOne();
+                assertThat(cleanup.get(20, TimeUnit.SECONDS).completed()).isGreaterThanOrEqualTo(1);
                 UploadResult newFile = retried.get(20, TimeUnit.SECONDS);
                 String newKey = jdbc.queryForObject("SELECT b.object_key FROM stored_file f JOIN stored_blob b ON b.id=f.blob_id WHERE f.file_id=?",
                     String.class, newFile.fileId().toString());
