@@ -1,6 +1,7 @@
 package com.example.files.application.upload;
 
 import com.example.files.application.audit.CorrelationId;
+import com.example.files.application.audit.FileServiceMetrics;
 import com.example.files.application.cleanup.CleanupTaskRepository;
 import com.example.files.domain.SafeDisplayName;
 import com.example.files.domain.UploadSession;
@@ -42,24 +43,25 @@ public final class UploadService {
     private final long maxBytes;
     private final Duration sessionTtl;
     private final Duration stagingLease;
+    private final FileServiceMetrics metrics;
 
     public UploadService(Transactions transactions, UploadInspector inspector, ObjectStorage storage,
                          StagingWaitPolicy waitPolicy, CleanupTaskRepository cleanupTasks,
                          UploadFailureClassifier classifier) {
         this(transactions, inspector, storage, waitPolicy, cleanupTasks, classifier,
-            UploadInspector.DEFAULT_MAX_BYTES, null, null);
+            UploadInspector.DEFAULT_MAX_BYTES, null, null, null);
     }
 
     public UploadService(Transactions transactions, UploadInspector inspector, ObjectStorage storage,
                          StagingWaitPolicy waitPolicy, CleanupTaskRepository cleanupTasks,
                          UploadFailureClassifier classifier, long maxBytes) {
-        this(transactions, inspector, storage, waitPolicy, cleanupTasks, classifier, maxBytes, null, null);
+        this(transactions, inspector, storage, waitPolicy, cleanupTasks, classifier, maxBytes, null, null, null);
     }
 
     private UploadService(Transactions transactions, UploadInspector inspector, ObjectStorage storage,
                          StagingWaitPolicy waitPolicy, CleanupTaskRepository cleanupTasks,
                          UploadFailureClassifier classifier, long maxBytes,
-                         Duration sessionTtl, Duration stagingLease) {
+                         Duration sessionTtl, Duration stagingLease, FileServiceMetrics metrics) {
         this.transactions = Objects.requireNonNull(transactions, "transactions");
         this.inspector = Objects.requireNonNull(inspector, "inspector");
         this.storage = Objects.requireNonNull(storage, "storage");
@@ -70,6 +72,7 @@ public final class UploadService {
         this.maxBytes = maxBytes;
         this.sessionTtl = sessionTtl;
         this.stagingLease = stagingLease;
+        this.metrics = metrics == null ? new NoopMetrics() : metrics;
     }
 
     public UploadService(UploadTransactionService transactions, UploadInspector inspector, ObjectStorage storage,
@@ -82,11 +85,21 @@ public final class UploadService {
                          StagingWaitPolicy waitPolicy, CleanupTaskRepository cleanupTasks,
                          UploadFailureClassifier classifier, FileServiceProperties properties) {
         this((Transactions) transactions, inspector, storage, waitPolicy, cleanupTasks, classifier,
-            Objects.requireNonNull(properties, "properties").maxBytes(), properties.uploadSessionTtl(), properties.stagingLease());
+            Objects.requireNonNull(properties, "properties").maxBytes(), properties.uploadSessionTtl(), properties.stagingLease(), null);
+    }
+
+    public UploadService(UploadTransactionService transactions, UploadInspector inspector, ObjectStorage storage,
+                         StagingWaitPolicy waitPolicy, CleanupTaskRepository cleanupTasks,
+                         UploadFailureClassifier classifier, FileServiceProperties properties,
+                         FileServiceMetrics metrics) {
+        this((Transactions) transactions, inspector, storage, waitPolicy, cleanupTasks, classifier,
+            Objects.requireNonNull(properties, "properties").maxBytes(), properties.uploadSessionTtl(),
+            properties.stagingLease(), metrics);
     }
 
     public UploadResult upload(UploadCommand command) {
         Objects.requireNonNull(command, "command");
+        long started = System.nanoTime();
         SafeDisplayName name = SafeDisplayName.from(command.originalName());
         UploadSession session = sessionTtl == null
             ? transactions.begin(command.actorId(), name, command.declaredType())
@@ -117,6 +130,7 @@ public final class UploadService {
                 throw new StorageCoordinationUnavailableException("no upload reservation capability");
             }
             deleteOrEnqueue(session, temporary);
+            observeUpload("success", started);
             return result;
         } catch (RuntimeException failure) {
             // 物理提交失败或 C 失败必须保留 VALIDATED/STAGING，供恢复扫描判断对象是否存在。
@@ -137,8 +151,14 @@ public final class UploadService {
                 }
             }
             if (reservation instanceof BlobReservation.Owned owned) safeEnqueueBlob(owned);
+            observeUpload(failure instanceof UploadRejectedException ? "rejected" : "failed", started);
             throw failure;
         }
+    }
+
+    private void observeUpload(String result, long started) {
+        try { metrics.recordUpload(result, Duration.ofNanos(System.nanoTime() - started)); }
+        catch (RuntimeException ignored) { /* 指标故障不得改变业务终态。 */ }
     }
 
     private void deleteOrEnqueue(UploadSession session, TemporaryObject temporary) {
@@ -163,5 +183,20 @@ public final class UploadService {
         } catch (RuntimeException ignored) {
             // 恢复扫描仍可依据 STAGING 租约重试；本次入队故障不得覆盖上传错误。
         }
+    }
+
+    private static final class NoopMetrics implements FileServiceMetrics {
+        @Override public void recordUpload(String result, Duration duration) { }
+        @Override public void recordSession(String status) { }
+        @Override public void setSessionCount(String status, long count) { }
+        @Override public void recordBlob(String status) { }
+        @Override public void setBlobCount(String status, long count) { }
+        @Override public void setStagingOldest(Duration age) { }
+        @Override public void recordCleanupPending(String type) { }
+        @Override public void setCleanupPending(String type, long count) { }
+        @Override public void recordCleanupRetry(String type, String result) { }
+        @Override public void recordDownload(String phase, String result) { }
+        @Override public void recordAcl(String action, String result) { }
+        @Override public void recordStorageOperation(String operation, String result, Duration duration) { }
     }
 }

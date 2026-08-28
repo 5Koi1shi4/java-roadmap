@@ -6,6 +6,7 @@ import com.example.files.application.upload.UploadSessionRepository;
 import com.example.files.domain.UploadSession;
 import com.example.files.domain.UploadSessionStatus;
 import com.example.files.application.upload.BlobRepository;
+import com.example.files.application.audit.FileServiceMetrics;
 
 import java.time.Duration;
 import java.util.Objects;
@@ -21,10 +22,18 @@ public final class StorageCleanupService {
     private final Duration lease;
     private final CleanupRetrySchedule retrySchedule;
     private final CleanupFailureClassifier failures = new CleanupFailureClassifier();
+    private final FileServiceMetrics metrics;
 
     public StorageCleanupService(CleanupTaskRepository tasks, ObjectStorage storage,
                                  UploadSessionRepository sessions, BlobRepository blobs,
                                  int batchSize, Duration lease, CleanupRetrySchedule retrySchedule) {
+        this(tasks, storage, sessions, blobs, batchSize, lease, retrySchedule, null);
+    }
+
+    public StorageCleanupService(CleanupTaskRepository tasks, ObjectStorage storage,
+                                 UploadSessionRepository sessions, BlobRepository blobs,
+                                 int batchSize, Duration lease, CleanupRetrySchedule retrySchedule,
+                                 FileServiceMetrics metrics) {
         this.tasks = Objects.requireNonNull(tasks, "tasks");
         this.storage = Objects.requireNonNull(storage, "storage");
         this.sessions = Objects.requireNonNull(sessions, "sessions");
@@ -33,13 +42,22 @@ public final class StorageCleanupService {
         this.batchSize = batchSize;
         this.lease = lease;
         this.retrySchedule = Objects.requireNonNull(retrySchedule, "retrySchedule");
+        this.metrics = metrics;
     }
 
     public StorageCleanupService(CleanupTaskRepository tasks, ObjectStorage storage,
                                  UploadSessionRepository sessions, BlobRepository blobs,
                                  com.example.files.config.FileServiceProperties properties) {
         this(tasks, storage, sessions, blobs, Objects.requireNonNull(properties, "properties").cleanup().batchSize(),
-            properties.cleanup().lease(), new CleanupRetrySchedule(properties.cleanup().retryDelays(), properties.cleanup().maxAttempts()));
+            properties.cleanup().lease(), new CleanupRetrySchedule(properties.cleanup().retryDelays(), properties.cleanup().maxAttempts()), null);
+    }
+
+    public StorageCleanupService(CleanupTaskRepository tasks, ObjectStorage storage,
+                                 UploadSessionRepository sessions, BlobRepository blobs,
+                                 com.example.files.config.FileServiceProperties properties,
+                                 FileServiceMetrics metrics) {
+        this(tasks, storage, sessions, blobs, Objects.requireNonNull(properties, "properties").cleanup().batchSize(),
+            properties.cleanup().lease(), new CleanupRetrySchedule(properties.cleanup().retryDelays(), properties.cleanup().maxAttempts()), metrics);
     }
 
     /** owner 是内部 worker 标识，不作为资源凭据；token 始终由本服务随机产生。 */
@@ -57,6 +75,10 @@ public final class StorageCleanupService {
             if (outcome == Outcome.COMPLETED) completed++;
             else if (outcome == Outcome.RETRIED) retried++;
             else if (outcome == Outcome.FAILED) failed++;
+            if (metrics != null) {
+                try { metrics.recordCleanupRetry(task.type().name(), outcome == Outcome.COMPLETED ? "success" : outcome == Outcome.RETRIED ? "retry" : "failed"); }
+                catch (RuntimeException ignored) { }
+            }
         }
         return new CleanupSummary(claimed.size(), completed, retried, failed);
     }

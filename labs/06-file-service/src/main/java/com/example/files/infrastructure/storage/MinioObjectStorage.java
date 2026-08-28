@@ -5,6 +5,7 @@ import com.example.files.application.upload.StorageObjectMetadata;
 import com.example.files.application.upload.StorageObjectNotFoundException;
 import com.example.files.application.upload.TemporaryObject;
 import com.example.files.application.upload.UploadRejectedException;
+import com.example.files.application.audit.FileServiceMetrics;
 import com.example.files.config.FileServiceProperties;
 import io.minio.BucketExistsArgs;
 import io.minio.GetBucketLifecycleArgs;
@@ -47,13 +48,19 @@ public final class MinioObjectStorage implements ObjectStorage {
     private final String bucket;
     private final Duration maxLinkTtl;
     private final StorageFailureClassifier failures = new StorageFailureClassifier();
+    private final FileServiceMetrics metrics;
 
     public MinioObjectStorage(FileServiceProperties.Storage storage) {
         this(storage, MAX_TTL);
     }
 
     public MinioObjectStorage(FileServiceProperties.Storage storage, Duration maxLinkTtl) {
-        this(buildClient(storage), storage, maxLinkTtl);
+        this(buildClient(storage), storage, maxLinkTtl, null);
+    }
+
+    public MinioObjectStorage(FileServiceProperties.Storage storage, Duration maxLinkTtl,
+                              FileServiceMetrics metrics) {
+        this(buildClient(storage), storage, maxLinkTtl, metrics);
     }
 
     public MinioObjectStorage(MinioClient client, FileServiceProperties.Storage storage) {
@@ -61,6 +68,11 @@ public final class MinioObjectStorage implements ObjectStorage {
     }
 
     public MinioObjectStorage(MinioClient client, FileServiceProperties.Storage storage, Duration maxLinkTtl) {
+        this(client, storage, maxLinkTtl, null);
+    }
+
+    public MinioObjectStorage(MinioClient client, FileServiceProperties.Storage storage, Duration maxLinkTtl,
+                              FileServiceMetrics metrics) {
         if (client == null || storage == null) throw new IllegalArgumentException("MinIO client and storage are required");
         if (!"minio".equals(storage.type())) throw new IllegalArgumentException("storage type must be minio");
         if (maxLinkTtl == null || maxLinkTtl.isZero() || maxLinkTtl.isNegative()
@@ -70,6 +82,7 @@ public final class MinioObjectStorage implements ObjectStorage {
         this.client = client;
         this.bucket = storage.minioBucket();
         this.maxLinkTtl = maxLinkTtl;
+        this.metrics = metrics;
     }
 
     /** 便于独立集成测试使用已构造的 SDK client。 */
@@ -79,6 +92,7 @@ public final class MinioObjectStorage implements ObjectStorage {
         this.client = client;
         this.bucket = bucket;
         this.maxLinkTtl = MAX_TTL;
+        this.metrics = null;
     }
 
     /** 启动时确保 bucket 存在，并覆盖为仅 tmp/ 的 24 小时生命周期规则。 */
@@ -110,6 +124,7 @@ public final class MinioObjectStorage implements ObjectStorage {
 
     @Override
     public TemporaryObject writeTemporary(String tempKey, InputStream source, long maxBytes) {
+        long started = System.nanoTime();
         validateKey(tempKey, "tmp");
         if (source == null) throw new IllegalArgumentException("source must not be null");
         if (maxBytes <= 0) throw new IllegalArgumentException("maxBytes must be positive");
@@ -117,6 +132,7 @@ public final class MinioObjectStorage implements ObjectStorage {
         try {
             client.putObject(PutObjectArgs.builder().bucket(bucket).object(tempKey)
                 .stream(limited, -1, MINIO_PART_SIZE).contentType("application/octet-stream").build());
+            observe("write_temporary", "success", started);
             return new TemporaryObject(tempKey, limited.count());
         } catch (Exception ex) {
             if (limited.exceeded()) {
@@ -131,6 +147,8 @@ public final class MinioObjectStorage implements ObjectStorage {
 
     @Override
     public void commit(String tempKey, String objectKey) {
+        long started = System.nanoTime();
+        boolean success = false;
         validateKey(tempKey, "tmp");
         validateKey(objectKey, "blobs");
         StorageObjectMetadata sourceMetadata = stat(tempKey);
@@ -148,17 +166,22 @@ public final class MinioObjectStorage implements ObjectStorage {
                 // 正式对象已条件创建成功；UploadService 随后的幂等删除/清理任务负责补偿 temp。
                 // 不抛出，避免上层重复 finalize 或把已成功的正式对象误判为提交失败。
             }
+            success = true;
         } catch (Exception ex) {
             if (isConflict(ex)) throw new StorageConflictException();
             throw failure("commit", ex);
         }
+        finally { observe("commit", success ? "success" : "failed", started); }
     }
 
     @Override
     public InputStream open(String objectKey) {
+        long started = System.nanoTime();
         validateKey(objectKey, namespace(objectKey));
         try {
-            return client.getObject(GetObjectArgs.builder().bucket(bucket).object(objectKey).build());
+            InputStream input = client.getObject(GetObjectArgs.builder().bucket(bucket).object(objectKey).build());
+            observe("open", "success", started);
+            return input;
         } catch (ErrorResponseException ex) {
             if (isNotFound(ex)) throw new StorageObjectNotFoundException("object does not exist");
             throw failure("open", ex);
@@ -169,11 +192,14 @@ public final class MinioObjectStorage implements ObjectStorage {
 
     @Override
     public StorageObjectMetadata stat(String objectKey) {
+        long started = System.nanoTime();
         validateKey(objectKey, namespace(objectKey));
         try {
             StatObjectResponse response = client.statObject(StatObjectArgs.builder().bucket(bucket).object(objectKey).build());
             if (response.size() < 0) throw new IllegalStateException("invalid object metadata");
-            return new StorageObjectMetadata(response.size());
+            StorageObjectMetadata metadata = new StorageObjectMetadata(response.size());
+            observe("stat", "success", started);
+            return metadata;
         } catch (ErrorResponseException ex) {
             if (isNotFound(ex)) throw new StorageObjectNotFoundException("object does not exist");
             throw failure("stat", ex);
@@ -186,9 +212,11 @@ public final class MinioObjectStorage implements ObjectStorage {
 
     @Override
     public void delete(String objectKey) {
+        long started = System.nanoTime();
         validateKey(objectKey, namespace(objectKey));
         try {
             client.removeObject(RemoveObjectArgs.builder().bucket(bucket).object(objectKey).build());
+            observe("delete", "success", started);
         } catch (ErrorResponseException ex) {
             if (!isNotFound(ex)) throw failure("delete", ex);
         } catch (Exception ex) {
@@ -208,6 +236,7 @@ public final class MinioObjectStorage implements ObjectStorage {
             String url = client.getPresignedObjectUrl(GetPresignedObjectUrlArgs.builder()
                 .method(Method.GET).bucket(bucket).object(objectKey)
                 .expiry((int) ttl.toSeconds()).extraQueryParams(safeHeaders).build());
+            observe("presign", "success", System.nanoTime());
             return Optional.of(URI.create(url));
         } catch (Exception ex) {
             throw failure("presign", ex);
@@ -215,6 +244,12 @@ public final class MinioObjectStorage implements ObjectStorage {
     }
 
     public String bucket() { return bucket; }
+
+    private void observe(String operation, String result, long started) {
+        if (metrics == null) return;
+        try { metrics.recordStorageOperation(operation, result, Duration.ofNanos(System.nanoTime() - started)); }
+        catch (RuntimeException ignored) { }
+    }
 
     /** 清理/集成探针使用的幂等存在性检查，同样严格校验 key。 */
     public boolean exists(String objectKey) {

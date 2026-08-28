@@ -1,6 +1,7 @@
 package com.example.files.config;
 
 import com.example.files.application.audit.AuditRecorder;
+import com.example.files.application.audit.FileServiceMetrics;
 import com.example.files.application.access.FileAccessRepository;
 import com.example.files.application.access.FileAccessService;
 import com.example.files.application.access.DownloadService;
@@ -39,6 +40,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import javax.sql.DataSource;
 import java.time.Clock;
 import io.micrometer.core.instrument.MeterRegistry;
+import com.example.files.observability.MicrometerFileServiceMetrics;
 
 /**
  * 生产上传链路的明确 Spring 组装点。每个端口均绑定真实 JDBC、文件存储和事务实现，
@@ -79,6 +81,12 @@ public class FileServiceWiringConfiguration {
     }
 
     @Bean
+    public FileServiceMetrics fileServiceMetrics(ObjectProvider<MeterRegistry> registry) {
+        MeterRegistry actual = registry.getIfAvailable(io.micrometer.core.instrument.simple.SimpleMeterRegistry::new);
+        return new MicrometerFileServiceMetrics(actual);
+    }
+
+    @Bean
     public DataSourceTransactionManager fileTransactionManager(DataSource dataSource) {
         return new DataSourceTransactionManager(dataSource);
     }
@@ -90,8 +98,9 @@ public class FileServiceWiringConfiguration {
 
     @Bean
     public FileAccessService fileAccessService(FileAccessRepository repository, AuditRecorder audits,
-                                               TransactionTemplate transactionTemplate) {
-        return new FileAccessService(repository, audits, transactionTemplate);
+                                               TransactionTemplate transactionTemplate,
+                                               ObjectProvider<FileServiceMetrics> metrics) {
+        return new FileAccessService(repository, audits, transactionTemplate, metrics.getIfAvailable());
     }
 
     @Bean
@@ -110,9 +119,9 @@ public class FileServiceWiringConfiguration {
                                            ObjectStorage storage, TransactionTemplate transactionTemplate,
                                            ObjectProvider<LocalDownloadTokenService> tokens,
                                            FileServiceProperties properties, Clock downloadClock,
-                                           DownloadTelemetry telemetry) {
+                                           DownloadTelemetry telemetry, ObjectProvider<FileServiceMetrics> metrics) {
         return new DownloadService(repository, audits, storage, transactionTemplate,
-            tokens.getIfAvailable(), properties.download().maxLinkTtl(), downloadClock, telemetry);
+            tokens.getIfAvailable(), properties.download().maxLinkTtl(), downloadClock, telemetry, metrics.getIfAvailable());
     }
 
     @Bean
@@ -152,8 +161,9 @@ public class FileServiceWiringConfiguration {
                                        StagingWaitPolicy waitPolicy,
                                        CleanupTaskRepository cleanupTasks,
                                        UploadFailureClassifier classifier,
-                                       FileServiceProperties properties) {
-        return new UploadService(transactions, inspector, storage, waitPolicy, cleanupTasks, classifier, properties);
+                                       FileServiceProperties properties,
+                                       ObjectProvider<FileServiceMetrics> metrics) {
+        return new UploadService(transactions, inspector, storage, waitPolicy, cleanupTasks, classifier, properties, metrics.getIfAvailable());
     }
 
     @Bean

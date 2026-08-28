@@ -2,6 +2,7 @@ package com.example.files.config;
 
 import com.example.files.infrastructure.storage.LocalObjectStorage;
 import com.example.files.infrastructure.storage.MinioObjectStorage;
+import com.example.files.application.audit.FileServiceMetrics;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -11,14 +12,16 @@ import org.springframework.context.annotation.Configuration;
 public class ObjectStorageConfiguration {
     @Bean
     @ConditionalOnProperty(prefix = "file.storage", name = "type", havingValue = "local", matchIfMissing = true)
-    public LocalObjectStorage localObjectStorage(FileServiceProperties properties) {
-        return new LocalObjectStorage(properties.storage());
+    public LocalObjectStorage localObjectStorage(FileServiceProperties properties,
+                                                 org.springframework.beans.factory.ObjectProvider<FileServiceMetrics> metrics) {
+        return new LocalObjectStorage(properties.storage(), metrics.getIfAvailable());
     }
 
     @Bean
     @ConditionalOnProperty(prefix = "file.storage", name = "type", havingValue = "minio")
-    public MinioObjectStorage minioObjectStorage(FileServiceProperties properties) {
-        MinioObjectStorage minio = new MinioObjectStorage(properties.storage(), properties.download().maxLinkTtl());
+    public MinioObjectStorage minioObjectStorage(FileServiceProperties properties,
+                                                 org.springframework.beans.factory.ObjectProvider<FileServiceMetrics> metrics) {
+        MinioObjectStorage minio = new MinioObjectStorage(properties.storage(), properties.download().maxLinkTtl(), metrics.getIfAvailable());
         minio.initialize();
         return minio;
     }

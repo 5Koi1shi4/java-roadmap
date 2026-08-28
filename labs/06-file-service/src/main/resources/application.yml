@@ -45,3 +45,8 @@ server:
       charset: UTF-8
       enabled: true
       force: true
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info

@@ -4,6 +4,7 @@ import com.example.files.application.audit.AuditAction;
 import com.example.files.application.audit.AuditEvent;
 import com.example.files.application.audit.AuditRecorder;
 import com.example.files.application.audit.CorrelationId;
+import com.example.files.application.audit.FileServiceMetrics;
 import com.example.files.application.upload.ObjectStorage;
 import com.example.files.application.upload.StorageObjectNotFoundException;
 import com.example.files.domain.SafeDisplayName;
@@ -37,6 +38,7 @@ public final class DownloadService {
     private final Duration maxLinkTtl;
     private final Clock clock;
     private final DownloadTelemetry telemetry;
+    private final FileServiceMetrics metrics;
 
     public DownloadService(FileAccessRepository access, AuditRecorder audits, ObjectStorage storage) {
         this(access, audits, storage, null, null, LocalDownloadTokenService.MAX_TTL, Clock.systemUTC(), new DefaultDownloadTelemetry());
@@ -61,6 +63,13 @@ public final class DownloadService {
     public DownloadService(FileAccessRepository access, AuditRecorder audits, ObjectStorage storage,
                            TransactionTemplate transactions, LocalDownloadTokenService tokens,
                            Duration maxLinkTtl, Clock clock, DownloadTelemetry telemetry) {
+        this(access, audits, storage, transactions, tokens, maxLinkTtl, clock, telemetry, null);
+    }
+
+    public DownloadService(FileAccessRepository access, AuditRecorder audits, ObjectStorage storage,
+                           TransactionTemplate transactions, LocalDownloadTokenService tokens,
+                           Duration maxLinkTtl, Clock clock, DownloadTelemetry telemetry,
+                           FileServiceMetrics metrics) {
         this.access = java.util.Objects.requireNonNull(access, "access");
         this.audits = java.util.Objects.requireNonNull(audits, "audits");
         this.storage = java.util.Objects.requireNonNull(storage, "storage");
@@ -74,6 +83,7 @@ public final class DownloadService {
         this.maxLinkTtl = maxLinkTtl;
         this.clock = clock == null ? Clock.systemUTC() : clock;
         this.telemetry = telemetry == null ? new DefaultDownloadTelemetry() : telemetry;
+        this.metrics = metrics == null ? new NoopMetrics() : metrics;
     }
 
     /** 授权并预打开流；该方法返回前不得开始成功 HTTP 响应。 */
@@ -82,12 +92,14 @@ public final class DownloadService {
         Outcome<FileView> outcome = inTransaction(() -> {
             AccessDecision decision = access.findAccess(actorId, fileId);
             if (decision == null || !decision.readable() || decision.view() == null) {
+                metrics.recordDownload("authorization", "failed");
                 record(correlationId, actorId, AuditAction.DOWNLOAD_AUTHORIZED, fileId,
                     "DENIED", "ACCESS_DENIED");
                 return Outcome.<FileView>denied();
             }
             record(correlationId, actorId, AuditAction.DOWNLOAD_AUTHORIZED, fileId,
                 "SUCCESS", null);
+                metrics.recordDownload("authorization", "success");
                 return Outcome.success(decision.view());
         });
         if (outcome.hidden()) throw new ResourceHiddenException();
@@ -127,18 +139,20 @@ public final class DownloadService {
 
     public void recordCompleted(long actorId, UUID fileId, CorrelationId correlationId) {
         recordResult(correlationId, actorId, fileId, AuditAction.DOWNLOAD_COMPLETED, "SUCCESS", null);
+        metrics.recordDownload("transfer", "success");
     }
 
     public void recordFailed(long actorId, UUID fileId, CorrelationId correlationId, String failureCode) {
         String code = DownloadFailureReason.fromCode(failureCode).name();
-        try {
-            recordResult(correlationId, actorId, fileId, AuditAction.DOWNLOAD_FAILED, "FAILED", code);
+            try {
+                recordResult(correlationId, actorId, fileId, AuditAction.DOWNLOAD_FAILED, "FAILED", code);
         } finally {
             try { telemetry.failed(fileId, correlationId, code); }
             catch (RuntimeException ex) {
                 LOG.warn("download telemetry unavailable correlationId={} fileId={} failureCode={}",
                     correlationId.value(), fileId, code);
             }
+            try { metrics.recordDownload("transfer", "failed"); } catch (RuntimeException ignored) { }
         }
     }
 
@@ -266,6 +280,21 @@ public final class DownloadService {
 
     private static void require(long actorId, UUID fileId, CorrelationId correlationId) {
         if (actorId <= 0 || fileId == null || correlationId == null) throw new IllegalArgumentException("invalid download arguments");
+    }
+
+    private static final class NoopMetrics implements FileServiceMetrics {
+        @Override public void recordUpload(String result, Duration duration) { }
+        @Override public void recordSession(String status) { }
+        @Override public void setSessionCount(String status, long count) { }
+        @Override public void recordBlob(String status) { }
+        @Override public void setBlobCount(String status, long count) { }
+        @Override public void setStagingOldest(Duration age) { }
+        @Override public void recordCleanupPending(String type) { }
+        @Override public void setCleanupPending(String type, long count) { }
+        @Override public void recordCleanupRetry(String type, String result) { }
+        @Override public void recordDownload(String phase, String result) { }
+        @Override public void recordAcl(String action, String result) { }
+        @Override public void recordStorageOperation(String operation, String result, Duration duration) { }
     }
 
     private static String classify(Throwable ex) {

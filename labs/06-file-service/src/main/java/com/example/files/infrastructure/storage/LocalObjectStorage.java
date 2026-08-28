@@ -4,6 +4,7 @@ import com.example.files.application.upload.ObjectStorage;
 import com.example.files.application.upload.StorageObjectMetadata;
 import com.example.files.application.upload.StorageObjectNotFoundException;
 import com.example.files.application.upload.TemporaryObject;
+import com.example.files.application.audit.FileServiceMetrics;
 import com.example.files.config.FileServiceProperties;
 
 import java.io.IOException;
@@ -27,8 +28,13 @@ import java.util.regex.Pattern;
 public final class LocalObjectStorage implements ObjectStorage {
     private static final Pattern KEY = Pattern.compile("(?:tmp|blobs)/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
     private final Path root;
+    private final FileServiceMetrics metrics;
 
     public LocalObjectStorage(Path root) {
+        this(root, null);
+    }
+
+    public LocalObjectStorage(Path root, FileServiceMetrics metrics) {
         if (root == null) throw new IllegalArgumentException("root must not be null");
         if (Files.isSymbolicLink(root)) {
             throw new IllegalArgumentException("symbolic-link storage roots are not allowed");
@@ -39,18 +45,28 @@ public final class LocalObjectStorage implements ObjectStorage {
         } catch (IOException ex) {
             throw new UncheckedIOException("cannot initialize local storage root", ex);
         }
+        this.metrics = metrics;
     }
 
     public LocalObjectStorage(String root) {
         this(Path.of(root));
     }
 
+    public LocalObjectStorage(String root, FileServiceMetrics metrics) {
+        this(Path.of(root), metrics);
+    }
+
     public LocalObjectStorage(FileServiceProperties.Storage storage) {
         this(java.util.Objects.requireNonNull(storage, "storage").localRoot());
     }
 
+    public LocalObjectStorage(FileServiceProperties.Storage storage, FileServiceMetrics metrics) {
+        this(java.util.Objects.requireNonNull(storage, "storage").localRoot(), metrics);
+    }
+
     @Override
     public TemporaryObject writeTemporary(String tempKey, InputStream source, long maxBytes) {
+        long started = System.nanoTime();
         if (source == null) throw new IllegalArgumentException("source must not be null");
         if (maxBytes <= 0) throw new IllegalArgumentException("maxBytes must be positive");
         Path target = resolveInsideRoot(tempKey);
@@ -87,6 +103,7 @@ public final class LocalObjectStorage implements ObjectStorage {
             if (!writtenAttributes.isRegularFile()) {
                 throw new IllegalArgumentException("temporary object must be a regular file");
             }
+            observe("write_temporary", "success", started);
             return new TemporaryObject(tempKey, count);
         } catch (IOException ex) {
             throw new UncheckedIOException("cannot write temporary object", ex);
@@ -95,6 +112,7 @@ public final class LocalObjectStorage implements ObjectStorage {
 
     @Override
     public void commit(String tempKey, String objectKey) {
+        long started = System.nanoTime();
         Path source = resolveInsideRoot(tempKey);
         Path target = resolveInsideRoot(objectKey);
         ensureNamespace(tempKey, "tmp");
@@ -128,6 +146,7 @@ public final class LocalObjectStorage implements ObjectStorage {
             if (!committedAttributes.isRegularFile()) {
                 throw new IllegalArgumentException("committed object must be a regular file");
             }
+            observe("commit", "success", started);
         } catch (IOException ex) {
             throw new UncheckedIOException("cannot commit temporary object", ex);
         }
@@ -135,6 +154,7 @@ public final class LocalObjectStorage implements ObjectStorage {
 
     @Override
     public InputStream open(String objectKey) {
+        long started = System.nanoTime();
         Path path = resolveInsideRoot(objectKey);
         ensureNamespace(objectKey, namespace(objectKey));
         try {
@@ -148,6 +168,7 @@ public final class LocalObjectStorage implements ObjectStorage {
                 throw new IllegalArgumentException("object must be a regular file");
             }
             ensureNoSymlink(path);
+            observe("open", "success", started);
             return input;
         } catch (IOException ex) {
             throw new UncheckedIOException("cannot open object", ex);
@@ -156,13 +177,16 @@ public final class LocalObjectStorage implements ObjectStorage {
 
     @Override
     public StorageObjectMetadata stat(String objectKey) {
+        long started = System.nanoTime();
         Path path = resolveInsideRoot(objectKey);
         ensureNamespace(objectKey, namespace(objectKey));
         try {
             ensureNoSymlink(path);
             BasicFileAttributes attributes = Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
             if (!attributes.isRegularFile()) throw new IllegalArgumentException("object must be a regular file");
-            return new StorageObjectMetadata(attributes.size());
+            StorageObjectMetadata metadata = new StorageObjectMetadata(attributes.size());
+            observe("stat", "success", started);
+            return metadata;
         } catch (java.nio.file.NoSuchFileException ex) {
             throw new StorageObjectNotFoundException("object does not exist");
         } catch (IOException ex) {
@@ -172,11 +196,13 @@ public final class LocalObjectStorage implements ObjectStorage {
 
     @Override
     public void delete(String objectKey) {
+        long started = System.nanoTime();
         Path path = resolveInsideRoot(objectKey);
         ensureNamespace(objectKey, namespace(objectKey));
         try {
             ensureNoSymlink(path);
             Files.deleteIfExists(path);
+            observe("delete", "success", started);
         } catch (IOException ex) {
             throw new UncheckedIOException("cannot delete object", ex);
         }
@@ -199,6 +225,7 @@ public final class LocalObjectStorage implements ObjectStorage {
             || ttl.compareTo(Duration.ofMinutes(2)) > 0) {
             throw new IllegalArgumentException("link ttl must be positive and no more than 2 minutes");
         }
+        observe("presign", "success", System.nanoTime());
         return Optional.empty();
     }
 
@@ -254,5 +281,11 @@ public final class LocalObjectStorage implements ObjectStorage {
             if (current.equals(root)) break;
             current = current.getParent();
         }
+    }
+
+    private void observe(String operation, String result, long started) {
+        if (metrics == null) return;
+        try { metrics.recordStorageOperation(operation, result, Duration.ofNanos(System.nanoTime() - started)); }
+        catch (RuntimeException ignored) { }
     }
 }

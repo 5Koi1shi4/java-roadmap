@@ -29,7 +29,6 @@ public final class CleanupScheduler {
         this.expiredUploads = expiredUploads;
         this.fallback = fallback;
     }
-    @Scheduled(fixedDelayString = "${file.cleanup.schedule}")
     public void run() {
         RuntimeException failure = null;
         try {

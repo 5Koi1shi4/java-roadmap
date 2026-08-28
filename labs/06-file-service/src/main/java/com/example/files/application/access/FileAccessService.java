@@ -4,6 +4,7 @@ import com.example.files.application.audit.AuditAction;
 import com.example.files.application.audit.AuditEvent;
 import com.example.files.application.audit.AuditRecorder;
 import com.example.files.application.audit.CorrelationId;
+import com.example.files.application.audit.FileServiceMetrics;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
@@ -18,17 +19,24 @@ public final class FileAccessService {
     private final FileAccessRepository repository;
     private final AuditRecorder audits;
     private final TransactionTemplate transactions;
+    private final FileServiceMetrics metrics;
 
     /** 纯单元测试构造器；生产环境应使用带事务模板的构造器。 */
     public FileAccessService(FileAccessRepository repository, AuditRecorder audits) {
-        this(repository, audits, null);
+        this(repository, audits, null, null);
     }
 
     public FileAccessService(FileAccessRepository repository, AuditRecorder audits,
                              TransactionTemplate transactions) {
+        this(repository, audits, transactions, null);
+    }
+
+    public FileAccessService(FileAccessRepository repository, AuditRecorder audits,
+                             TransactionTemplate transactions, FileServiceMetrics metrics) {
         this.repository = java.util.Objects.requireNonNull(repository, "repository");
         this.audits = java.util.Objects.requireNonNull(audits, "audits");
         this.transactions = transactions;
+        this.metrics = metrics == null ? new NoopMetrics() : metrics;
     }
 
     public FileView getMetadata(long actorId, UUID fileId, CorrelationId correlationId) {
@@ -52,6 +60,7 @@ public final class FileAccessService {
                 return denied(correlationId, actorId, fileId, granteeId, AuditAction.ACCESS_GRANTED);
             }
             repository.grant(actorId, fileId, granteeId);
+            metrics.recordAcl("grant", "success");
             record(correlationId, actorId, AuditAction.ACCESS_GRANTED, fileId, granteeId, "SUCCESS", null);
             return Outcome.success(null);
         });
@@ -66,6 +75,7 @@ public final class FileAccessService {
                 return denied(correlationId, actorId, fileId, granteeId, AuditAction.ACCESS_REVOKED);
             }
             repository.revoke(actorId, fileId, granteeId);
+            metrics.recordAcl("revoke", "success");
             record(correlationId, actorId, AuditAction.ACCESS_REVOKED, fileId, granteeId, "SUCCESS", null);
             return Outcome.success(null);
         });
@@ -78,6 +88,7 @@ public final class FileAccessService {
                 return denied(correlationId, actorId, fileId, null, AuditAction.FILE_DELETED);
             }
             repository.delete(actorId, fileId);
+            metrics.recordAcl("delete", "success");
             record(correlationId, actorId, AuditAction.FILE_DELETED, fileId, null, "SUCCESS", null);
             return Outcome.success(null);
         });
@@ -93,6 +104,9 @@ public final class FileAccessService {
                         AuditAction action) {
         // 先写入拒绝审计并返回事务结果；事务提交后由 inTransaction 统一抛隐藏异常。
         record(correlationId, actorId, action, fileId, target, "DENIED", "ACCESS_DENIED");
+        if (action == AuditAction.ACCESS_GRANTED) metrics.recordAcl("grant", "failed");
+        else if (action == AuditAction.ACCESS_REVOKED) metrics.recordAcl("revoke", "failed");
+        else if (action == AuditAction.FILE_DELETED) metrics.recordAcl("delete", "failed");
         return Outcome.hiddenOutcome();
     }
 
@@ -117,5 +131,20 @@ public final class FileAccessService {
     private static void requireActorAndFile(long actorId, UUID fileId, CorrelationId correlationId) {
         if (actorId <= 0) throw new IllegalArgumentException("actorId must be positive");
         if (fileId == null || correlationId == null) throw new IllegalArgumentException("fileId and correlationId are required");
+    }
+
+    private static final class NoopMetrics implements FileServiceMetrics {
+        @Override public void recordUpload(String result, java.time.Duration duration) { }
+        @Override public void recordSession(String status) { }
+        @Override public void setSessionCount(String status, long count) { }
+        @Override public void recordBlob(String status) { }
+        @Override public void setBlobCount(String status, long count) { }
+        @Override public void setStagingOldest(java.time.Duration age) { }
+        @Override public void recordCleanupPending(String type) { }
+        @Override public void setCleanupPending(String type, long count) { }
+        @Override public void recordCleanupRetry(String type, String result) { }
+        @Override public void recordDownload(String phase, String result) { }
+        @Override public void recordAcl(String action, String result) { }
+        @Override public void recordStorageOperation(String operation, String result, java.time.Duration duration) { }
     }
 }
