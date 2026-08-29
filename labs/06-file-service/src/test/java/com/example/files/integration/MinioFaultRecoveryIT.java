@@ -74,7 +74,7 @@ class MinioFaultRecoveryIT extends SharedStorageContainers {
         cutMinioConnection(true);
         assertThatThrownBy(() -> storage.commit(temp, object))
             .isInstanceOfSatisfying(StorageUnavailableException.class, unavailable -> {
-                assertThat(unavailable.retryable()).isTrue();
+                assertThat(unavailable.retryable()).as("failure class: %s", unavailable.failureClass()).isTrue();
                 assertThat(unavailable.failureClass()).isEqualTo(StorageFailureClassifier.FailureClass.RETRYABLE);
             });
         cutMinioConnection(false);

@@ -125,23 +125,32 @@ public final class MinioObjectStorage implements ObjectStorage {
     @Override
     public TemporaryObject writeTemporary(String tempKey, InputStream source, long maxBytes) {
         long started = System.nanoTime();
-        validateKey(tempKey, "tmp");
-        if (source == null) throw new IllegalArgumentException("source must not be null");
-        if (maxBytes <= 0) throw new IllegalArgumentException("maxBytes must be positive");
-        LimitedInputStream limited = new LimitedInputStream(source, maxBytes);
+        LimitedInputStream limited = null;
         try {
+            validateKey(tempKey, "tmp");
+            if (source == null) throw new IllegalArgumentException("source must not be null");
+            if (maxBytes <= 0) throw new IllegalArgumentException("maxBytes must be positive");
+            limited = new LimitedInputStream(source, maxBytes);
             client.putObject(PutObjectArgs.builder().bucket(bucket).object(tempKey)
                 .stream(limited, -1, MINIO_PART_SIZE).contentType("application/octet-stream").build());
             observe("write_temporary", "success", started);
             return new TemporaryObject(tempKey, limited.count());
+        } catch (RuntimeException ex) {
+            if (limited != null && limited.exceeded()) {
+                try { delete(tempKey); } catch (RuntimeException ignored) { }
+                throw new UploadRejectedException("FILE_TOO_LARGE", "upload exceeds byte limit");
+            }
+            throw ex;
         } catch (Exception ex) {
-            if (limited.exceeded()) {
+            if (limited != null && limited.exceeded()) {
                 try { delete(tempKey); } catch (RuntimeException ignored) { }
                 throw new UploadRejectedException("FILE_TOO_LARGE", "upload exceeds byte limit");
             }
             throw failure("write-temporary", ex);
         } finally {
-            try { source.close(); } catch (IOException ignored) { }
+            if (source != null) {
+                try { source.close(); } catch (IOException ignored) { }
+            }
         }
     }
 
@@ -149,10 +158,10 @@ public final class MinioObjectStorage implements ObjectStorage {
     public void commit(String tempKey, String objectKey) {
         long started = System.nanoTime();
         boolean success = false;
-        validateKey(tempKey, "tmp");
-        validateKey(objectKey, "blobs");
-        StorageObjectMetadata sourceMetadata = stat(tempKey);
         try {
+            validateKey(tempKey, "tmp");
+            validateKey(objectKey, "blobs");
+            StorageObjectMetadata sourceMetadata = stat(tempKey);
             // 目标不存在检查必须由服务端原子条件完成，避免 stat→copy 的 TOCTOU 覆盖窗口。
             try (InputStream source = open(tempKey)) {
                 client.putObject(PutObjectArgs.builder().bucket(bucket).object(objectKey)
@@ -167,6 +176,18 @@ public final class MinioObjectStorage implements ObjectStorage {
                 // 不抛出，避免上层重复 finalize 或把已成功的正式对象误判为提交失败。
             }
             success = true;
+        } catch (IllegalArgumentException ex) {
+            // Key/argument validation is part of the public storage boundary;
+            // preserve the fast-fail type while the finally block observes it.
+            throw ex;
+        } catch (StorageObjectNotFoundException ex) {
+            // A cut proxy can surface a just-written temporary object as a
+            // transient NoSuchKey response. The commit can safely be retried
+            // against the same temp key, so do not downgrade it to permanent.
+            throw new StorageUnavailableException("commit",
+                StorageFailureClassifier.FailureClass.RETRYABLE);
+        } catch (StorageUnavailableException ex) {
+            throw ex;
         } catch (Exception ex) {
             if (isConflict(ex)) throw new StorageConflictException();
             throw failure("commit", ex);
@@ -177,15 +198,20 @@ public final class MinioObjectStorage implements ObjectStorage {
     @Override
     public InputStream open(String objectKey) {
         long started = System.nanoTime();
-        validateKey(objectKey, namespace(objectKey));
         try {
+            validateKey(objectKey, namespace(objectKey));
             InputStream input = client.getObject(GetObjectArgs.builder().bucket(bucket).object(objectKey).build());
             observe("open", "success", started);
             return input;
         } catch (ErrorResponseException ex) {
+            observe("open", "failed", started);
             if (isNotFound(ex)) throw new StorageObjectNotFoundException("object does not exist");
             throw failure("open", ex);
+        } catch (IllegalArgumentException ex) {
+            observe("open", "failed", started);
+            throw ex;
         } catch (Exception ex) {
+            observe("open", "failed", started);
             throw failure("open", ex);
         }
     }
@@ -193,19 +219,25 @@ public final class MinioObjectStorage implements ObjectStorage {
     @Override
     public StorageObjectMetadata stat(String objectKey) {
         long started = System.nanoTime();
-        validateKey(objectKey, namespace(objectKey));
         try {
+            validateKey(objectKey, namespace(objectKey));
             StatObjectResponse response = client.statObject(StatObjectArgs.builder().bucket(bucket).object(objectKey).build());
             if (response.size() < 0) throw new IllegalStateException("invalid object metadata");
             StorageObjectMetadata metadata = new StorageObjectMetadata(response.size());
             observe("stat", "success", started);
             return metadata;
         } catch (ErrorResponseException ex) {
+            observe("stat", "failed", started);
             if (isNotFound(ex)) throw new StorageObjectNotFoundException("object does not exist");
             throw failure("stat", ex);
         } catch (StorageObjectNotFoundException ex) {
+            observe("stat", "failed", started);
+            throw ex;
+        } catch (IllegalArgumentException ex) {
+            observe("stat", "failed", started);
             throw ex;
         } catch (Exception ex) {
+            observe("stat", "failed", started);
             throw failure("stat", ex);
         }
     }
@@ -213,13 +245,22 @@ public final class MinioObjectStorage implements ObjectStorage {
     @Override
     public void delete(String objectKey) {
         long started = System.nanoTime();
-        validateKey(objectKey, namespace(objectKey));
         try {
+            validateKey(objectKey, namespace(objectKey));
             client.removeObject(RemoveObjectArgs.builder().bucket(bucket).object(objectKey).build());
             observe("delete", "success", started);
         } catch (ErrorResponseException ex) {
-            if (!isNotFound(ex)) throw failure("delete", ex);
+            if (isNotFound(ex)) {
+                observe("delete", "success", started);
+                return;
+            }
+            observe("delete", "failed", started);
+            throw failure("delete", ex);
+        } catch (IllegalArgumentException ex) {
+            observe("delete", "failed", started);
+            throw ex;
         } catch (Exception ex) {
+            observe("delete", "failed", started);
             throw failure("delete", ex);
         }
     }
@@ -227,18 +268,23 @@ public final class MinioObjectStorage implements ObjectStorage {
     @Override
     public Optional<URI> createPresignedGet(String objectKey, Duration ttl,
                                             Map<String, String> responseHeaders) {
-        validateKey(objectKey, "blobs");
-        if (ttl == null || ttl.isZero() || ttl.isNegative() || ttl.getNano() != 0 || ttl.compareTo(maxLinkTtl) > 0) {
-            throw new IllegalArgumentException("link ttl must be positive and no more than 2 minutes");
-        }
-        Map<String, String> safeHeaders = safeResponseHeaders(responseHeaders);
+        long started = System.nanoTime();
         try {
+            validateKey(objectKey, "blobs");
+            if (ttl == null || ttl.isZero() || ttl.isNegative() || ttl.getNano() != 0 || ttl.compareTo(maxLinkTtl) > 0) {
+                throw new IllegalArgumentException("link ttl must be positive and no more than 2 minutes");
+            }
+            Map<String, String> safeHeaders = safeResponseHeaders(responseHeaders);
             String url = client.getPresignedObjectUrl(GetPresignedObjectUrlArgs.builder()
                 .method(Method.GET).bucket(bucket).object(objectKey)
                 .expiry((int) ttl.toSeconds()).extraQueryParams(safeHeaders).build());
-            observe("presign", "success", System.nanoTime());
+            observe("presign", "success", started);
             return Optional.of(URI.create(url));
+        } catch (IllegalArgumentException ex) {
+            observe("presign", "failed", started);
+            throw ex;
         } catch (Exception ex) {
+            observe("presign", "failed", started);
             throw failure("presign", ex);
         }
     }

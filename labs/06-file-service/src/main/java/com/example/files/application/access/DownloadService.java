@@ -92,16 +92,19 @@ public final class DownloadService {
         Outcome<FileView> outcome = inTransaction(() -> {
             AccessDecision decision = access.findAccess(actorId, fileId);
             if (decision == null || !decision.readable() || decision.view() == null) {
-                metrics.recordDownload("authorization", "failed");
                 record(correlationId, actorId, AuditAction.DOWNLOAD_AUTHORIZED, fileId,
                     "DENIED", "ACCESS_DENIED");
                 return Outcome.<FileView>denied();
             }
             record(correlationId, actorId, AuditAction.DOWNLOAD_AUTHORIZED, fileId,
                 "SUCCESS", null);
-                metrics.recordDownload("authorization", "success");
-                return Outcome.success(decision.view());
+            return Outcome.success(decision.view());
         });
+        // The transaction callback may have executed SQL successfully but still be
+        // rolled back by the transaction manager. Observe authorization only after
+        // execute() returns, i.e. after commit, so rollback leaves no success count.
+        try { metrics.recordDownload("authorization", outcome.hidden() ? "failed" : "success"); }
+        catch (RuntimeException ignored) { }
         if (outcome.hidden()) throw new ResourceHiddenException();
         FileView view = outcome.value();
 

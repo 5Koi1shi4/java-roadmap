@@ -55,14 +55,13 @@ public final class FileAccessService {
         requireActorAndFile(actorId, fileId, correlationId);
         if (granteeId <= 0) throw new IllegalArgumentException("granteeId must be positive");
         if (actorId == granteeId) throw new IllegalArgumentException("cannot grant access to owner");
-        inTransaction(() -> {
+        runAcl("grant", () -> {
             if (!repository.isActiveOwnerForUpdate(actorId, fileId)) {
-                return denied(correlationId, actorId, fileId, granteeId, AuditAction.ACCESS_GRANTED);
+                return this.<Void>denied(correlationId, actorId, fileId, granteeId, AuditAction.ACCESS_GRANTED);
             }
             repository.grant(actorId, fileId, granteeId);
-            metrics.recordAcl("grant", "success");
             record(correlationId, actorId, AuditAction.ACCESS_GRANTED, fileId, granteeId, "SUCCESS", null);
-            return Outcome.success(null);
+            return Outcome.<Void>success(null);
         });
     }
 
@@ -70,27 +69,25 @@ public final class FileAccessService {
         requireActorAndFile(actorId, fileId, correlationId);
         if (granteeId <= 0) throw new IllegalArgumentException("granteeId must be positive");
         if (actorId == granteeId) throw new IllegalArgumentException("cannot revoke owner access");
-        inTransaction(() -> {
+        runAcl("revoke", () -> {
             if (!repository.isActiveOwnerForUpdate(actorId, fileId)) {
-                return denied(correlationId, actorId, fileId, granteeId, AuditAction.ACCESS_REVOKED);
+                return this.<Void>denied(correlationId, actorId, fileId, granteeId, AuditAction.ACCESS_REVOKED);
             }
             repository.revoke(actorId, fileId, granteeId);
-            metrics.recordAcl("revoke", "success");
             record(correlationId, actorId, AuditAction.ACCESS_REVOKED, fileId, granteeId, "SUCCESS", null);
-            return Outcome.success(null);
+            return Outcome.<Void>success(null);
         });
     }
 
     public void delete(long actorId, UUID fileId, CorrelationId correlationId) {
         requireActorAndFile(actorId, fileId, correlationId);
-        inTransaction(() -> {
+        runAcl("delete", () -> {
             if (!repository.isOwnerForUpdate(actorId, fileId)) {
-                return denied(correlationId, actorId, fileId, null, AuditAction.FILE_DELETED);
+                return this.<Void>denied(correlationId, actorId, fileId, null, AuditAction.FILE_DELETED);
             }
             repository.delete(actorId, fileId);
-            metrics.recordAcl("delete", "success");
             record(correlationId, actorId, AuditAction.FILE_DELETED, fileId, null, "SUCCESS", null);
-            return Outcome.success(null);
+            return Outcome.<Void>success(null);
         });
     }
 
@@ -104,10 +101,15 @@ public final class FileAccessService {
                         AuditAction action) {
         // 先写入拒绝审计并返回事务结果；事务提交后由 inTransaction 统一抛隐藏异常。
         record(correlationId, actorId, action, fileId, target, "DENIED", "ACCESS_DENIED");
-        if (action == AuditAction.ACCESS_GRANTED) metrics.recordAcl("grant", "failed");
-        else if (action == AuditAction.ACCESS_REVOKED) metrics.recordAcl("revoke", "failed");
-        else if (action == AuditAction.FILE_DELETED) metrics.recordAcl("delete", "failed");
         return Outcome.hiddenOutcome();
+    }
+
+    private void runAcl(String action, Supplier<Outcome<Void>> operation) {
+        Outcome<Void> outcome = executeTransaction(operation);
+        // TransactionTemplate returns only after a successful commit. Recording here
+        // prevents a rollback from leaving a false success counter behind.
+        metrics.recordAcl(action, outcome.hidden() ? "failed" : "success");
+        if (outcome.hidden()) throw new ResourceHiddenException();
     }
 
     private void record(CorrelationId correlationId, long actorId, AuditAction action, UUID fileId,
@@ -117,10 +119,14 @@ public final class FileAccessService {
     }
 
     private <T> T inTransaction(Supplier<Outcome<T>> operation) {
-        Outcome<T> outcome = transactions == null ? operation.get() : transactions.execute(status -> operation.get());
+        Outcome<T> outcome = executeTransaction(operation);
         if (outcome == null) throw new IllegalStateException("access transaction returned no outcome");
         if (outcome.hidden()) throw new ResourceHiddenException();
         return outcome.value();
+    }
+
+    private <T> Outcome<T> executeTransaction(Supplier<Outcome<T>> operation) {
+        return transactions == null ? operation.get() : transactions.execute(status -> operation.get());
     }
 
     private record Outcome<T>(T value, boolean hidden) {

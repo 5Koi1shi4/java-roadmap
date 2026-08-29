@@ -4,6 +4,7 @@ import java.time.Instant;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
  * 审计持久化边界的唯一脱敏器。调用方即使误把底层错误带到审计事件中，
@@ -26,6 +27,9 @@ public final class AuditSanitizer {
         "RECOVERY_METADATA_MISMATCH", "RECOVERY_OBJECT_MISMATCH", "RECOVERY_OBJECT_MISSING",
         "FILE_STATE_INVALID", "BLOB_REFERENCE_STATE_INVALID", "BLOB_REFERENCE_UPDATE_FAILED",
         "SERVICE_UNAVAILABLE", "UNAUTHORIZED", "INVALID_REQUEST");
+    private static final Pattern SHA256 = Pattern.compile("[0-9a-fA-F]{64}");
+    private static final Pattern JWT = Pattern.compile("[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}");
+    private static final Pattern CREDENTIAL_TOKEN = Pattern.compile("[A-Za-z0-9_-]{16,}");
 
     public AuditEvent sanitize(AuditEvent event) {
         if (event == null) throw new IllegalArgumentException("audit event must not be null");
@@ -46,9 +50,10 @@ public final class AuditSanitizer {
     /** 客户端追踪字段只保留有限字符；发现秘密、路径或换行时整体丢弃。 */
     public String sanitizeTrace(String value) {
         if (value == null || value.isBlank()) return null;
-        if (value.length() > 128 || containsSecret(value)) return null;
-        String cleaned = value.replaceAll("[\\p{Cntrl}\\r\\n]", "");
-        return cleaned.matches("[A-Za-z0-9._:-]{1,128}") ? cleaned : null;
+        if (value.length() > 128 || containsSecret(value) || SHA256.matcher(value).matches()
+            || JWT.matcher(value).matches() || CREDENTIAL_TOKEN.matcher(value).matches()
+            || value.indexOf('=') >= 0 || value.chars().anyMatch(Character::isISOControl)) return null;
+        return value.matches("[A-Za-z0-9._:-]{1,128}") ? value : null;
     }
 
     private static String normalizeResult(String value) {
@@ -63,7 +68,7 @@ public final class AuditSanitizer {
         return lower.contains("tmp/") || lower.contains("blobs/") || lower.contains("sha-256")
             || lower.contains("sha256") || lower.contains("x-amz-") || lower.contains("authorization")
             || lower.contains("bearer") || lower.contains("jwt") || lower.contains("hmac")
-            || lower.contains("secret") || lower.contains("exception") || lower.contains("http://")
+            || lower.contains("secret") || lower.contains("minio") || lower.contains("exception") || lower.contains("http://")
             || lower.contains("https://");
     }
 }

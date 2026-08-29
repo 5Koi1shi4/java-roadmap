@@ -15,10 +15,19 @@ public record AuditEvent(CorrelationId correlationId, long actorId, AuditAction 
         if (targetUserId != null && targetUserId <= 0) {
             throw new IllegalArgumentException("targetUserId must be positive");
         }
-        if (failureCode != null && !failureCode.matches("[A-Z][A-Z0-9_]{0,63}")) {
-            throw new IllegalArgumentException("unsupported failureCode");
+        // Raw producer text is accepted only as bounded, single-line data; the
+        // persistence adapter applies the fixed failure-code allow-list. Keeping
+        // this boundary permissive lets the recorder sanitize misbehaving callers
+        // instead of allowing constructor validation to bypass that guarantee.
+        if (failureCode != null && (failureCode.length() > 64
+            || failureCode.chars().anyMatch(Character::isISOControl))) {
+            throw new IllegalArgumentException("invalid failureCode");
         }
-        if (clientTraceId != null && !clientTraceId.matches("[A-Za-z0-9._:-]{1,128}")) {
+        // Protocol/header validation belongs at the HTTP boundary. At the audit
+        // boundary retain only bounded single-line input and let AuditSanitizer
+        // discard keys, URLs, credentials and other sensitive trace text.
+        if (clientTraceId != null && (clientTraceId.length() > 128
+            || clientTraceId.chars().anyMatch(Character::isISOControl))) {
             throw new IllegalArgumentException("invalid clientTraceId");
         }
     }

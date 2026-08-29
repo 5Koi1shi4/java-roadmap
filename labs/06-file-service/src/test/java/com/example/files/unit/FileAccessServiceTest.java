@@ -8,9 +8,16 @@ import com.example.files.application.access.ResourceHiddenException;
 import com.example.files.application.audit.AuditRecorder;
 import com.example.files.application.audit.CorrelationId;
 import org.junit.jupiter.api.Test;
+import com.example.files.application.audit.FileServiceMetrics;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.DefaultTransactionStatus;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
 import java.util.UUID;
+import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -48,6 +55,43 @@ class FileAccessServiceTest {
         service.revokeRead(OWNER, FILE, READER, correlationId);
         assertThat(repository.grantCount).isOne();
         assertThat(repository.revokeCount).isEqualTo(2);
+    }
+
+    @Test
+    void aclSuccessMetricIsNotRecordedWhenDatabaseCommitFails() {
+        InMemoryAccessRepository repository = new InMemoryAccessRepository(OWNER, FILE);
+        CountingMetrics metrics = new CountingMetrics();
+        FileServiceMetrics failingCommitMetrics = metrics;
+        FileAccessService service = new FileAccessService(repository, event -> { },
+            new TransactionTemplate(new CommitFailingTransactionManager()), failingCommitMetrics);
+
+        assertThatThrownBy(() -> service.grantRead(OWNER, FILE, READER, CorrelationId.random()))
+            .isInstanceOf(RuntimeException.class);
+        assertThat(metrics.aclSuccesses).isZero();
+    }
+
+    private static final class CommitFailingTransactionManager implements PlatformTransactionManager {
+        @Override public TransactionStatus getTransaction(TransactionDefinition definition) {
+            return new DefaultTransactionStatus(null, true, true, false, false, null);
+        }
+        @Override public void commit(TransactionStatus status) { throw new IllegalStateException("commit failed"); }
+        @Override public void rollback(TransactionStatus status) { }
+    }
+
+    private static final class CountingMetrics implements FileServiceMetrics {
+        private int aclSuccesses;
+        @Override public void recordAcl(String action, String result) { if ("success".equals(result)) aclSuccesses++; }
+        @Override public void recordUpload(String result, Duration duration) { }
+        @Override public void recordSession(String status) { }
+        @Override public void setSessionCount(String status, long count) { }
+        @Override public void recordBlob(String status) { }
+        @Override public void setBlobCount(String status, long count) { }
+        @Override public void setStagingOldest(Duration age) { }
+        @Override public void recordCleanupPending(String type) { }
+        @Override public void setCleanupPending(String type, long count) { }
+        @Override public void recordCleanupRetry(String type, String result) { }
+        @Override public void recordDownload(String phase, String result) { }
+        @Override public void recordStorageOperation(String operation, String result, Duration duration) { }
     }
 
     private static FileAccessService service(FileAccessRepository repository) {

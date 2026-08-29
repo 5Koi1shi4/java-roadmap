@@ -44,8 +44,20 @@ class ActuatorFileMetricsIT extends SharedMySqlContainer {
         assertThat(meter.getBody()).contains("file.upload.total", "result", "success");
         assertThat(meter.getBody()).doesNotContain("userId", "fileId", "hash", "objectKey", "tempKey", "correlationId");
 
+        assertThat(metricValue("file.session.count?tag=status:COMPLETED")).isGreaterThanOrEqualTo(1d);
+        assertThat(metricValue("file.blob.count?tag=status:READY")).isGreaterThanOrEqualTo(1d);
+        assertThat(metricValue("file.storage.operation.duration?tag=operation:write_temporary&tag=result:success"))
+            .isGreaterThan(0d);
+
         ResponseEntity<String> names = client.getForEntity("/actuator/metrics", String.class);
         assertThat(names.getBody()).contains("file.upload.total", "file.download.total", "file.acl.total",
             "file.storage.operation.duration");
+    }
+
+    private double metricValue(String path) {
+        ResponseEntity<com.fasterxml.jackson.databind.JsonNode> response = client.getForEntity(
+            "/actuator/metrics/" + path, com.fasterxml.jackson.databind.JsonNode.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        return response.getBody().path("measurements").path(0).path("value").asDouble();
     }
 }

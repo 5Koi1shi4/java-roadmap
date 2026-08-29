@@ -32,6 +32,13 @@ class AuditSanitizerTest {
         AuditSanitizer sanitizer = new AuditSanitizer();
         assertThat(sanitizer.sanitizeFailureCode("TMP_BLOBS_SHA256_SECRET_JWT_HMAC_X_AMZ_SIGNATURE")).isEqualTo("UNCLASSIFIED");
         assertThat(sanitizer.sanitizeFailureCode("java.io.IOException: connection failed")).isEqualTo("UNCLASSIFIED");
+        assertThat(sanitizer.sanitizeTrace("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")).isNull();
+        assertThat(sanitizer.sanitizeTrace("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature-value")).isNull();
+        assertThat(sanitizer.sanitizeTrace("minioadmin-local-secret-value")).isNull();
+        assertThat(sanitizer.sanitizeTrace("tmp/123e4567-e89b-12d3-a456-426614174000")).isNull();
+        assertThat(sanitizer.sanitizeTrace("https://minio.test/blobs/object?X-Amz-Signature=secret")).isNull();
+        assertThat(sanitizer.sanitizeTrace("hmac=0123456789abcdef0123456789abcdef")).isNull();
+        assertThat(sanitizer.sanitizeTrace("java.io.IOException: connection reset by peer")).isNull();
     }
 
     @Test

@@ -4,6 +4,7 @@ import com.example.files.application.audit.FileServiceMetrics;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.time.Duration;
 import java.util.Locale;
@@ -25,28 +26,63 @@ public final class MicrometerFileServiceMetrics implements FileServiceMetrics {
     private static final Set<String> OP_RESULTS = Set.of("success", "retry", "failed");
 
     private final MeterRegistry registry;
+    private final JdbcTemplate jdbc;
     private final Map<String, AtomicLong> sessionCounts = new ConcurrentHashMap<>();
     private final Map<String, AtomicLong> blobCounts = new ConcurrentHashMap<>();
     private final Map<String, AtomicLong> cleanupPending = new ConcurrentHashMap<>();
     private final AtomicLong oldestStagingSeconds = new AtomicLong();
 
     public MicrometerFileServiceMetrics(MeterRegistry registry) {
+        this(registry, null);
+    }
+
+    /**
+     * DB-backed gauges are sampled on scrape, not maintained by request code. This
+     * keeps the values truthful after restarts and makes MySQL's CURRENT_TIMESTAMP
+     * the source of staging age.
+     */
+    public MicrometerFileServiceMetrics(MeterRegistry registry, JdbcTemplate jdbc) {
         this.registry = java.util.Objects.requireNonNull(registry, "registry");
+        this.jdbc = jdbc;
         SESSION_STATUSES.forEach(status -> {
             AtomicLong value = sessionCounts.computeIfAbsent(status, ignored -> new AtomicLong());
-            registry.gauge("file.session.count", io.micrometer.core.instrument.Tags.of("status", status), value);
+            if (jdbc == null) {
+                registry.gauge("file.session.count", io.micrometer.core.instrument.Tags.of("status", status), value);
+            } else {
+                io.micrometer.core.instrument.Gauge.builder("file.session.count", this,
+                        metrics -> metrics.sampleSessionCount(status))
+                    .tags("status", status).register(registry);
+            }
         });
         BLOB_STATUSES.forEach(status -> {
             AtomicLong value = blobCounts.computeIfAbsent(status, ignored -> new AtomicLong());
-            registry.gauge("file.blob.count", io.micrometer.core.instrument.Tags.of("status", status), value);
+            if (jdbc == null) {
+                registry.gauge("file.blob.count", io.micrometer.core.instrument.Tags.of("status", status), value);
+            } else {
+                io.micrometer.core.instrument.Gauge.builder("file.blob.count", this,
+                        metrics -> metrics.sampleBlobCount(status))
+                    .tags("status", status).register(registry);
+            }
         });
         CLEANUP_TYPES.forEach(type -> {
             AtomicLong value = cleanupPending.computeIfAbsent(type, ignored -> new AtomicLong());
-            registry.gauge("file.cleanup.pending", io.micrometer.core.instrument.Tags.of("type", type), value);
+            if (jdbc == null) {
+                registry.gauge("file.cleanup.pending", io.micrometer.core.instrument.Tags.of("type", type), value);
+            } else {
+                io.micrometer.core.instrument.Gauge.builder("file.cleanup.pending", this,
+                        metrics -> metrics.sampleCleanupPending(type))
+                    .tags("type", type).register(registry);
+            }
         });
-        registry.gauge("file.staging.oldest.seconds", oldestStagingSeconds);
+        if (jdbc == null) {
+            registry.gauge("file.staging.oldest.seconds", oldestStagingSeconds);
+        } else {
+            io.micrometer.core.instrument.Gauge.builder("file.staging.oldest.seconds", this,
+                    MicrometerFileServiceMetrics::sampleOldestStagingSeconds).register(registry);
+        }
         // 预注册固定组合，便于 Actuator 在没有请求时也能发现完整指标契约。
         UPLOAD_RESULTS.forEach(result -> Counter.builder("file.upload.total").tag("result", result).register(registry));
+        Timer.builder("file.upload.duration").register(registry);
         DOWNLOAD_PHASES.forEach(phase -> OP_RESULTS.forEach(result ->
             Counter.builder("file.download.total").tags("phase", phase, "result", result).register(registry)));
         ACL_ACTIONS.forEach(action -> OP_RESULTS.forEach(result ->
@@ -108,5 +144,39 @@ public final class MicrometerFileServiceMetrics implements FileServiceMetrics {
     }
     private static void requireDuration(Duration duration, String name) {
         if (duration == null || duration.isNegative()) throw new IllegalArgumentException(name + " must not be negative");
+    }
+
+    private double sampleSessionCount(String status) {
+        return sampleCount("SELECT COUNT(*) FROM upload_session WHERE status=?", status);
+    }
+
+    private double sampleBlobCount(String status) {
+        return sampleCount("SELECT COUNT(*) FROM stored_blob WHERE status=?", status);
+    }
+
+    private double sampleCleanupPending(String type) {
+        return sampleCount("SELECT COUNT(*) FROM storage_cleanup_task WHERE task_type=? AND status IN ('NEW','PROCESSING')", type);
+    }
+
+    private double sampleCount(String sql, String value) {
+        try {
+            Number count = jdbc.queryForObject(sql, Number.class, value);
+            return count == null ? 0d : Math.max(0d, count.doubleValue());
+        } catch (RuntimeException unavailable) {
+            // A scrape must not take down the application while the database is
+            // restarting. The next scrape retries the real query.
+            return 0d;
+        }
+    }
+
+    private double sampleOldestStagingSeconds() {
+        try {
+            Number seconds = jdbc.queryForObject(
+                "SELECT COALESCE(TIMESTAMPDIFF(SECOND, MIN(created_at), CURRENT_TIMESTAMP(6)), 0) "
+                    + "FROM stored_blob WHERE status='STAGING'", Number.class);
+            return seconds == null ? 0d : Math.max(0d, seconds.doubleValue());
+        } catch (RuntimeException unavailable) {
+            return 0d;
+        }
     }
 }

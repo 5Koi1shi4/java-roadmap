@@ -10,6 +10,10 @@ import com.example.files.infrastructure.persistence.JdbcCleanupTaskRepository;
 import com.example.files.infrastructure.storage.MinioObjectStorage;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.minio.ListObjectsArgs;
+import io.minio.Result;
+import io.minio.messages.Item;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -24,6 +28,8 @@ import org.springframework.util.MultiValueMap;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -48,6 +54,21 @@ class SecureFileWorkflowIT extends SharedStorageContainers {
         registerStorageProperties(registry);
     }
 
+    @BeforeEach
+    void isolateSharedStorage() throws Exception {
+        jdbc.update("DELETE FROM storage_cleanup_task");
+        jdbc.update("DELETE FROM file_audit_event");
+        jdbc.update("DELETE FROM file_grant");
+        jdbc.update("DELETE FROM stored_file");
+        jdbc.update("DELETE FROM stored_blob");
+        jdbc.update("DELETE FROM upload_session");
+        for (Result<Item> result : SharedStorageContainers.minioClient().listObjects(
+                ListObjectsArgs.builder().bucket(BUCKET).recursive(true).build())) {
+            SharedStorageContainers.minioClient().removeObject(io.minio.RemoveObjectArgs.builder()
+                .bucket(BUCKET).object(result.get().objectName()).build());
+        }
+    }
+
     @Test
     void isolatesSameContentAuthorizesThenRevokesAndPhysicallyCleansBlob() throws Exception {
         byte[] bytes = "%PDF-1.7\nsecure-workflow".getBytes(StandardCharsets.US_ASCII);
@@ -57,12 +78,21 @@ class SecureFileWorkflowIT extends SharedStorageContainers {
         String secondId = second.path("fileId").asText();
         assertThat(firstId).isNotEqualTo(secondId);
         assertThat(first.toString()).doesNotContain("hash", "blob", "objectKey", "dedup");
+        Long firstBlobId = jdbc.queryForObject("SELECT blob_id FROM stored_file WHERE file_id=?", Long.class, firstId);
+        Long secondBlobId = jdbc.queryForObject("SELECT blob_id FROM stored_file WHERE file_id=?", Long.class, secondId);
+        assertThat(secondBlobId).isEqualTo(firstBlobId);
+        assertThat(jdbc.queryForObject("SELECT reference_count FROM stored_blob WHERE id=?", Long.class, firstBlobId))
+            .isEqualTo(2L);
 
         assertThat(get(firstId, 602).getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(content(firstId, 602).getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(content(firstId, 999).getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
         assertThat(get(firstId, 601).getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(exchange(firstId + "/grants/602", HttpMethod.PUT, 601).getStatusCode())
             .isEqualTo(HttpStatus.NO_CONTENT);
-        assertThat(get(firstId + "/content", 602).getStatusCode()).isEqualTo(HttpStatus.OK);
+        ResponseEntity<byte[]> downloaded = content(firstId, 602);
+        assertThat(downloaded.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(downloaded.getBody()).containsExactly(bytes);
         ResponseEntity<String> link = exchange(firstId + "/download-links?ttlSeconds=120", HttpMethod.POST, 602);
         assertThat(link.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(link.getBody()).doesNotContain("sha", "blobId", "objectKey", "secret");
@@ -75,6 +105,8 @@ class SecureFileWorkflowIT extends SharedStorageContainers {
         String objectKey = jdbc.queryForObject("SELECT object_key FROM stored_blob WHERE id=?", String.class, blobId);
         assertThat(storage.stat(objectKey).size()).isEqualTo(bytes.length);
         assertThat(exchange(firstId, HttpMethod.DELETE, 601).getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
+        assertThat(jdbc.queryForObject("SELECT reference_count FROM stored_blob WHERE id=?", Long.class, blobId))
+            .isEqualTo(1L);
         assertThat(exchange(secondId, HttpMethod.DELETE, 602).getStatusCode()).isEqualTo(HttpStatus.NO_CONTENT);
 
         StorageCleanupService cleaner = new StorageCleanupService(cleanupTasks, storage, sessions, blobs, properties);
@@ -86,8 +118,21 @@ class SecureFileWorkflowIT extends SharedStorageContainers {
                 .isOne();
         });
         assertThat(minio.exists(objectKey)).isFalse();
+        Set<String> physical = new HashSet<>();
+        for (Result<Item> result : SharedStorageContainers.minioClient().listObjects(
+                ListObjectsArgs.builder().bucket(BUCKET).recursive(true).build())) {
+            String key = result.get().objectName();
+            assertThat(key).doesNotStartWith("tmp/");
+            physical.add(key);
+        }
+        assertThat(physical).isEmpty();
+        assertThat(jdbc.queryForObject("SELECT reference_count FROM stored_blob WHERE id=?", Long.class, blobId))
+            .isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM file_audit_event WHERE file_id IN (?,?) AND (failure_code LIKE '%TMP%' OR failure_code LIKE '%BLOB%' OR client_trace_id LIKE '%X-Amz%')",
             Integer.class, firstId, secondId)).isZero();
+        List<String> auditText = jdbc.queryForList("SELECT CONCAT_WS('|', result, failure_code, client_trace_id) "
+            + "FROM file_audit_event WHERE file_id IN (?,?)", String.class, firstId, secondId);
+        assertThat(String.join("|", auditText)).doesNotContain("tmp/", "blobs/", "X-Amz", "Authorization", "Bearer", "secret");
     }
 
     private JsonNode upload(long user, String filename, byte[] bytes) throws Exception {
@@ -105,6 +150,10 @@ class SecureFileWorkflowIT extends SharedStorageContainers {
 
     private ResponseEntity<String> get(String path, long user) {
         return client.exchange("/api/files/" + path, HttpMethod.GET, new HttpEntity<>(headers(user)), String.class);
+    }
+    private ResponseEntity<byte[]> content(String fileId, long user) {
+        return client.exchange("/api/files/" + fileId + "/content", HttpMethod.GET,
+            new HttpEntity<>(headers(user)), byte[].class);
     }
     private ResponseEntity<String> exchange(String path, HttpMethod method, long user) {
         return client.exchange("/api/files/" + path, method, new HttpEntity<>(headers(user)), String.class);

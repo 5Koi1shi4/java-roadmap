@@ -11,6 +11,12 @@ import com.example.files.application.audit.CorrelationId;
 import com.example.files.application.upload.ObjectStorage;
 import com.example.files.application.upload.TemporaryObject;
 import com.example.files.application.upload.StorageObjectMetadata;
+import com.example.files.application.audit.FileServiceMetrics;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.DefaultTransactionStatus;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.junit.jupiter.api.Test;
 
 import java.io.InputStream;
@@ -66,6 +72,45 @@ class DownloadServiceTest {
         assertThat(link.url()).isEqualTo("http://minio.test/secure");
         assertThat(events).extracting(AuditEvent::action)
             .containsExactly(AuditAction.DOWNLOAD_LINK_ISSUED);
+    }
+
+    @Test
+    void authorizationSuccessMetricIsNotRecordedWhenDatabaseCommitFails() {
+        UUID file = UUID.randomUUID();
+        CountingMetrics metrics = new CountingMetrics();
+        DownloadService service = new DownloadService(new AuthorizedAccess(file), event -> { }, new EmptyStorage(),
+            new TransactionTemplate(new CommitFailingTransactionManager()), null,
+            Duration.ofSeconds(30), java.time.Clock.systemUTC(), new com.example.files.application.access.DefaultDownloadTelemetry(), metrics);
+
+        assertThatThrownBy(() -> service.authorizeDownload(7L, file, CorrelationId.random()))
+            .isInstanceOf(IllegalStateException.class);
+        assertThat(metrics.authorizationSuccesses).isZero();
+    }
+
+    private static final class CommitFailingTransactionManager implements PlatformTransactionManager {
+        @Override public TransactionStatus getTransaction(TransactionDefinition definition) {
+            return new DefaultTransactionStatus(null, true, true, false, false, null);
+        }
+        @Override public void commit(TransactionStatus status) { throw new IllegalStateException("commit failed"); }
+        @Override public void rollback(TransactionStatus status) { }
+    }
+
+    private static final class CountingMetrics implements FileServiceMetrics {
+        private int authorizationSuccesses;
+        @Override public void recordDownload(String phase, String result) {
+            if ("authorization".equals(phase) && "success".equals(result)) authorizationSuccesses++;
+        }
+        @Override public void recordUpload(String result, Duration duration) { }
+        @Override public void recordSession(String status) { }
+        @Override public void setSessionCount(String status, long count) { }
+        @Override public void recordBlob(String status) { }
+        @Override public void setBlobCount(String status, long count) { }
+        @Override public void setStagingOldest(Duration age) { }
+        @Override public void recordCleanupPending(String type) { }
+        @Override public void setCleanupPending(String type, long count) { }
+        @Override public void recordCleanupRetry(String type, String result) { }
+        @Override public void recordAcl(String action, String result) { }
+        @Override public void recordStorageOperation(String operation, String result, Duration duration) { }
     }
 
     private static final class EmptyAccess implements FileAccessRepository {

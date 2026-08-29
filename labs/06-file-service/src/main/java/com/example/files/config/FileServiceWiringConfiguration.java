@@ -81,9 +81,9 @@ public class FileServiceWiringConfiguration {
     }
 
     @Bean
-    public FileServiceMetrics fileServiceMetrics(ObjectProvider<MeterRegistry> registry) {
+    public FileServiceMetrics fileServiceMetrics(ObjectProvider<MeterRegistry> registry, JdbcTemplate jdbc) {
         MeterRegistry actual = registry.getIfAvailable(io.micrometer.core.instrument.simple.SimpleMeterRegistry::new);
-        return new MicrometerFileServiceMetrics(actual);
+        return new MicrometerFileServiceMetrics(actual, jdbc);
     }
 
     @Bean

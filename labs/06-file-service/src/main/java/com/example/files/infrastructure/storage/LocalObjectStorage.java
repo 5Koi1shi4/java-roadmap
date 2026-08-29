@@ -67,11 +67,11 @@ public final class LocalObjectStorage implements ObjectStorage {
     @Override
     public TemporaryObject writeTemporary(String tempKey, InputStream source, long maxBytes) {
         long started = System.nanoTime();
-        if (source == null) throw new IllegalArgumentException("source must not be null");
-        if (maxBytes <= 0) throw new IllegalArgumentException("maxBytes must be positive");
-        Path target = resolveInsideRoot(tempKey);
-        ensureNamespace(tempKey, "tmp");
         try {
+            if (source == null) throw new IllegalArgumentException("source must not be null");
+            if (maxBytes <= 0) throw new IllegalArgumentException("maxBytes must be positive");
+            Path target = resolveInsideRoot(tempKey);
+            ensureNamespace(tempKey, "tmp");
             Files.createDirectories(target.getParent());
             ensureNoSymlink(target.getParent());
             ensureNoSymlink(target);
@@ -105,7 +105,11 @@ public final class LocalObjectStorage implements ObjectStorage {
             }
             observe("write_temporary", "success", started);
             return new TemporaryObject(tempKey, count);
+        } catch (RuntimeException ex) {
+            observe("write_temporary", "failed", started);
+            throw ex;
         } catch (IOException ex) {
+            observe("write_temporary", "failed", started);
             throw new UncheckedIOException("cannot write temporary object", ex);
         }
     }
@@ -113,11 +117,11 @@ public final class LocalObjectStorage implements ObjectStorage {
     @Override
     public void commit(String tempKey, String objectKey) {
         long started = System.nanoTime();
-        Path source = resolveInsideRoot(tempKey);
-        Path target = resolveInsideRoot(objectKey);
-        ensureNamespace(tempKey, "tmp");
-        ensureNamespace(objectKey, "blobs");
         try {
+            Path source = resolveInsideRoot(tempKey);
+            Path target = resolveInsideRoot(objectKey);
+            ensureNamespace(tempKey, "tmp");
+            ensureNamespace(objectKey, "blobs");
             ensureNoSymlink(source);
             if (!Files.exists(source, LinkOption.NOFOLLOW_LINKS)) {
                 throw new IllegalArgumentException("temporary object does not exist");
@@ -147,7 +151,11 @@ public final class LocalObjectStorage implements ObjectStorage {
                 throw new IllegalArgumentException("committed object must be a regular file");
             }
             observe("commit", "success", started);
+        } catch (RuntimeException ex) {
+            observe("commit", "failed", started);
+            throw ex;
         } catch (IOException ex) {
+            observe("commit", "failed", started);
             throw new UncheckedIOException("cannot commit temporary object", ex);
         }
     }
@@ -155,9 +163,9 @@ public final class LocalObjectStorage implements ObjectStorage {
     @Override
     public InputStream open(String objectKey) {
         long started = System.nanoTime();
-        Path path = resolveInsideRoot(objectKey);
-        ensureNamespace(objectKey, namespace(objectKey));
         try {
+            Path path = resolveInsideRoot(objectKey);
+            ensureNamespace(objectKey, namespace(objectKey));
             ensureNoSymlink(path);
             InputStream input = Files.newInputStream(path, StandardOpenOption.READ,
                 LinkOption.NOFOLLOW_LINKS);
@@ -170,7 +178,11 @@ public final class LocalObjectStorage implements ObjectStorage {
             ensureNoSymlink(path);
             observe("open", "success", started);
             return input;
+        } catch (RuntimeException ex) {
+            observe("open", "failed", started);
+            throw ex;
         } catch (IOException ex) {
+            observe("open", "failed", started);
             throw new UncheckedIOException("cannot open object", ex);
         }
     }
@@ -178,18 +190,23 @@ public final class LocalObjectStorage implements ObjectStorage {
     @Override
     public StorageObjectMetadata stat(String objectKey) {
         long started = System.nanoTime();
-        Path path = resolveInsideRoot(objectKey);
-        ensureNamespace(objectKey, namespace(objectKey));
         try {
+            Path path = resolveInsideRoot(objectKey);
+            ensureNamespace(objectKey, namespace(objectKey));
             ensureNoSymlink(path);
             BasicFileAttributes attributes = Files.readAttributes(path, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
             if (!attributes.isRegularFile()) throw new IllegalArgumentException("object must be a regular file");
             StorageObjectMetadata metadata = new StorageObjectMetadata(attributes.size());
             observe("stat", "success", started);
             return metadata;
+        } catch (RuntimeException ex) {
+            observe("stat", "failed", started);
+            throw ex;
         } catch (java.nio.file.NoSuchFileException ex) {
+            observe("stat", "failed", started);
             throw new StorageObjectNotFoundException("object does not exist");
         } catch (IOException ex) {
+            observe("stat", "failed", started);
             throw new UncheckedIOException("cannot stat object", ex);
         }
     }
@@ -197,13 +214,17 @@ public final class LocalObjectStorage implements ObjectStorage {
     @Override
     public void delete(String objectKey) {
         long started = System.nanoTime();
-        Path path = resolveInsideRoot(objectKey);
-        ensureNamespace(objectKey, namespace(objectKey));
         try {
+            Path path = resolveInsideRoot(objectKey);
+            ensureNamespace(objectKey, namespace(objectKey));
             ensureNoSymlink(path);
             Files.deleteIfExists(path);
             observe("delete", "success", started);
+        } catch (RuntimeException ex) {
+            observe("delete", "failed", started);
+            throw ex;
         } catch (IOException ex) {
+            observe("delete", "failed", started);
             throw new UncheckedIOException("cannot delete object", ex);
         }
     }
@@ -219,14 +240,20 @@ public final class LocalObjectStorage implements ObjectStorage {
     @Override
     public Optional<URI> createPresignedGet(String objectKey, Duration ttl,
                                             Map<String, String> responseHeaders) {
-        resolveInsideRoot(objectKey);
-        ensureNamespace(objectKey, "blobs");
-        if (ttl == null || ttl.isZero() || ttl.isNegative() || ttl.getNano() != 0
-            || ttl.compareTo(Duration.ofMinutes(2)) > 0) {
-            throw new IllegalArgumentException("link ttl must be positive and no more than 2 minutes");
+        long started = System.nanoTime();
+        try {
+            resolveInsideRoot(objectKey);
+            ensureNamespace(objectKey, "blobs");
+            if (ttl == null || ttl.isZero() || ttl.isNegative() || ttl.getNano() != 0
+                || ttl.compareTo(Duration.ofMinutes(2)) > 0) {
+                throw new IllegalArgumentException("link ttl must be positive and no more than 2 minutes");
+            }
+            observe("presign", "success", started);
+            return Optional.empty();
+        } catch (RuntimeException ex) {
+            observe("presign", "failed", started);
+            throw ex;
         }
-        observe("presign", "success", System.nanoTime());
-        return Optional.empty();
     }
 
     /** Resolves a key and rejects traversal before any filesystem operation. */
