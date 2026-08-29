@@ -192,7 +192,7 @@
 
 ### 31. 为什么上传要拆成数据库事务 A/B/C，而不能把 MinIO 操作放进一个数据库事务？
 
-**回答：** MySQL 事务不能原子提交文件系统或 MinIO IO；在事务中上传大文件还会长时间占用连接和行锁。事务 A 只创建 `RECEIVING` session、随机 temp key 和 owner token；事务外流式写 temp、计算实际大小/SHA-256 并检测类型；事务 B 锁定或创建 `STAGING` Blob；owner 在事务外提交物理对象；事务 C 再以 token、状态、key 和 generation 条件完成 Blob、逻辑文件、引用和 session。任一步失败由 session/Blob 状态与幂等清理任务补偿，而不是伪造跨资源原子事务。
+**回答：** MySQL 事务不能原子提交文件系统或 MinIO IO；在事务中上传大文件还会长时间占用连接和行锁。事务 A 只创建 `RECEIVING` session、随机 temp key 和 owner token；事务外流式写 temp、计算实际大小/SHA-256 并检测类型；事务 B 锁定或创建 `STAGING` Blob；owner 在事务外提交物理对象；事务 C 再分别以 session/Blob ID、owner token、状态和有效租约推进 Blob、逻辑文件、引用和 session，并校验 hash、size、类型等已验证元数据。任一步失败由 session/Blob 状态与幂等清理任务补偿，而不是伪造跨资源原子事务。
 
 **追问要点：** 事务 C 失败后如何恢复？先按最终 object key 探测对象；存在且大小匹配才允许合法 owner/接管者继续 finalize，不匹配或不可用按失败分类与任务重试处理。`RECEIVING` 中断会话当前不由过期恢复器自动领取，不能手工改状态或删除活跃 temp。
 
@@ -216,7 +216,7 @@
 
 ### 35. 租约、owner/claim token 和 generation fencing 分别解决什么问题？
 
-**回答：** 租约允许执行者崩溃后由新实例接管；owner/claim token 区分同一资源的不同领取者；generation 与 object key 区分同一内容 Blob 删除后再创建的新一代对象。所有过期判断使用 MySQL 时间，完成、失败、重排和删除都必须同时匹配状态、token、lease、key 和 generation，旧 owner 的迟到写入因此只会更新 0 行，不能覆盖新 owner 或误删新代对象。
+**回答：** 租约允许执行者崩溃后由新实例接管；owner/claim token 区分同一资源的不同领取者；generation 与 object key 区分同一内容 Blob 删除后再创建的新一代对象。各路径使用自身的条件更新：上传领取和推进匹配 session/Blob ID、owner token、状态与租约，并校验 hash、size、类型等上传元数据；cleanup task 的完成、重试和失败匹配 task ID、`PROCESSING` 与 claim token；Blob 物理清理的原子完成还要匹配 Blob 状态、cleanup token、object key 与 generation。过期判断使用 MySQL 时间，因此旧 owner、旧 token 或旧 generation 的迟到操作只会更新 0 行，不能覆盖新执行者或误删新代对象。
 
 **追问要点：** 应避免长时间持锁等待，用短事务条件更新和有界轮询协调；对象存储 IO 始终在事务外执行。
 
