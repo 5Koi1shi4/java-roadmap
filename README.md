@@ -20,7 +20,7 @@
 | 3 | 秒杀、库存与接口幂等 | 已验收 | [learning/seckill-inventory](https://github.com/5Koi1shi4/java-roadmap/tree/learning/seckill-inventory/labs/03-seckill-inventory) |
 | 4 | 订单状态机与可靠消息 | 已验收 | [feat/order-mq-reliable-messaging](https://github.com/5Koi1shi4/java-roadmap/tree/feat/order-mq-reliable-messaging/labs/04-order-mq) |
 | 5 | Elasticsearch 搜索 | 已验收 | [learning/elasticsearch-search/labs/05-elasticsearch-search](https://github.com/5Koi1shi4/java-roadmap/tree/learning/elasticsearch-search/labs/05-elasticsearch-search) |
-| 6 | 安全文件服务与 MinIO | 未开始 | — |
+| 6 | 安全文件服务与 MinIO | 已验收 | [learning/secure-file-service/labs/06-file-service](https://github.com/5Koi1shi4/java-roadmap/tree/learning/secure-file-service/labs/06-file-service) |
 | 7 | 校园交易与服务平台 | 未开始 | — |
 | 8 | Spring Cloud 渐进拆分 | 未开始 | — |
 | 9 | Java AI 智能校园客服 | 未开始 | — |
@@ -63,6 +63,13 @@
 
 - 入口：[learning/elasticsearch-search/labs/05-elasticsearch-search](https://github.com/5Koi1shi4/java-roadmap/tree/learning/elasticsearch-search/labs/05-elasticsearch-search)
 - 验证：在 JDK 17、MySQL 8.4、带 SmartCN 的 Elasticsearch 8.18.8 和 Toxiproxy 2.12.0 下执行 `mvnw.cmd verify`；已验收 44 个 Surefire 测试和 52 个 Failsafe/Testcontainers 集成测试，0 failures、0 errors、0 skipped（验收提交 `758ab9fb52c3f8245b9f2aea94c30c3d33c43549`）。
+
+### 实验六：安全文件服务与 MinIO
+
+覆盖流式类型与 20 MiB 实际读取上限校验、随机逻辑文件 ID、全局物理 Blob 去重、私有默认 ACL、授权与撤权、统一 404、MySQL 时间租约与 token/generation fencing，以及本地/MinIO 对象存储的幂等补偿和清理。上传通过短数据库事务 A/B/C 与事务外对象存储操作协作；物理 Blob 访问必须先经过逻辑授权，管理员不自动绕过权限。
+
+- 入口：[learning/secure-file-service/labs/06-file-service](https://github.com/5Koi1shi4/java-roadmap/tree/learning/secure-file-service/labs/06-file-service)
+- 验证：实验代码只保存在独立分支 `learning/secure-file-service`，不合并到 `main`。在 JDK 17、MySQL 8.4、MinIO 和 Toxiproxy 2.12.0 下执行 fresh `mvnw.cmd clean verify`；已验收 96 个 Surefire 测试和 80 个 Failsafe/Testcontainers 集成测试，0 failures、0 errors、0 skipped（实验最终提交 `18603f1`）。
 
 ## 目录导航
 

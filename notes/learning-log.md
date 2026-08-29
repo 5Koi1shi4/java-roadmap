@@ -109,3 +109,14 @@
 - 并发竞态与取舍：商品写入、重建和 dispatcher 共享协调行并遵守固定锁序；`FOR UPDATE SKIP LOCKED`、默认 30 秒且可配置（必须大于 request timeout）的租约和 token fencing 让旧 owner 的迟到完成/重排或失败不能修改新租约。采用至少一次 Outbox 投递换取故障后可恢复，重复事件由 `(product_id, product_version, event_type)` 唯一约束、`external_gte` 和幂等完成语义收敛；代价是必须接受短暂重复写入与可观测的积压。
 - 重建与故障演练：`RebuildAndRecoveryDrillIT.repeatsThreeRebuildsAndTwoConnectionOutageRecoveriesWithoutRegression` 连续完成 3 次重建和 2 次 Elasticsearch 网络中断恢复；中断期间搜索返回 503、Outbox 形成积压，恢复后事件全部追平、索引版本一致且搜索恢复 200。
 - 下一步：复查阶段五 README/TROUBLESHOOTING 的手工运维边界，并把高水位、别名分裂恢复和指标告警整理成面试中的故障演练回答。
+
+## 2026-08-29
+
+- 今日目标：完成实验六安全文件服务的独立分支验收，并把跨数据库/对象存储的一致性、安全授权和故障恢复证据沉淀到文档中心。
+- 上传事务边界与补偿：事务 A 创建 `RECEIVING` session、随机 temp key、owner token 和 TTL；事务外以同一消费流写临时对象并计算实际大小、SHA-256 与真实类型；事务 B 将 session 推进为 `VALIDATED`，按内容哈希锁定或创建 `STAGING` Blob；Blob owner 在事务外提交随机 object key；事务 C 将 Blob 置为 `READY`、创建逻辑文件、增加引用、完成 session 并写上传成功审计。对象存储失败、事务 C 失败或临时对象删除失败由持久状态和幂等任务补偿，数据库事务内不执行文件/MinIO IO。当前过期恢复只领取 `VALIDATED`/`FINALIZING`；中断后仍为 `RECEIVING` 的 session 不会自动转终态或自动清理，不能靠手工改状态或删 temp 绕过这一边界。
+- 去重与授权：SHA-256 唯一约束让相同内容共享物理 Blob，但每次上传都创建新的随机 `fileId` 和独立 ACL；HTTP 响应、日志、审计和指标不泄漏去重命中、hash、blob ID 或 object key。文件默认私有，owner 可向指定用户授予/撤销只读权限，grantee 不能转授权或删除，管理员角色不自动旁路；已认证调用者面对不存在、已删除或无权资源时得到同构 404。所有物理 Blob 打开都必须先从逻辑文件重新执行 ACL。
+- 下载撤权边界：`/content` 在响应前完成授权、审计、对象预打开和首段预读；本地 HMAC token 兑换时也重新检查 ACL，因此撤权可即时阻断后续兑换。MinIO presigned URL 由对象存储直接处理，签发后最多仍有约 2 分钟残余窗口；高风险或要求即时撤权的场景使用 `/content`。
+- 并发与清理：上传、恢复和清理的租约/过期判断使用 MySQL 时间；owner token、claim token、object key 与 generation 共同 fencing，过期租约可由新执行者接管，旧执行者迟到完成影响行数为 0。引用归零后才创建 Blob 清理任务；删除不存在对象视为成功，Blob 与 task 原子完成，失败按固定退避最多尝试 5 次，使重复执行和崩溃恢复最终收敛。
+- 审计与可观测性：上传成功、文件访问与拒绝、ACL grant/revoke/delete、下载授权/完成/失败、token 拒绝和链接签发按既有 `AuditAction` 持久化；上传失败由 session 状态/分类和指标记录，cleanup/recovery 当前没有独立 `AuditRecorder` 动作。审计集中丢弃 token、签名 URL、object key、路径、hash、secret 和异常堆栈；内部 correlation ID 随机生成且不接受客户端覆盖。Micrometer 只使用固定枚举的低基数标签，不把 user/file/hash/blob/object/correlation ID 或异常消息作为标签。
+- 故障与验收证据：`StorageRecoveryDrillIT` 通过 Toxiproxy 连续执行 3 轮“断开 MinIO → 观察失败/积压 → 恢复 route → 运行 recovery/cleanup → 验证收敛”。每轮递归核对测试 bucket：`tmp/` 为空，`blobs/` 的对象集合精确等于数据库 `READY` Blob 的 `object_key` 集合；该 exact-set 结论只覆盖测试 bucket 与数据库已知对象，不扩大为任意外部对象的独立盘点证明。实验分支 `learning/secure-file-service` 最终提交为 `18603f1`；fresh `mvnw.cmd clean verify` 的 Surefire 96、Failsafe 80 均为 0 failures、0 errors、0 skipped。
+- 技术取舍：使用短事务、状态机、租约和补偿换取跨 MySQL/对象存储故障后的可恢复性，代价是允许可观测的中间态和最终一致窗口；去重节省存储但必须隔离逻辑授权和接口行为；presigned URL 降低应用流量却牺牲签发后的即时撤权。

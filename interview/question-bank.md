@@ -188,6 +188,56 @@
 
 **代码证据：** `SearchRebuildPreparer.prepare/replayCatchUp`、`SearchRebuildCutover`、`SearchRebuildRecovery.recoverInterruptedCutover`；`RebuildPreparationIT.replaysEveryEventAfterSnapshotWatermark`、`RebuildRecoveryIT.splitAliasesFailButRemainPausedAndActive` 和 `RebuildAndRecoveryDrillIT.repeatsThreeRebuildsAndTwoConnectionOutageRecoveriesWithoutRegression`。
 
+## 实验六：安全文件服务与 MinIO
+
+### 31. 为什么上传要拆成数据库事务 A/B/C，而不能把 MinIO 操作放进一个数据库事务？
+
+**回答：** MySQL 事务不能原子提交文件系统或 MinIO IO；在事务中上传大文件还会长时间占用连接和行锁。事务 A 只创建 `RECEIVING` session、随机 temp key 和 owner token；事务外流式写 temp、计算实际大小/SHA-256 并检测类型；事务 B 锁定或创建 `STAGING` Blob；owner 在事务外提交物理对象；事务 C 再以 token、状态、key 和 generation 条件完成 Blob、逻辑文件、引用和 session。任一步失败由 session/Blob 状态与幂等清理任务补偿，而不是伪造跨资源原子事务。
+
+**追问要点：** 事务 C 失败后如何恢复？先按最终 object key 探测对象；存在且大小匹配才允许合法 owner/接管者继续 finalize，不匹配或不可用按失败分类与任务重试处理。`RECEIVING` 中断会话当前不由过期恢复器自动领取，不能手工改状态或删除活跃 temp。
+
+### 32. 全局内容去重为什么容易造成隐私泄漏，接口应怎样设计？
+
+**回答：** 如果重复上传返回不同状态、耗时、标志位、hash、Blob ID 或 object key，调用者就能探测某份内容是否已由他人保存。实现可以用 SHA-256 唯一约束共享物理 Blob，但每次上传必须创建独立随机 `fileId`、owner 和 ACL，并让成功响应保持相同语义；普通日志、审计和指标也不得暴露去重命中或内容标识。
+
+**追问要点：** 去重是存储优化，不是授权关系。即使知道内容 hash 或 object key，也必须从逻辑文件重新执行 ACL；物理 Blob 不能成为绕过授权的第二入口。
+
+### 33. 为什么无权访问和文件不存在统一返回 404，管理员是否应该自动绕过？
+
+**回答：** 对已认证用户区分 403 与 404 会泄漏文件存在性。实验将不存在、已删除和无权资源映射为同构 404；文件默认私有，只有 owner 和被授予只读权限的用户可读，owner 可 grant/revoke，grantee 不能转授权或删除。管理员角色不自动旁路，因为后台身份不等于数据所有权；若未来需要合规访问，应设计独立、显式、可审计的受控流程。
+
+**追问要点：** 未认证仍返回 401；统一 404 前仍记录权限拒绝审计，但不能把 owner、hash、object key 或完整异常写入响应。
+
+### 34. `/content` 与 MinIO presigned URL 在撤权语义上有什么差异？
+
+**回答：** `/content` 由应用在响应前重新校验逻辑 ACL，并完成审计、对象预打开和首段预读；本地 HMAC token 兑换时也会重新授权，所以撤权能阻止后续请求。MinIO presigned URL 签发后直接由对象存储处理，应用无法逐次重查 ACL，已有 URL 在撤权后最多仍可能有效约 2 分钟。低风险大流量下载可接受短 TTL presign；高风险或要求即时撤权时使用 `/content`。
+
+**追问要点：** presigned URL 不能写入日志或审计；签发前仍要逻辑授权和审计，TTL 必须受配置上限约束。
+
+### 35. 租约、owner/claim token 和 generation fencing 分别解决什么问题？
+
+**回答：** 租约允许执行者崩溃后由新实例接管；owner/claim token 区分同一资源的不同领取者；generation 与 object key 区分同一内容 Blob 删除后再创建的新一代对象。所有过期判断使用 MySQL 时间，完成、失败、重排和删除都必须同时匹配状态、token、lease、key 和 generation，旧 owner 的迟到写入因此只会更新 0 行，不能覆盖新 owner 或误删新代对象。
+
+**追问要点：** 应避免长时间持锁等待，用短事务条件更新和有界轮询协调；对象存储 IO 始终在事务外执行。
+
+### 36. 引用计数归零后的物理删除如何做到幂等且不会误删新对象？
+
+**回答：** 逻辑删除在同一事务减少引用；只有引用归零才把 Blob 推进到 `PENDING_DELETE` 并创建唯一的 `BLOB_OBJECT` 任务。清理器用 claim token 领取，使用 Blob cleanup token 将其推进到 `DELETING`，事务外删除指定 key；对象不存在按成功处理，最后以相同 token、generation、object key 原子完成 Blob 与 task。失败按固定退避重试，最多 5 次；新一代 Blob 使用新 key 和 generation，旧任务无法通过 fencing 条件。
+
+**追问要点：** 不能先删正式对象再补数据库，也不能只完成 Blob 或 task 其中之一；引用计数、任务创建和逻辑删除必须在同一数据库事务中。
+
+### 37. 文件服务的审计和指标怎样兼顾可追踪性、隐私与基数控制？
+
+**回答：** 审计记录固定动作、结果和有限失败分类，并集中移除 token、JWT/HMAC、完整签名 URL、object key、路径、hash、secret、异常堆栈和换行。内部 correlation ID 由服务端安全随机生成，客户端 trace 不能覆盖它。指标只使用固定枚举的 `result/phase/action/type/status/operation` 标签，不把 user、file、hash、blob、object、correlation ID 或异常消息作为标签，避免隐私泄漏和时序库基数爆炸。
+
+**追问要点：** 当前独立审计覆盖上传成功、文件访问/拒绝、ACL 和下载动作；上传失败依赖 session/指标，cleanup/recovery 依赖状态、任务与指标，没有独立 `AuditRecorder` 动作，回答时不能夸大范围。
+
+### 38. 怎样证明 MinIO 故障恢复不是“单轮偶然成功”？
+
+**回答：** 使用 Toxiproxy 连续执行 3 轮“断开 MinIO → 观察失败或积压 → 恢复 route → 运行 recovery/cleanup → 验证终态”。每轮不仅看 HTTP 成功，还递归列出测试 bucket，断言 `tmp/` 为空、`blobs/` 对象集合精确等于数据库 `READY` Blob 的 `object_key` 集合，并核对 session、Blob 和清理任务收敛。
+
+**追问要点：** exact-set 证据只覆盖测试 bucket 与数据库已知对象，不能扩大为任意外部未登记对象的全量盘点；不能绕过 Toxiproxy 直连 MinIO、跳过数据库核对或用 local mock 代替真实故障测试。
+
 ## 技术取舍速记
 
 | 选择                       | 收益                              | 代价                                  |
