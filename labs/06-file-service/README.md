@@ -117,7 +117,7 @@ TEMP 对象受上传会话 1 小时 TTL 约束；本地数据库不可用时，f
 
 ## 8. 审计与指标
 
-成功和拒绝的上传、访问、授权、撤权、删除、下载、签发链接、清理和恢复结果都会进入审计边界；权限拒绝在统一 404 之前提交。`JdbcAuditRecorder` 写入前集中脱敏：只接受固定结果和失败分类，丢弃 token、签名链接、object key、路径、哈希、secret、JWT、HMAC、异常堆栈和换行。内部 correlation ID 由服务端 `SecureRandom` 生成（16 字节、Base64URL 22 字符），客户端 trace 只能作为受限的独立字段，不能覆盖内部 ID。
+审计覆盖范围以 `AuditAction` 和调用点为准：上传成功写入 `UPLOAD_COMPLETED`；上传失败记录在 session 的失败状态/失败分类和上传指标中，当前没有独立的上传失败 `AuditRecorder` 动作。文件访问（含拒绝）、ACL grant/revoke/delete（含拒绝）分别使用 `FILE_ACCESSED`、`ACCESS_GRANTED`、`ACCESS_REVOKED`、`FILE_DELETED`；下载 `/content` 的授权阶段和传输成功/失败使用 `DOWNLOAD_AUTHORIZED`、`DOWNLOAD_COMPLETED`、`DOWNLOAD_FAILED`，本地 token 拒绝使用 `DOWNLOAD_TOKEN_DENIED`；下载链接签发成功/拒绝使用 `DOWNLOAD_LINK_ISSUED`，链接参数等早期输入失败只记录指标并返回 400。权限拒绝在统一 404 之前提交。清理与恢复当前没有独立的 `AuditRecorder` 动作，由 session/Blob/task 状态、清理指标和恢复结果观测。`JdbcAuditRecorder` 写入前集中脱敏：只接受固定结果和失败分类，丢弃 token、签名链接、object key、路径、哈希、secret、JWT、HMAC、异常堆栈和换行。内部 correlation ID 由服务端 `SecureRandom` 生成（16 字节、Base64URL 22 字符），客户端 trace 只能作为受限的独立字段，不能覆盖内部 ID。
 
 固定指标名称为：`file.upload.total{result}`、`file.upload.duration`、`file.session.count{status}`、`file.blob.count{status}`、`file.staging.oldest.seconds`、`file.cleanup.pending{type}`、`file.cleanup.retry.total{type,result}`、`file.download.total{phase,result}`、`file.acl.total{action,result}`、`file.storage.operation.duration{operation,result}`。标签值只来自固定枚举；不得使用 user/file/hash/blob/object/temp/correlation ID、异常类名或异常消息作标签。默认 Actuator 只暴露 health/info；指标测试会显式开启 metrics。
 
@@ -130,9 +130,14 @@ java -version                 # 应为 JDK 17
 .\mvnw.cmd test               # 仅 Surefire 单元测试，不启动 Testcontainers
 .\mvnw.cmd clean verify       # Surefire + Failsafe，需 Docker Desktop
 git ls-files
-git grep -n -E "(MINIO_SECRET_KEY=.{8,}|X-Amz-Signature|BEGIN (RSA|PRIVATE) KEY)" -- . ':!labs/06-file-service/.env.example'
+# 生产秘密扫描：排除本 README 自引用、.env.example 和两个固定测试哨兵；预期无输出
+git grep -n -E "(MINIO_SECRET_KEY=.{8,}|X-Amz-Signature|BEGIN (RSA|PRIVATE) KEY)" -- . ':!labs/06-file-service/.env.example' ':!labs/06-file-service/README.md' ':!labs/06-file-service/src/test/java/com/example/files/integration/AuditRecorderPersistenceIT.java' ':!labs/06-file-service/src/test/java/com/example/files/unit/AuditSanitizerTest.java'
+# 单独审查固定测试哨兵；命中是故意的假值，不是生产凭据
+git grep -n -E "(MINIO_SECRET_KEY=.{8,}|X-Amz-Signature|BEGIN (RSA|PRIVATE) KEY)" -- labs/06-file-service/src/test/java/com/example/files/integration/AuditRecorderPersistenceIT.java labs/06-file-service/src/test/java/com/example/files/unit/AuditSanitizerTest.java
 git diff --check
 ```
+
+不要把未排除 README/测试哨兵的宽泛扫描命令解释为“无输出”：它会命中自引用和固定假值。生产扫描的预期是无输出；测试哨兵命中必须人工核对其为无效示例字符串，不能因此掩盖其他路径中的真实秘密。
 
 Task 11 最终独立验收（基线 `bc57db8`）记录为 Surefire 96、Failsafe 80；两者均 0 failures、0 errors、0 skipped，使用真实 MySQL 8.4、固定 MinIO 镜像和 Toxiproxy，恢复演练连续执行 3 轮。Task 12 的 fresh `clean verify` 结果应以终端和 `target/surefire-reports`/`target/failsafe-reports` 为准；若与上述历史证据不同，不得照抄历史计数。
 

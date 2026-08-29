@@ -14,13 +14,13 @@
 
 ## 2. Multipart 中断或超过 20 MiB
 
-**症状 →** 返回 413，或连接中断后出现 `RECEIVING/VALIDATED` session 与临时对象。
+**症状 →** 返回 413，或连接中断后出现 `RECEIVING`（也可能已进入 `VALIDATED`）session 与临时对象。
 
-**检查 →** 查看应用日志中的内部 correlation ID 和脱敏失败分类；检查 session 的 TTL/lease 与对应 `tmp/<UUID>`，不要把客户端声明长度当作实际大小。确认 `application.yml` 的 multipart 上限未被本地覆盖得更宽。
+**检查 →** 查看请求/上传进程是否仍在运行，确认客户端是否主动断开；再查看 session 的 TTL/lease 与对应 `tmp/<UUID>`，不要把客户端声明长度当作实际大小。确认 `application.yml` 的 multipart 上限未被本地覆盖得更宽。`ExpiredUploadService` 只扫描 `VALIDATED`/`FINALIZING` 的过期会话；`StorageCleanupService` 不会删除仍处于 `RECEIVING` 的会话临时对象。
 
-**安全恢复 →** 让会话自然进入恢复扫描；待 session 终态或过期后由 `ExpiredUploadService`/`StorageCleanupService` 领取，或使用本地 24 小时 fallback 清理足够老的临时普通文件。重新上传时确保流完整且不超过 20 MiB。
+**安全恢复 →** 对仍为 `RECEIVING` 的会话，先确认请求/进程已经结束，等待会话 TTL 到期；当前实现不会自动领取或把接收中断会话转为可清理终态，若业务需要此能力必须另行设计、评审并部署专门的接收中断策略。对已进入 `VALIDATED`/`FINALIZING` 且 lease 过期的会话，才运行 `ExpiredUploadService`/`StagingRecoveryService`；临时任务随后按 session 终态条件清理，本地 fallback 只清理足够老的临时普通文件。重新上传时确保流完整且不超过 20 MiB。
 
-**禁止操作 →** 不要将上限调大、复用旧 temp key、删除仍为 `RECEIVING` 的临时对象，或手工把 session 改成 `COMPLETED`。
+**禁止操作 →** 不要将上限调大、复用旧 temp key、直接把 `RECEIVING` 改成 `FAILED/EXPIRED/COMPLETED`、删除仍为 `RECEIVING` 的临时对象，或绕过专门中断策略手工清理。
 
 ## 3. STAGING/FINALIZING 超时
 
