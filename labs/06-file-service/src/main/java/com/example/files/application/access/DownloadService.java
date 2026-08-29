@@ -160,35 +160,64 @@ public final class DownloadService {
     }
 
     public DownloadLink issueLink(long actorId, UUID fileId, Duration ttl, CorrelationId correlationId) {
-        require(actorId, fileId, correlationId);
-        if (ttl == null || ttl.isZero() || ttl.isNegative() || ttl.getNano() != 0 || ttl.compareTo(maxLinkTtl) > 0) {
-            throw new IllegalArgumentException("link ttl must be positive and no more than 2 minutes");
-        }
-        Instant issuedAt = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
-        Instant expiresAt = issuedAt.plusSeconds(ttl.getSeconds());
-        Outcome<FileView> outcome = inTransaction(() -> {
-            AccessDecision decision = access.findAccess(actorId, fileId);
-            if (decision == null || !decision.readable() || decision.view() == null) {
-                record(correlationId, actorId, AuditAction.DOWNLOAD_LINK_ISSUED, fileId,
-                    "DENIED", "ACCESS_DENIED");
-                return Outcome.<FileView>denied();
+        Instant expiresAt;
+        try {
+            require(actorId, fileId, correlationId);
+            if (ttl == null || ttl.isZero() || ttl.isNegative() || ttl.getNano() != 0 || ttl.compareTo(maxLinkTtl) > 0) {
+                throw new IllegalArgumentException("link ttl must be positive and no more than 2 minutes");
             }
-            record(correlationId, actorId, AuditAction.DOWNLOAD_LINK_ISSUED, fileId,
-                "SUCCESS", null, expiresAt);
-            return Outcome.success(decision.view());
-        });
-        if (outcome.hidden()) throw new ResourceHiddenException();
-        FileAccessRepository.DownloadTarget target = access.findDownloadTarget(actorId, fileId)
-            .filter(candidate -> candidate.view().fileId().equals(outcome.value().fileId()))
-            .orElseThrow(ResourceHiddenException::new);
-        Map<String, String> responseHeaders = responseHeaders(outcome.value());
-        java.util.Optional<URI> presigned = storage.createPresignedGet(target.objectKey(), ttl, responseHeaders);
-        if (presigned.isPresent()) {
-            return new DownloadLink(presigned.get().toString(), expiresAt);
+            Instant issuedAt = clock.instant().truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+            expiresAt = issuedAt.plusSeconds(ttl.getSeconds());
+        } catch (RuntimeException ex) {
+            recordLinkMetric("failed");
+            throw ex;
         }
-        if (tokens == null) throw new IllegalStateException("local download signing is unavailable");
-        String token = tokens.issue(actorId, fileId, expiresAt);
-        return new DownloadLink("/api/local-downloads/" + token, expiresAt);
+        return issueLinkAfterValidation(actorId, fileId, ttl, correlationId, expiresAt);
+    }
+
+    private DownloadLink issueLinkAfterValidation(long actorId, UUID fileId, Duration ttl,
+                                                  CorrelationId correlationId, Instant expiresAt) {
+        Outcome<FileView> outcome;
+        try {
+            outcome = inTransaction(() -> {
+                AccessDecision decision = access.findAccess(actorId, fileId);
+                if (decision == null || !decision.readable() || decision.view() == null) {
+                    record(correlationId, actorId, AuditAction.DOWNLOAD_LINK_ISSUED, fileId,
+                        "DENIED", "ACCESS_DENIED");
+                    return Outcome.<FileView>denied();
+                }
+                record(correlationId, actorId, AuditAction.DOWNLOAD_LINK_ISSUED, fileId,
+                    "SUCCESS", null, expiresAt);
+                return Outcome.success(decision.view());
+            });
+        } catch (RuntimeException ex) {
+            recordLinkMetric("failed");
+            throw ex;
+        }
+        if (outcome.hidden()) {
+            recordLinkMetric("denied");
+            throw new ResourceHiddenException();
+        }
+        try {
+            FileAccessRepository.DownloadTarget target = access.findDownloadTarget(actorId, fileId)
+                .filter(candidate -> candidate.view().fileId().equals(outcome.value().fileId()))
+                .orElseThrow(ResourceHiddenException::new);
+            Map<String, String> responseHeaders = responseHeaders(outcome.value());
+            java.util.Optional<URI> presigned = storage.createPresignedGet(target.objectKey(), ttl, responseHeaders);
+            DownloadLink link;
+            if (presigned.isPresent()) {
+                link = new DownloadLink(presigned.get().toString(), expiresAt);
+            } else {
+                if (tokens == null) throw new IllegalStateException("local download signing is unavailable");
+                String token = tokens.issue(actorId, fileId, expiresAt);
+                link = new DownloadLink("/api/local-downloads/" + token, expiresAt);
+            }
+            recordLinkMetric("success");
+            return link;
+        } catch (RuntimeException ex) {
+            recordLinkMetric("failed");
+            throw ex;
+        }
     }
 
     /** 仅传入安全展示名和媒体类型；不会把 bearer URL 或 token 写入审计。 */
@@ -279,6 +308,11 @@ public final class DownloadService {
 
     private <T> T inTransaction(Supplier<T> callback) {
         return transactions == null ? callback.get() : transactions.execute(status -> callback.get());
+    }
+
+    private void recordLinkMetric(String result) {
+        try { metrics.recordDownload("link", result); }
+        catch (RuntimeException ignored) { }
     }
 
     private static void require(long actorId, UUID fileId, CorrelationId correlationId) {

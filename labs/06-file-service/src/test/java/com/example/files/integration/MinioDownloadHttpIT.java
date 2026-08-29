@@ -3,6 +3,7 @@ package com.example.files.integration;
 import com.example.files.FileServiceApplication;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -31,6 +32,7 @@ class MinioDownloadHttpIT extends SharedStorageContainers {
     @Autowired private ObjectMapper objectMapper;
     @Autowired private org.springframework.context.ApplicationContext context;
     @Autowired private org.springframework.jdbc.core.JdbcTemplate jdbc;
+    @Autowired private MeterRegistry metrics;
 
     @DynamicPropertySource
     static void registerMinioProperties(DynamicPropertyRegistry registry) {
@@ -50,6 +52,7 @@ class MinioDownloadHttpIT extends SharedStorageContainers {
         byte[] bytes = "%PDF-1.7\nproxy-download".getBytes(StandardCharsets.US_ASCII);
         JsonNode upload = upload(77, "资料.pdf", bytes);
         String fileId = upload.path("fileId").asText();
+        double linkSuccessBefore = metricCount("link", "success");
         assertThat(context.getBeansOfType(com.example.files.infrastructure.storage.MinioObjectStorage.class)).hasSize(1);
         assertThat(context.getBeansOfType(com.example.files.infrastructure.storage.LocalObjectStorage.class)).isEmpty();
         assertThat(context.getBeansOfType(com.example.files.application.upload.ObjectStorage.class)).hasSize(1);
@@ -72,6 +75,21 @@ class MinioDownloadHttpIT extends SharedStorageContainers {
             .contains("filename*=UTF-8''");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM file_audit_event WHERE action='DOWNLOAD_LINK_ISSUED' AND result='SUCCESS'", Integer.class))
             .isGreaterThanOrEqualTo(1);
+        assertThat(metricCount("link", "success")).isGreaterThan(linkSuccessBefore);
+    }
+
+    @Test
+    void deniedLinkRecordsDeniedMetricAfterCommittedAccessAudit() throws Exception {
+        String fileId = upload(78, "denied-link.pdf", "%PDF-1.7\ndenied-link".getBytes(StandardCharsets.US_ASCII))
+            .path("fileId").asText();
+        double deniedBefore = metricCount("link", "denied");
+
+        ResponseEntity<String> response = client.exchange("/api/files/" + fileId
+                + "/download-links?ttlSeconds=30", HttpMethod.POST,
+            new HttpEntity<>(headers(79)), String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(metricCount("link", "denied")).isGreaterThan(deniedBefore);
     }
 
     @Test
@@ -112,5 +130,9 @@ class MinioDownloadHttpIT extends SharedStorageContainers {
         headers.setAccept(List.of(MediaType.APPLICATION_JSON));
         headers.set("X-Trusted-User-Id", Long.toString(user));
         return headers;
+    }
+
+    private double metricCount(String phase, String result) {
+        return metrics.get("file.download.total").tags("phase", phase, "result", result).counter().count();
     }
 }

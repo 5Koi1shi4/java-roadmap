@@ -6,6 +6,8 @@ import com.example.files.infrastructure.storage.MinioObjectStorage;
 import com.example.files.infrastructure.storage.StorageConflictException;
 import com.example.files.infrastructure.storage.StorageFailureClassifier;
 import com.example.files.infrastructure.storage.StorageUnavailableException;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import com.example.files.observability.MicrometerFileServiceMetrics;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -27,7 +29,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** 真实 MinIO 对象语义、条件提交、中文响应头与临时生命周期验证。 */
 class MinioObjectStorageIT extends SharedStorageContainers {
-    private final MinioObjectStorage storage = new MinioObjectStorage(minioClient(), minioStorage());
+    private final SimpleMeterRegistry metrics = new SimpleMeterRegistry();
+    private final MinioObjectStorage storage = new MinioObjectStorage(minioClient(), minioStorage(),
+        Duration.ofMinutes(2), new MicrometerFileServiceMetrics(metrics));
 
     MinioObjectStorageIT() { storage.initialize(); }
 
@@ -112,6 +116,31 @@ class MinioObjectStorageIT extends SharedStorageContainers {
     }
 
     @Test
+    void recordsRealWriteAndPresignSuccessAndFailureTiming() {
+        String temp = key("tmp");
+        byte[] bytes = "metered-write".getBytes(StandardCharsets.US_ASCII);
+        long writeSuccessBefore = timerCount("write_temporary", "success");
+        long writeFailureBefore = timerCount("write_temporary", "failed");
+        long presignSuccessBefore = timerCount("presign", "success");
+        long presignFailureBefore = timerCount("presign", "failed");
+
+        storage.writeTemporary(temp, new ByteArrayInputStream(bytes), 1024);
+        assertThat(timerCount("write_temporary", "success")).isEqualTo(writeSuccessBefore + 1);
+        assertThatThrownBy(() -> storage.writeTemporary("tmp/not-a-uuid",
+            new ByteArrayInputStream(bytes), 1024)).isInstanceOf(IllegalArgumentException.class);
+        assertThat(timerCount("write_temporary", "failed")).isEqualTo(writeFailureBefore + 1);
+
+        String object = key("blobs");
+        storage.commit(temp, object);
+        storage.createPresignedGet(object, Duration.ofSeconds(1), Map.of()).orElseThrow();
+        assertThat(timerCount("presign", "success")).isEqualTo(presignSuccessBefore + 1);
+        assertThatThrownBy(() -> storage.createPresignedGet("blobs/not-a-uuid",
+            Duration.ofSeconds(1), Map.of())).isInstanceOf(IllegalArgumentException.class);
+        assertThat(timerCount("presign", "failed")).isEqualTo(presignFailureBefore + 1);
+        storage.delete(object);
+    }
+
+    @Test
     void lifecycleOnlyMatchesTemporaryPrefixForTwentyFourHours() {
         var lifecycle = storage.lifecycle();
         assertThat(lifecycle.rules()).hasSize(1);
@@ -151,6 +180,11 @@ class MinioObjectStorageIT extends SharedStorageContainers {
     }
 
     private static String key(String namespace) { return namespace + "/" + UUID.randomUUID(); }
+
+    private long timerCount(String operation, String result) {
+        return metrics.get("file.storage.operation.duration")
+            .tag("operation", operation).tag("result", result).timer().count();
+    }
 
     @FunctionalInterface
     private interface ThrowingOperation { void run(); }

@@ -64,14 +64,41 @@ class DownloadServiceTest {
     void minioPresignedLinkIsIssuedAfterAccessAuditWithoutLocalToken() {
         java.util.List<AuditEvent> events = new java.util.ArrayList<>();
         UUID file = UUID.randomUUID();
-        DownloadService service = new DownloadService(new AuthorizedAccess(file), events::add,
-            new PresigningStorage(), null, null);
+        CountingMetrics metrics = new CountingMetrics();
+        DownloadService service = service(new AuthorizedAccess(file), events, new PresigningStorage(), null, metrics);
 
         DownloadService.DownloadLink link = service.issueLink(7L, file, Duration.ofSeconds(30), CorrelationId.random());
 
         assertThat(link.url()).isEqualTo("http://minio.test/secure");
         assertThat(events).extracting(AuditEvent::action)
             .containsExactly(AuditAction.DOWNLOAD_LINK_ISSUED);
+        assertThat(metrics.linkResults).containsExactly("success");
+    }
+
+    @Test
+    void deniedLinkRecordsMetricOnlyAfterDeniedAuditTransactionCommits() {
+        java.util.List<AuditEvent> events = new java.util.ArrayList<>();
+        CountingMetrics metrics = new CountingMetrics();
+        UUID file = UUID.randomUUID();
+        DownloadService service = service(new EmptyAccess(), events, new EmptyStorage(), null, metrics);
+
+        assertThatThrownBy(() -> service.issueLink(7L, file, Duration.ofSeconds(30), CorrelationId.random()))
+            .isInstanceOf(ResourceHiddenException.class);
+
+        assertThat(metrics.linkResults).containsExactly("denied");
+    }
+
+    @Test
+    void presignFailureRecordsOnlyFailedLinkMetric() {
+        java.util.List<AuditEvent> events = new java.util.ArrayList<>();
+        CountingMetrics metrics = new CountingMetrics();
+        UUID file = UUID.randomUUID();
+        DownloadService service = service(new AuthorizedAccess(file), events, new FailingPresignStorage(), null, metrics);
+
+        assertThatThrownBy(() -> service.issueLink(7L, file, Duration.ofSeconds(30), CorrelationId.random()))
+            .isInstanceOf(IllegalStateException.class);
+
+        assertThat(metrics.linkResults).containsExactly("failed");
     }
 
     @Test
@@ -87,6 +114,26 @@ class DownloadServiceTest {
         assertThat(metrics.authorizationSuccesses).isZero();
     }
 
+    @Test
+    void linkCommitFailureLeavesNoSuccessMetric() {
+        UUID file = UUID.randomUUID();
+        CountingMetrics metrics = new CountingMetrics();
+        DownloadService service = service(new AuthorizedAccess(file), new java.util.ArrayList<>(),
+            new PresigningStorage(), new TransactionTemplate(new CommitFailingTransactionManager()), metrics);
+
+        assertThatThrownBy(() -> service.issueLink(7L, file, Duration.ofSeconds(30), CorrelationId.random()))
+            .isInstanceOf(IllegalStateException.class);
+        assertThat(metrics.linkResults).doesNotContain("success");
+    }
+
+    private static DownloadService service(FileAccessRepository access, java.util.List<AuditEvent> events,
+                                           ObjectStorage storage, TransactionTemplate transactions,
+                                           CountingMetrics metrics) {
+        return new DownloadService(access, events::add, storage, transactions, null,
+            Duration.ofSeconds(30), java.time.Clock.systemUTC(),
+            new com.example.files.application.access.DefaultDownloadTelemetry(), metrics);
+    }
+
     private static final class CommitFailingTransactionManager implements PlatformTransactionManager {
         @Override public TransactionStatus getTransaction(TransactionDefinition definition) {
             return new DefaultTransactionStatus(null, true, true, false, false, null);
@@ -97,8 +144,10 @@ class DownloadServiceTest {
 
     private static final class CountingMetrics implements FileServiceMetrics {
         private int authorizationSuccesses;
+        private final java.util.List<String> linkResults = new java.util.ArrayList<>();
         @Override public void recordDownload(String phase, String result) {
             if ("authorization".equals(phase) && "success".equals(result)) authorizationSuccesses++;
+            if ("link".equals(phase)) linkResults.add(result);
         }
         @Override public void recordUpload(String result, Duration duration) { }
         @Override public void recordSession(String status) { }
@@ -155,9 +204,15 @@ class DownloadServiceTest {
         @Override public Optional<URI> createPresignedGet(String k, Duration t, Map<String, String> h) { return Optional.empty(); }
     }
 
-    private static final class PresigningStorage extends EmptyStorage {
+    private static class PresigningStorage extends EmptyStorage {
         @Override public Optional<URI> createPresignedGet(String key, Duration ttl, Map<String, String> headers) {
             return Optional.of(URI.create("http://minio.test/secure"));
+        }
+    }
+
+    private static final class FailingPresignStorage extends PresigningStorage {
+        @Override public Optional<URI> createPresignedGet(String key, Duration ttl, Map<String, String> headers) {
+            throw new IllegalStateException("presign failed");
         }
     }
 }

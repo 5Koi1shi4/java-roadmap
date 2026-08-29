@@ -21,6 +21,7 @@ public final class MicrometerFileServiceMetrics implements FileServiceMetrics {
     private static final Set<String> CLEANUP_TYPES = Set.of("TEMP_OBJECT", "BLOB_OBJECT");
     private static final Set<String> CLEANUP_RESULTS = Set.of("success", "retry", "failed");
     private static final Set<String> DOWNLOAD_PHASES = Set.of("authorization", "transfer", "link");
+    private static final Set<String> DOWNLOAD_RESULTS = Set.of("success", "denied", "failed");
     private static final Set<String> ACL_ACTIONS = Set.of("grant", "revoke", "delete");
     private static final Set<String> STORAGE_OPERATIONS = Set.of("write_temporary", "commit", "open", "stat", "delete", "presign");
     private static final Set<String> OP_RESULTS = Set.of("success", "retry", "failed");
@@ -83,7 +84,7 @@ public final class MicrometerFileServiceMetrics implements FileServiceMetrics {
         // 预注册固定组合，便于 Actuator 在没有请求时也能发现完整指标契约。
         UPLOAD_RESULTS.forEach(result -> Counter.builder("file.upload.total").tag("result", result).register(registry));
         Timer.builder("file.upload.duration").register(registry);
-        DOWNLOAD_PHASES.forEach(phase -> OP_RESULTS.forEach(result ->
+        DOWNLOAD_PHASES.forEach(phase -> DOWNLOAD_RESULTS.forEach(result ->
             Counter.builder("file.download.total").tags("phase", phase, "result", result).register(registry)));
         ACL_ACTIONS.forEach(action -> OP_RESULTS.forEach(result ->
             Counter.builder("file.acl.total").tags("action", action, "result", result).register(registry)));
@@ -116,7 +117,7 @@ public final class MicrometerFileServiceMetrics implements FileServiceMetrics {
     }
     @Override public void recordDownload(String phase, String result) {
         Counter.builder("file.download.total").tags("phase", fixed(phase, DOWNLOAD_PHASES, "download phase"),
-            "result", fixed(result, OP_RESULTS, "download result")).register(registry).increment();
+            "result", fixed(result, DOWNLOAD_RESULTS, "download result")).register(registry).increment();
     }
     @Override public void recordAcl(String action, String result) {
         Counter.builder("file.acl.total").tags("action", fixed(action, ACL_ACTIONS, "ACL action"),

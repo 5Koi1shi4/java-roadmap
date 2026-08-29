@@ -126,6 +126,7 @@ public final class MinioObjectStorage implements ObjectStorage {
     public TemporaryObject writeTemporary(String tempKey, InputStream source, long maxBytes) {
         long started = System.nanoTime();
         LimitedInputStream limited = null;
+        boolean success = false;
         try {
             validateKey(tempKey, "tmp");
             if (source == null) throw new IllegalArgumentException("source must not be null");
@@ -133,8 +134,9 @@ public final class MinioObjectStorage implements ObjectStorage {
             limited = new LimitedInputStream(source, maxBytes);
             client.putObject(PutObjectArgs.builder().bucket(bucket).object(tempKey)
                 .stream(limited, -1, MINIO_PART_SIZE).contentType("application/octet-stream").build());
-            observe("write_temporary", "success", started);
-            return new TemporaryObject(tempKey, limited.count());
+            TemporaryObject result = new TemporaryObject(tempKey, limited.count());
+            success = true;
+            return result;
         } catch (RuntimeException ex) {
             if (limited != null && limited.exceeded()) {
                 try { delete(tempKey); } catch (RuntimeException ignored) { }
@@ -148,6 +150,7 @@ public final class MinioObjectStorage implements ObjectStorage {
             }
             throw failure("write-temporary", ex);
         } finally {
+            observe("write_temporary", success ? "success" : "failed", started);
             if (source != null) {
                 try { source.close(); } catch (IOException ignored) { }
             }

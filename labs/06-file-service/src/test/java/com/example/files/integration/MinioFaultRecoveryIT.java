@@ -8,6 +8,8 @@ import com.example.files.application.upload.StorageObjectMetadata;
 import com.example.files.infrastructure.storage.MinioObjectStorage;
 import com.example.files.infrastructure.storage.StorageFailureClassifier;
 import com.example.files.infrastructure.storage.StorageUnavailableException;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import com.example.files.observability.MicrometerFileServiceMetrics;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -31,7 +33,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
     properties = {"file.storage.type=minio", "file.identity.trusted-header-enabled=true"})
 @ActiveProfiles("test")
 class MinioFaultRecoveryIT extends SharedStorageContainers {
-    private final MinioObjectStorage storage = new MinioObjectStorage(minioClient(), minioStorage());
+    private final SimpleMeterRegistry metrics = new SimpleMeterRegistry();
+    private final MinioObjectStorage storage = new MinioObjectStorage(minioClient(), minioStorage(),
+        Duration.ofMinutes(2), new MicrometerFileServiceMetrics(metrics));
     @Autowired private com.example.files.application.upload.UploadService uploadService;
     @Autowired private JdbcTemplate jdbc;
 
@@ -109,5 +113,24 @@ class MinioFaultRecoveryIT extends SharedStorageContainers {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM stored_blob WHERE status='READY' AND reference_count=1", Integer.class)).isOne();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM upload_session WHERE status='COMPLETED'", Integer.class)).isOne();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM storage_cleanup_task WHERE task_type='TEMP_OBJECT' AND status='NEW'", Integer.class)).isOne();
+    }
+
+    @Test
+    void toxiproxyWriteFailureRecordsExactlyOneFailureTiming() {
+        long before = timerCount("write_temporary", "failed");
+        cutMinioConnection(true);
+        try {
+            assertThatThrownBy(() -> storage.writeTemporary("tmp/" + UUID.randomUUID(),
+                new ByteArrayInputStream("toxiproxy-failure".getBytes(StandardCharsets.US_ASCII)), 1024))
+                .isInstanceOf(StorageUnavailableException.class);
+        } finally {
+            cutMinioConnection(false);
+        }
+        assertThat(timerCount("write_temporary", "failed")).isEqualTo(before + 1);
+    }
+
+    private long timerCount(String operation, String result) {
+        return metrics.get("file.storage.operation.duration")
+            .tag("operation", operation).tag("result", result).timer().count();
     }
 }

@@ -5,9 +5,11 @@ import com.example.files.infrastructure.storage.LocalObjectStorage;
 import com.example.files.infrastructure.storage.MinioObjectStorage;
 import com.example.files.config.FileServiceProperties;
 import io.minio.MinioClient;
+import io.minio.PutObjectArgs;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -18,6 +20,10 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
 
 class StorageMetricsTest {
     @Test
@@ -56,6 +62,64 @@ class StorageMetricsTest {
             config, Duration.ofSeconds(2), metrics);
         assertThatThrownBy(() -> storage.stat("blobs/not-a-uuid")).isInstanceOf(IllegalArgumentException.class);
         assertThat(metrics.events).contains("stat:failed");
+    }
+
+    @Test
+    void minioWriteTemporaryRecordsExactlyOneFailureForValidation() {
+        RecordingMetrics metrics = new RecordingMetrics();
+        MinioObjectStorage storage = minioStorage(mock(MinioClient.class), metrics);
+
+        assertThatThrownBy(() -> storage.writeTemporary("tmp/not-a-uuid",
+            new ByteArrayInputStream(new byte[] {1}), 10)).isInstanceOf(IllegalArgumentException.class);
+
+        assertThat(metrics.events).filteredOn(event -> event.startsWith("write_temporary:"))
+            .containsExactly("write_temporary:failed");
+    }
+
+    @Test
+    void minioWriteTemporaryRecordsExactlyOneFailureForSdkCheckedAndRuntimeErrors() throws Exception {
+        for (Throwable failure : List.of(new java.io.IOException("io failure"),
+            new IllegalStateException("sdk failure"))) {
+            RecordingMetrics metrics = new RecordingMetrics();
+            MinioClient client = mock(MinioClient.class);
+            if (failure instanceof java.io.IOException io) {
+                doThrow(io).when(client).putObject(any(PutObjectArgs.class));
+            } else {
+                doThrow((RuntimeException) failure).when(client).putObject(any(PutObjectArgs.class));
+            }
+            MinioObjectStorage storage = minioStorage(client, metrics);
+
+            assertThatThrownBy(() -> storage.writeTemporary("tmp/00000000-0000-0000-0000-000000000000",
+                new ByteArrayInputStream(new byte[] {1}), 10)).isInstanceOf(RuntimeException.class);
+
+            assertThat(metrics.events).filteredOn(event -> event.startsWith("write_temporary:"))
+                .containsExactly("write_temporary:failed");
+        }
+    }
+
+    @Test
+    void minioWriteTemporaryMapsReadOverflowAndRecordsExactlyOneFailure() throws Exception {
+        RecordingMetrics metrics = new RecordingMetrics();
+        MinioClient client = mock(MinioClient.class);
+        doAnswer(invocation -> {
+            InputStream source = invocation.getArgument(0, PutObjectArgs.class).stream();
+            while (source.read() >= 0) { }
+            return null;
+        }).when(client).putObject(any(PutObjectArgs.class));
+        MinioObjectStorage storage = minioStorage(client, metrics);
+
+        assertThatThrownBy(() -> storage.writeTemporary("tmp/00000000-0000-0000-0000-000000000000",
+            new ByteArrayInputStream(new byte[] {1, 2}), 1))
+            .isInstanceOf(com.example.files.application.upload.UploadRejectedException.class);
+
+        assertThat(metrics.events).filteredOn(event -> event.startsWith("write_temporary:"))
+            .containsExactly("write_temporary:failed");
+    }
+
+    private static MinioObjectStorage minioStorage(MinioClient client, RecordingMetrics metrics) {
+        FileServiceProperties.Storage storage = new FileServiceProperties.Storage(
+            "minio", "target/minio-metrics", "http://localhost:9000", "access", "secret", "secure-files");
+        return new MinioObjectStorage(client, storage, Duration.ofSeconds(2), metrics);
     }
 
     private static final class RecordingMetrics implements FileServiceMetrics {
