@@ -21,7 +21,7 @@
 - 所有业务窗口左闭右开：`databaseNow < deadline` 时允许命令，到达截止时刻即过期。七天后普通订单正常结算；延长质保案件独立存在，不回退 `SETTLED`，平台不垫付卖家义务。
 - 管理员硬期限到达后只有可信退回证明可自动退款；缺少可信证明或证据冲突进入 `ESCALATED` 并冻结资金，不能默认判任一方胜诉。
 - 商品图片只允许 JPEG/PNG/WebP，单文件 10 MiB、每商品最多 9 张；证据额外允许 PDF 20 MiB 和 MP4 100 MiB。上限均按实际读取字节执行。
-- 所有 JSON 显式返回 `application/json; charset=UTF-8`；未知字段、非法枚举、空值、非正数、金额溢出和不支持版本快速失败。
+- 所有 JSON 显式返回 `application/json; charset=UTF-8`；验收按 HTTP 媒体类型语义严格检查 `application/json` 与 `charset=UTF-8`，接受参数分隔符后的可选空白规范化；未知字段、非法枚举、空值、非正数、金额溢出和不支持版本快速失败。
 - 私有订单、争议和证据对非参与者统一返回 404；管理员不自动绕过证据 ACL。
 - 真实 CAS、学校域名、Ticket、Cookie、支付商户号、证书、密钥、验证码和 JWT 不得提交或写入日志。
 - 每个行为严格执行红—绿—重构：先写失败测试并观察预期失败，再写最小实现，再运行同一测试通过，最后运行本任务回归测试。
@@ -329,7 +329,7 @@ Expected: FAIL，因为邮箱类型不存在。
 
 `CampusEmail` 用 `InternetDomainName` 之外的标准 Java IDN/ASCII 规范化，拆分最后一个 `@` 后进行完整域名集合匹配。验证码用 `SecureRandom`，有效期 10 分钟，Redis Lua 原子消费；MySQL 记录发送/验证审计，不保存明文。Redis 不可用返回 503，不回退为绕过验证。
 
-发送窗口固定为 10 分钟：同一邮箱最多 3 次、同一服务端观察到的远端 IP 最多 20 次、同一设备最多 10 次。验证失败窗口也固定为 10 分钟：同一邮箱最多 5 次、同一远端 IP 最多 20 次、同一设备最多 10 次；达到任一阈值必须由 Redis Lua 原子拒绝后续猜测并把对应 MySQL 审计置为 `LOCKED`。IP 只取 `HttpServletRequest.getRemoteAddr()`，不接受请求体或未配置可信代理的转发头。设备 ID 由服务端使用至少 128 位 `SecureRandom` 生成，通过 `campus_device` HttpOnly、SameSite=Strict Cookie 保存；请求体中的 `client/clientId/clientIp/deviceId` 一律不参与安全决策。
+发送窗口固定为 10 分钟：同一邮箱最多 3 次、同一服务端观察到的远端 IP 最多 20 次、同一设备最多 10 次。验证失败窗口也固定为 10 分钟：同一邮箱最多 5 次、同一远端 IP 最多 20 次、同一设备最多 10 次；达到任一阈值必须由 Redis Lua 原子拒绝后续猜测并把对应 MySQL 审计置为 `LOCKED`。IP 只取 `HttpServletRequest.getRemoteAddr()`，不接受请求体或未配置可信代理的转发头。设备 ID 由服务端使用至少 128 位 `SecureRandom` 生成，并以服务端密钥签名；仅接受签名验证通过的 `campus_device` HttpOnly、SameSite=Strict Cookie，未知或伪造值必须重新签发，不能成为攻击者可轮换的限流维度。请求体中的 `client/clientId/clientIp/deviceId` 一律不参与安全决策。
 
 定义 `VerificationMailSender.send(CampusEmail email, String code)` 端口；`LocalVerificationMailSender` 只能在 local/test Profile 存在并允许测试读取最近验证码。`EmailVerificationService` 必须实际调用该端口；非 local/test 没有真实 `VerificationMailSender` Bean 时通过必需依赖直接启动失败，禁止用非空配置字符串冒充发送器。
 
@@ -338,8 +338,10 @@ Expected: FAIL，因为邮箱类型不存在。
 覆盖发送验证码、注册、BCrypt、登录、中文 UTF-8、过期 JWT、非法签名、重复验证码和限流：
 
 ```java
-assertThat(loginResponse.headers().firstValue("Content-Type").orElseThrow())
-    .isEqualTo("application/json; charset=UTF-8");
+MediaType contentType = MediaType.parseMediaType(
+    loginResponse.headers().firstValue("Content-Type").orElseThrow());
+assertThat(contentType.isCompatibleWith(MediaType.APPLICATION_JSON)).isTrue();
+assertThat(contentType.getCharset()).isEqualTo(StandardCharsets.UTF_8);
 assertThat(accessTokenClaims.getExpiration().toInstant())
     .isEqualTo(accessTokenClaims.getIssuedAt().toInstant().plus(Duration.ofMinutes(15)));
 ```
