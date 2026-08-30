@@ -165,7 +165,11 @@ class SchemaIT extends SharedContainers {
         try (Connection connection = MYSQL.createConnection("");
              var statement = connection.prepareStatement(
                  "SELECT cc.CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS cc "
-                     + "WHERE cc.CONSTRAINT_SCHEMA = ? AND cc.TABLE_NAME = ?")) {
+                     + "JOIN information_schema.TABLE_CONSTRAINTS tc "
+                     + "ON tc.CONSTRAINT_SCHEMA = cc.CONSTRAINT_SCHEMA "
+                     + "AND tc.CONSTRAINT_NAME = cc.CONSTRAINT_NAME "
+                     + "WHERE tc.CONSTRAINT_SCHEMA = ? AND tc.TABLE_NAME = ? "
+                     + "AND tc.CONSTRAINT_TYPE = 'CHECK'")) {
             statement.setString(1, connection.getCatalog());
             statement.setString(2, table);
             try (ResultSet result = statement.executeQuery()) {

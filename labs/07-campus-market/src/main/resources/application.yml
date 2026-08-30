@@ -20,8 +20,8 @@ spring:
       enabled: true
       force: true
     multipart:
-      max-file-size: 101MiB
-      max-request-size: 101MiB
+      max-file-size: 101MB
+      max-request-size: 101MB
   task:
     scheduling:
       enabled: false
