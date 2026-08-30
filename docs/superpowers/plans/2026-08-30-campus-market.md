@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 创建一个独立、可复跑的校园二手交易平台实验，完成校园邮箱身份、批量库存、一口价订单、模拟支付、当面履约、有限仲裁、部分退货退款和评价闭环，并为 CAS、真实支付及 Spring Cloud 拆分保留稳定端口。
+**Goal:** 创建一个独立、可复跑的校园二手交易平台实验，完成校园邮箱身份、批量库存、一口价订单、模拟支付、当面履约、三天验收、七天试用、卖家延长质保、有限仲裁、部分退货退款和评价闭环，并为 CAS、真实支付及 Spring Cloud 拆分保留稳定端口。
 
 **Architecture:** 使用模块化单体，各模块拥有自己的领域模型、应用接口和数据库表；MySQL 是交易与搜索事实源，Redis 只承担验证码、限流和缓存优化，RabbitMQ 通过事务 Outbox/Inbox 可靠传递事件，Elasticsearch 与 MinIO 均为可恢复外部适配器。所有资金使用整数分；截止时间与并发正确性依赖 MySQL 时间、条件更新、租约和 claim token，不依赖 Redis 分布式锁。
 
@@ -17,7 +17,8 @@
 - 金额固定为人民币整数分与数据库 `BIGINT`；禁止 `double`、`float` 和未定义舍入。退款成功额、预占额和本次请求额之和不得超过实付金额。
 - 一个订单只包含一个发布项但数量可大于 1；卖家不能购买自己的商品；库存扣减使用带数量条件的 SQL，禁止先查后写。
 - MySQL 是状态、截止时间和搜索事实源；Redis 锁不参与正确性证明。所有截止时间、领取和租约使用 MySQL `TIMESTAMP(6)` 与数据库时间。
-- 待支付 15 分钟、卖家交付 72 小时、买家确认 48 小时、售后窗口 72 小时、卖家确认退回 72 小时、管理员 SLA 7 天、管理员硬期限 14 天。
+- 待支付 15 分钟、卖家交付 72 小时、买家确认 48 小时；从买家确认或系统自动确认的数据库时间 `T0` 起，验收期 72 小时、试用期 7 天且包含验收期；卖家延长质保只能为 30/90/180/365 天且包含平台试用期；卖家确认退回 72 小时、质保裁定后筹资 72 小时、管理员 SLA 7 天、管理员硬期限 14 天。
+- 所有业务窗口左闭右开：`databaseNow < deadline` 时允许命令，到达截止时刻即过期。七天后普通订单正常结算；延长质保案件独立存在，不回退 `SETTLED`，平台不垫付卖家义务。
 - 管理员硬期限到达后只有可信退回证明可自动退款；缺少可信证明或证据冲突进入 `ESCALATED` 并冻结资金，不能默认判任一方胜诉。
 - 商品图片只允许 JPEG/PNG/WebP，单文件 10 MiB、每商品最多 9 张；证据额外允许 PDF 20 MiB 和 MP4 100 MiB。上限均按实际读取字节执行。
 - 所有 JSON 显式返回 `application/json; charset=UTF-8`；未知字段、非法枚举、空值、非正数、金额溢出和不支持版本快速失败。
@@ -169,7 +170,7 @@ git commit -m "build(campus): initialize campus market lab"
 
 **Interfaces:**
 - Consumes: Task 1 的 MySQL/Flyway 基线。
-- Produces: `Money.ofFen(long)`、`Money.multiply(int)`、稳定七字段 `DomainEvent` 和规格第 9 节全部 25 张表约束。
+- Produces: `Money.ofFen(long)`、`Money.multiply(int)`、稳定七字段 `DomainEvent` 和规格第 9 节全部 27 张表约束。
 
 - [ ] **Step 1: 写 Money 与事件 RED 测试**
 
@@ -210,12 +211,12 @@ public record Money(long fen) {
 
 - [ ] **Step 3: 写 Schema RED 测试**
 
-断言 25 张核心表、金额 `BIGINT`、数量 CHECK、幂等唯一键和领取索引存在：
+断言 27 张核心表、金额 `BIGINT`、数量 CHECK、幂等唯一键和领取索引存在：
 
 ```java
 assertThat(tableNames()).contains("campus_user", "listing", "trade_order", "payment_order",
     "refund_order", "dispute_case", "integration_outbox", "consumed_event",
-    "object_upload_session", "storage_cleanup_task");
+    "object_upload_session", "storage_cleanup_task", "warranty_case", "seller_obligation");
 assertThat(columnType("trade_order", "total_amount_fen")).isEqualTo("bigint");
 assertThat(indexNames("refund_order")).contains("uk_refund_idempotency", "idx_refund_reconcile");
 ```
@@ -240,7 +241,10 @@ UNIQUE (provider, provider_event_id),
 UNIQUE (consumer_name, event_id),
 UNIQUE (order_id, reviewer_id),
 UNIQUE (object_key),
-UNIQUE (cleanup_business_key)
+UNIQUE (cleanup_business_key),
+UNIQUE (warranty_case_id),
+CHECK (warranty_days IN (30, 90, 180, 365) OR warranty_days IS NULL),
+CHECK (funded_amount_fen >= 0 AND funded_amount_fen <= obligation_amount_fen)
 ```
 
 所有业务时间使用 `TIMESTAMP(6)`；状态字段使用有限 `VARCHAR` 加 CHECK；每张租约表包含 `owner_id`、`claim_token`、`lease_until`、`attempt_count` 和适用索引。
@@ -347,6 +351,7 @@ git commit -m "feat(campus): add campus identity and JWT"
 **Files:**
 - Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/catalog/domain/Listing.java`
 - Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/catalog/domain/ListingStatus.java`
+- Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/catalog/domain/WarrantyTerm.java`
 - Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/catalog/application/ListingService.java`
 - Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/catalog/application/MediaStorage.java`
 - Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/storage/PrivateObjectStorage.java`
@@ -360,16 +365,24 @@ git commit -m "feat(campus): add campus identity and JWT"
 
 **Interfaces:**
 - Consumes: `Money`、当前用户、`listing/listing_media/inventory_movement`、MinIO。
-- Produces: 商品草稿/发布/下架用例、`MediaStorage.put/open/delete`、库存条件更新端口。
+- Produces: 商品草稿/发布/下架用例、标准卖家/厂家质保声明、`MediaStorage.put/open/delete`、库存条件更新端口。
 
 - [ ] **Step 1: 写商品状态 RED 测试**
 
 ```java
 @Test void publishesOnlyCompleteListing() {
-    Listing draft = Listing.draft(sellerId, "Java 核心技术", Money.ofFen(3500), 6);
+    Listing draft = Listing.draft(sellerId, "二手机械键盘", Money.ofFen(3500), 6,
+        WarrantyTerm.sellerWarrantyDays(90));
     assertThatThrownBy(draft::publish).isInstanceOf(IllegalStateException.class);
     draft.addMedia(mediaId);
     assertThat(draft.publish().status()).isEqualTo(ListingStatus.ON_SALE);
+}
+
+@ParameterizedTest
+@ValueSource(ints = {8, 29, 31, 366})
+void rejectsNonStandardSellerWarrantyDays(int days) {
+    assertThatThrownBy(() -> WarrantyTerm.sellerWarrantyDays(days))
+        .isInstanceOf(IllegalArgumentException.class);
 }
 ```
 
@@ -379,7 +392,7 @@ Expected: FAIL，因为 Listing 不存在。
 
 - [ ] **Step 2: 实现最小领域与 JDBC**
 
-商品构造器拒绝空标题、负金额、非正库存和超过 9 个媒体。库存更新只暴露：
+商品构造器拒绝空标题、负金额、非正库存和超过 9 个媒体。卖家延长质保只接受无额外质保或 30/90/180/365 天；厂家质保独立保存凭证摘要与到期日，不能映射为卖家质保。库存更新只暴露：
 
 ```java
 boolean deduct(long listingId, int quantity, String businessKey);
@@ -425,7 +438,7 @@ git commit -m "feat(campus): add listings media and inventory"
 - Test: `labs/07-campus-market/src/test/java/com/example/campusmarket/integration/ConcurrentOrderIT.java`
 
 **Interfaces:**
-- Consumes: 商品快照、库存 `deduct`、当前买家、`Idempotency-Key`。
+- Consumes: 包含卖家/厂家质保声明的商品快照、库存 `deduct`、当前买家、`Idempotency-Key`。
 - Produces: `CreateOrderCommand(listingId, quantity)`、原始 UTF-8 终态重放、`ORDER_CREATED` Outbox。
 
 - [ ] **Step 1: 写订单状态与自购 RED 测试**
@@ -443,11 +456,11 @@ Expected: FAIL，因为订单类型不存在。
 
 - [ ] **Step 2: 实现最小订单领域**
 
-订单创建计算 `unitPrice.multiply(quantity)`，状态为 `PENDING_PAYMENT`，支付截止为数据库时间加 15 分钟；构造器拒绝非正数量、同一买卖方和快照缺失。
+订单创建计算 `unitPrice.multiply(quantity)`，状态为 `PENDING_PAYMENT`，支付截止为数据库时间加 15 分钟；构造器拒绝非正数量、同一买卖方和快照缺失。订单不可变快照必须包含卖家质保标准天数、固定保障范围、厂家质保凭证摘要与到期日，后续商品修改不得影响既有订单。
 
 - [ ] **Step 3: 写并发与幂等 RED 测试**
 
-以库存 6 并发发起 20 个数量 1 的真实 HTTP 请求，断言恰好 6 个成功、可售库存为 0、6 个订单、6 条扣减流水。同一键同请求重放原始响应；同一键不同数量返回 409；注入事务回滚后同一键可重试。
+以库存 6 并发发起 20 个数量 1 的真实 HTTP 请求，断言恰好 6 个成功、可售库存为 0、6 个订单、6 条扣减流水。同一键同请求重放原始响应；同一键不同数量返回 409；注入事务回滚后同一键可重试。另建 90 天质保订单后把商品改为无质保，断言订单快照仍为 90 天。
 
 Run: `.\mvnw.cmd -Dit.test=ConcurrentOrderIT verify`
 
@@ -630,7 +643,7 @@ git add labs/07-campus-market/src
 git commit -m "feat(campus): add simulated payments and refunds"
 ```
 
-### Task 9: 实现交付、收货、售后窗口与截止时间竞态
+### Task 9: 实现交付、收货、三天验收、七天试用与截止时间竞态
 
 **Files:**
 - Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/order/application/OrderLifecycleService.java`
@@ -642,7 +655,7 @@ git commit -m "feat(campus): add simulated payments and refunds"
 
 **Interfaces:**
 - Consumes: 订单状态、数据库时间、库存 restore、退款 Outbox。
-- Produces: handoff、receipt、payment/handoff/receipt/aftersale deadlines。
+- Produces: handoff、receipt、`T0`、payment/handoff/receipt/acceptance/trial deadlines。
 
 - [ ] **Step 1: 写完整状态机 RED 测试**
 
@@ -666,7 +679,7 @@ AWAITING_RECEIPT + 库存不返还
 REFUNDING_CANCEL + 库存恰好返还一次 + 一条退款 Outbox
 ```
 
-同样覆盖支付超时、收货超时、售后关闭与用户命令竞态。
+同样覆盖支付超时、收货超时、三天理由切换、七天试用关闭与用户命令竞态。买家确认或系统自动确认必须只写一次 `T0`；`databaseNow < T0 + 72h` 允许数量/型号/外观/缺件/描述/功能理由，到达 `T0 + 72h` 后只允许非人为功能故障；`databaseNow < T0 + 7d` 允许普通试用争议，到达七天截止时才允许结算。
 
 Run: `.\mvnw.cmd -Dit.test=DeadlineRaceIT verify`
 
@@ -674,7 +687,7 @@ Expected: FAIL，调度器不存在。
 
 - [ ] **Step 4: 实现租约调度并验证**
 
-领取使用有界批量、owner、claim token 和数据库时间；Redis 完全断开时竞态测试仍必须正确。
+领取使用有界批量、owner、claim token 和数据库时间；Redis 完全断开时竞态测试仍必须正确。窗口判断使用同一条数据库时间，禁止应用服务器时钟分别计算三天和七天边界。
 
 Run: `.\mvnw.cmd -Dtest=OrderLifecycleTest test`
 
@@ -690,6 +703,7 @@ git commit -m "feat(campus): add handoff and deadline lifecycle"
 **Files:**
 - Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/dispute/domain/DisputeCase.java`
 - Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/dispute/domain/DisputeDecision.java`
+- Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/dispute/domain/DisputeReason.java`
 - Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/dispute/application/DisputeService.java`
 - Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/dispute/application/EvidenceStorage.java`
 - Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/dispute/api/DisputeController.java`
@@ -698,7 +712,7 @@ git commit -m "feat(campus): add handoff and deadline lifecycle"
 
 **Interfaces:**
 - Consumes: 订单参与者、剩余可争议数量、MinIO、管理员分配。
-- Produces: `REJECT/REFUND_ONLY/RETURN_AND_REFUND`、逻辑 evidence ID、私有 `/content`。
+- Produces: 分阶段 `DisputeReason`、`REJECT/REFUND_ONLY/RETURN_AND_REFUND`、可供普通争议或质保案件授权绑定的逻辑 evidence ID、私有 `/content`。
 
 - [ ] **Step 1: 写争议数量 RED 测试**
 
@@ -717,7 +731,7 @@ Expected: FAIL，争议类型不存在。
 
 - [ ] **Step 2: 实现单轮领域与管理员权限**
 
-只有 `AWAITING_RECEIPT/AFTERSALE_WINDOW` 可创建争议；活动争议把订单置 `DISPUTED` 并冻结结算。管理员只能选择固定裁决和批准数量，不能自由输入退款金额。
+只有 `AWAITING_RECEIPT/AFTERSALE_WINDOW` 可创建普通争议；活动争议把订单置 `DISPUTED` 并冻结结算。`T0 + 72h` 前允许 `QUANTITY/MODEL/APPEARANCE/MISSING_PARTS/NOT_AS_DESCRIBED/FUNCTIONAL_DEFECT`，此后至 `T0 + 7d` 只允许 `FUNCTIONAL_DEFECT`。进水、摔落、错误供电、擅自拆修、正常耗损和已披露问题必须作为固定排除原因记录，不能自动判卖家责任。管理员只能选择固定裁决和批准数量，不能自由输入退款金额。
 
 - [ ] **Step 3: 写证据 RED 测试**
 
@@ -729,7 +743,7 @@ Expected: FAIL，证据接口不存在。
 
 - [ ] **Step 4: 实现流式证据和 ACL**
 
-`EvidenceStorage` 复用 Task 4 的 `ObjectUploadCoordinator` 与 `PrivateObjectStorage`，但绑定前必须由争议模块验证案件参与者。MP4 只检查容器签名和 Tika 类型，不转码、不缩略、不判断真实性。所有 `/content` 在打开 MinIO 对象前重新查询案件 ACL；预签名 TTL 固定不超过 2 分钟。
+`EvidenceStorage` 复用 Task 4 的 `ObjectUploadCoordinator` 与 `PrivateObjectStorage`，但绑定前必须通过 `EvidenceCaseAccess.canAttach(caseType, caseId, actorId)` 验证案件参与者；Task 10 先提供普通争议实现，Task 12 增加质保案件实现。MP4 只检查容器签名和 Tika 类型，不转码、不缩略、不判断真实性。所有 `/content` 在打开 MinIO 对象前重新查询对应案件 ACL；预签名 TTL 固定不超过 2 分钟。
 
 - [ ] **Step 5: 验证并提交**
 
@@ -776,7 +790,7 @@ Expected: FAIL，ReturnCase 不存在。
 
 - [ ] **Step 3: 写部分退款与期限 RED 测试**
 
-一单 3 件、批准退 1 件：断言退款 1 件金额、隔离 1 件、剩余 2 件净额可结算；并发两次裁决不超购、不超退。卖家 72 小时不确认进入管理员复核；7 天产生 SLA 告警；14 天时可信证明自动退款、无可信证明进入 `ESCALATED` 且资金冻结。
+一单 3 件、批准退 1 件：断言退款 1 件金额、隔离 1 件、剩余 2 件净额在 `T0 + 7d` 后可结算；并发两次裁决不超购、不超退。卖家 72 小时不确认进入管理员复核；7 天产生 SLA 告警；14 天时可信证明自动退款、无可信证明进入 `ESCALATED` 且资金冻结。
 
 Run: `.\mvnw.cmd -Dit.test=PartialReturnRefundIT,DisputeDeadlineIT verify`
 
@@ -784,7 +798,7 @@ Expected: FAIL，解析服务和调度不存在。
 
 - [ ] **Step 4: 实现调度、净结算与库存后处理**
 
-`SettlementService` 只在无活动争议、无预占退款、无未知网关结果且售后窗口结束时写唯一 settlement。卖家显式重新上架或报损隔离库存，任何自动路径都不得直接增加可售数量。
+`SettlementService` 只在 `databaseNow >= T0 + 7d`、无活动普通争议、无预占退款、无未知网关结果时写唯一 settlement；卖家 30/90/180/365 天延长质保不延后这次结算。卖家显式重新上架或报损隔离库存，任何自动路径都不得直接增加可售数量。
 
 - [ ] **Step 5: 验证并提交**
 
@@ -797,7 +811,103 @@ git add labs/07-campus-market/src
 git commit -m "feat(campus): add partial return resolution"
 ```
 
-### Task 12: 完成评价、统一错误、安全审计与可观测性
+### Task 12: 实现卖家延长质保、结算后义务与账户限制
+
+**Files:**
+- Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/warranty/domain/WarrantyCase.java`
+- Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/warranty/domain/WarrantyDecision.java`
+- Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/warranty/domain/SellerObligation.java`
+- Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/warranty/application/WarrantyService.java`
+- Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/warranty/application/SellerObligationService.java`
+- Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/warranty/application/WarrantyDeadlineScheduler.java`
+- Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/warranty/api/WarrantyController.java`
+- Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/warranty/api/SellerObligationController.java`
+- Modify: `labs/07-campus-market/src/main/java/com/example/campusmarket/catalog/application/ListingService.java`
+- Modify: `labs/07-campus-market/src/main/java/com/example/campusmarket/dispute/application/EvidenceStorage.java`
+- Modify: `labs/07-campus-market/src/main/java/com/example/campusmarket/payment/application/RefundService.java`
+- Modify: `labs/07-campus-market/src/main/java/com/example/campusmarket/payment/application/SettlementService.java`
+- Test: `labs/07-campus-market/src/test/java/com/example/campusmarket/unit/warranty/WarrantyPolicyTest.java`
+- Test: `labs/07-campus-market/src/test/java/com/example/campusmarket/integration/WarrantyObligationIT.java`
+- Test: `labs/07-campus-market/src/test/java/com/example/campusmarket/integration/WarrantyDeadlineRaceIT.java`
+
+**Interfaces:**
+- Consumes: `SETTLED` 订单的不可变质保快照、Task 10 `EvidenceCaseAccess`、退款额度预占、未来 settlement、Outbox 和数据库时间。
+- Produces: `openWarrantyCase(orderId, quantity, reason, idempotencyKey)`、`REJECT/REPAIR_COMPENSATION/REFUND_ONLY/RETURN_AND_REFUND`、`fundObligation`、未来结算幂等抵扣、发布/提现限制查询。
+
+- [ ] **Step 1: 写质保期限与终态隔离 RED 测试**
+
+```java
+@Test void standardWarrantyUsesLeftClosedRightOpenDeadline() {
+    TradeOrder settled = settledOrderWithSellerWarranty(90, t0);
+    assertThat(WarrantyCase.open(settled, 1, FUNCTIONAL_DEFECT,
+        t0.plus(89, DAYS))).isNotNull();
+    assertThatThrownBy(() -> WarrantyCase.open(settled, 1, FUNCTIONAL_DEFECT,
+        t0.plus(90, DAYS))).isInstanceOf(IllegalStateException.class);
+    assertThat(settled.status()).isEqualTo(OrderStatus.SETTLED);
+}
+
+@Test void platformOnlyWarrantyRejectsDayEightClaim() {
+    TradeOrder settled = settledOrderWithoutSellerWarranty(t0);
+    assertThatThrownBy(() -> WarrantyCase.open(settled, 1, FUNCTIONAL_DEFECT,
+        t0.plus(8, DAYS))).isInstanceOf(IllegalStateException.class);
+}
+```
+
+Run: `.\mvnw.cmd -Dtest=WarrantyPolicyTest test`
+
+Expected: FAIL，因为质保领域类型不存在。
+
+- [ ] **Step 2: 实现质保领域与受控裁定**
+
+卖家质保只读取订单快照中的 30/90/180/365 天；第七天后的案件不修改 `trade_order.status` 或 `settlement`。`FUNCTIONAL_DEFECT` 排除进水、摔落、错误供电、擅自拆修、正常耗损和已披露问题；`INVALID_MANUFACTURER_WARRANTY_PROOF` 只校验订单快照中的厂家凭证承诺。卖家响应期限固定 72 小时，之后进入管理员复核；管理员 SLA/硬期限仍为 7/14 天。
+
+维修补偿额使用：
+
+```java
+approvedCompensationFen = min(verifiedQuoteFen, paidAmountFen - successfulRefundFen - reservedRefundFen)
+```
+
+全部运算使用 `Money`/`Math` 精确整数，报价必须为正数且有证据 ID；其他退款仍为 `unitPriceFen × approvedQuantity`。
+
+- [ ] **Step 3: 写义务、证据与抵扣 RED 集成测试**
+
+真实 HTTP 创建一个 90 天质保、已经 `SETTLED` 的键盘订单，在第 30 天提交功能故障和维修报价 1200 分。管理员裁定维修补偿后断言：创建唯一 `seller_obligation`、资金期限为数据库时间加 72 小时、订单仍为 `SETTLED`、平台尚未创建买家退款。非参与者读取质保证据返回同构 404。
+
+随后覆盖：卖家主动筹资 1200 分只执行一次；资金齐备后只创建一个退款 Outbox；卖家逾期未筹资后发布与提现均被拒绝；未来 settlement 抵扣同一业务键两次只记一次；足额清偿后限制解除。并发普通退款、维修赔付和质保退款时必须满足：
+
+```text
+successful_refund_fen + reserved_refund_fen + requested_compensation_fen <= paid_amount_fen
+funded_amount_fen <= obligation_amount_fen
+```
+
+Run: `.\mvnw.cmd -Dit.test=WarrantyObligationIT verify`
+
+Expected: FAIL，质保 API、义务和限制尚不存在。
+
+- [ ] **Step 4: 实现应用服务、ACL、筹资和未来款抵扣**
+
+`WarrantyService` 使用 `(orderId, idempotencyKey)` 唯一键创建案件，复用 Task 10 的流式证据存储但在物理读取前查询 `warranty_case` 参与者/被分配管理员 ACL。裁定与 `seller_obligation`、审计和 Outbox 同事务写入。`SellerObligationService` 以条件更新累计筹资；资金不足时保持 `AWAITING_FUNDING`，禁止平台垫付或提前请求退款。未来 settlement 先按最早到期义务抵扣，抵扣业务键固定为 `(settlementId, obligationId)`，义务全部清偿后才幂等解除发布/提现限制并触发买家退款或补偿。
+
+- [ ] **Step 5: 写截止时间竞态并实现租约调度**
+
+在卖家筹资截止时刻并发执行最后一笔筹资与 `WarrantyDeadlineScheduler`，只允许以下结果之一：义务足额且限制解除，或义务逾期且限制生效；禁止同时退款两次或丢失已筹金额。相同方式覆盖卖家响应期限和管理员 7/14 天期限，领取必须使用 owner、claim token、租约和数据库时间。
+
+Run: `.\mvnw.cmd -Dit.test=WarrantyDeadlineRaceIT verify`
+
+Expected: PASS，竞态严格串行化且 0 skipped。
+
+- [ ] **Step 6: 验证并提交**
+
+Run: `.\mvnw.cmd -Dtest=WarrantyPolicyTest test`
+
+Run: `.\mvnw.cmd -Dit.test=WarrantyObligationIT,WarrantyDeadlineRaceIT verify`
+
+```powershell
+git add labs/07-campus-market/src
+git commit -m "feat(campus): add extended seller warranty"
+```
+
+### Task 13: 完成评价、统一错误、安全审计与可观测性
 
 **Files:**
 - Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/review/ReviewService.java`
@@ -812,7 +922,7 @@ git commit -m "feat(campus): add partial return resolution"
 - Test: `labs/07-campus-market/src/test/java/com/example/campusmarket/integration/MetricsIT.java`
 
 **Interfaces:**
-- Consumes: 已结算订单、Spring Security、Micrometer。
+- Consumes: 已结算订单、未清偿卖家义务与发布/提现限制、Spring Security、Micrometer。
 - Produces: 双方一次评价、400/401/403/404/409/422/503、低基数指标和脱敏审计。
 
 - [ ] **Step 1: 写审计与错误 RED 测试**
@@ -835,7 +945,7 @@ correlationId 由服务端安全随机生成，不接受客户端覆盖。错误
 
 - [ ] **Step 3: 写评价与指标 RED 测试**
 
-只有 `SETTLED` 订单参与者可各评价一次；重复评价 409，非参与者 404。指标覆盖规格第 14 节且 Meter ID tags 不含任何业务 ID、邮箱、provider reference 或异常文本。
+只有 `SETTLED` 订单参与者可各评价一次；重复评价 409，非参与者 404。指标覆盖规格第 14 节，包括质保案件状态、卖家响应/筹资超时、未清偿义务和受限卖家数量；Meter ID tags 不含任何业务 ID、邮箱、provider reference 或异常文本。
 
 Run: `.\mvnw.cmd -Dit.test=ApiSecurityAndReviewIT,MetricsIT verify`
 
@@ -852,7 +962,7 @@ git add labs/07-campus-market/src
 git commit -m "feat(campus): add reviews security and metrics"
 ```
 
-### Task 13: 完成连续故障演练、文档和全量验收
+### Task 14: 完成连续故障演练、文档和全量验收
 
 **Files:**
 - Create: `labs/07-campus-market/src/test/java/com/example/campusmarket/integration/CampusMarketJourneyIT.java`
@@ -864,12 +974,14 @@ git commit -m "feat(campus): add reviews security and metrics"
 - Modify after branch verification: `interview/question-bank.md`
 
 **Interfaces:**
-- Consumes: Tasks 1–12 全部行为和外部适配器。
+- Consumes: Tasks 1–13 全部行为和外部适配器。
 - Produces: 可手工演示闭环、三轮故障恢复证据、实验分支验收提交和 main 文档记录。
 
 - [ ] **Step 1: 写端到端旅程 RED 测试**
 
-真实 HTTP 旅程固定覆盖：校园邮箱注册买卖双方 → JWT 登录 → 发布 6 本教材 → 搜索 → 买家购买 3 本 → 模拟支付回调 → 卖家交付 → 买家争议 1 本 → 管理员裁决退货退款 → 卖家确认退回 → 部分退款回调 → 1 本进入隔离 → 售后窗口关闭 → 剩余净额结算 → 双方评价。
+真实 HTTP 主旅程固定覆盖：校园邮箱注册买卖双方 → JWT 登录 → 发布 6 本教材 → 搜索 → 买家购买 3 本 → 模拟支付回调 → 卖家交付 → 三天内买家争议 1 本 → 管理员裁决退货退款 → 卖家确认退回 → 部分退款回调 → 1 本进入隔离 → 七天试用窗口关闭 → 剩余净额结算 → 双方评价。
+
+同一测试另走电子商品质保旅程：发布带 90 天卖家质保的二手键盘 → 下单时保存质保快照 → 七天后正常结算 → 第 30 天创建功能故障质保案件 → 管理员裁定维修补偿 → 卖家逾期被限制发布/提现 → 未来结算款幂等抵扣 → 买家补偿成功 → 卖家限制解除；订单始终保持 `SETTLED`。
 
 Run: `.\mvnw.cmd -Dit.test=CampusMarketJourneyIT verify`
 
@@ -903,7 +1015,7 @@ Expected: 两个 IT 全部 PASS、0 skipped，RecoveryDrillIT 明确记录 3 轮
 
 - [ ] **Step 4: 写 README 与 TROUBLESHOOTING**
 
-README 必须包含模块图、CAS 只预留不接入的边界、校园邮箱含义、API 示例、模拟邮箱/支付、整数分、状态机、期限、证据类型、真实支付适配器契约、Compose 启停、索引重建、故障演练和验证命令。TROUBLESHOOTING 必须覆盖 Docker、SmartCN、Rabbit confirm、Redis、MinIO、回调验签、未知支付结果、退款占额、边界竞态、MP4 上限和 `ESCALATED`。
+README 必须包含模块图、CAS 只预留不接入的边界、校园邮箱含义、API 示例、模拟邮箱/支付、整数分、订单状态机、三天验收/七天试用/30-365 天卖家质保、厂家质保区分、结算后义务与限制、证据类型、真实支付适配器契约、Compose 启停、索引重建、故障演练和验证命令。TROUBLESHOOTING 必须覆盖 Docker、SmartCN、Rabbit confirm、Redis、MinIO、回调验签、未知支付结果、退款占额、三天/七天/质保边界竞态、卖家筹资失败、MP4 上限和 `ESCALATED`。
 
 - [ ] **Step 5: 运行分支完整验收**
 
@@ -943,11 +1055,12 @@ git commit -m "docs: record verified campus market lab"
 | Outbox/Inbox、租约与 fencing | Task 6 |
 | SmartCN 搜索与在线重建 | Task 7 |
 | 模拟支付、回调、退款占额、对账 | Task 8 |
-| 交付、收货、售后窗口和竞态 | Task 9 |
-| 争议、证据 ACL 和单轮裁决 | Task 10 |
-| 可信退回、部分退款、隔离库存和硬期限 | Task 11 |
-| 评价、错误、安全审计和指标 | Task 12 |
-| E2E、三轮故障、文档和 main 验收记录 | Task 13 |
+| 交付、收货、三天验收、七天试用和竞态 | Task 9 |
+| 分阶段争议理由、证据 ACL 和单轮裁决 | Task 10 |
+| 可信退回、部分退款、七天后结算、隔离库存和硬期限 | Task 11 |
+| 30/90/180/365 天质保、结算后义务、抵扣与账户限制 | Task 12 |
+| 评价、错误、安全审计和指标 | Task 13 |
+| E2E、三轮故障、文档和 main 验收记录 | Task 14 |
 
 ## 执行纪律
 
@@ -955,4 +1068,4 @@ git commit -m "docs: record verified campus market lab"
 - 每个 RED 必须因目标行为缺失而失败，不得把编译错误、容器未启动或测试 skipped 当作预期失败。
 - 每个 GREEN 只实现当前测试需要的最小行为；跨任务重构先记录，等相关测试全绿后单独处理。
 - 每次提交只暂存当前 Task 文件；提交前运行当前专项测试与 `git diff --check`。
-- Task 13 完整验收前不得把路线状态写成“已验收”，不得宣称真实 CAS、真实物流或真实支付已经接入。
+- Task 14 完整验收前不得把路线状态写成“已验收”，不得宣称真实 CAS、真实物流或真实支付已经接入。
