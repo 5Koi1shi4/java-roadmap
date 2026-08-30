@@ -20,49 +20,54 @@ import java.util.List;
 @Component
 @Profile("!test")
 public class RedisVerificationCodeStore {
+    private static final Duration WINDOW = Duration.ofMinutes(10);
+    private static final int SEND_EMAIL_LIMIT = 3;
+    private static final int SEND_IP_LIMIT = 20;
+    private static final int SEND_DEVICE_LIMIT = 10;
+    private static final int FAIL_EMAIL_LIMIT = 5;
+    private static final int FAIL_IP_LIMIT = 20;
+    private static final int FAIL_DEVICE_LIMIT = 10;
     private static final DefaultRedisScript<Long> CONSUME = new DefaultRedisScript<>(
         "local value = redis.call('GET', KEYS[1]); "
             + "if not value or value ~= ARGV[1] then return 0 end; "
             + "redis.call('DEL', KEYS[1]); return 1", Long.class);
+    private static final DefaultRedisScript<Long> RESERVE = new DefaultRedisScript<>(
+        "local allowed = 1; "
+            + "for i = 1, #KEYS do "
+            + " local count = redis.call('INCR', KEYS[i]); "
+            + " if count == 1 then redis.call('EXPIRE', KEYS[i], ARGV[1]) end; "
+            + " if count > tonumber(ARGV[i + 1]) then allowed = 0 end; "
+            + "end; return allowed", Long.class);
 
     private final StringRedisTemplate redis;
     private final byte[] secret;
-    private final Duration ttl;
-    private final Duration rateLimit;
     private final SecureRandom random = new SecureRandom();
 
     public RedisVerificationCodeStore(StringRedisTemplate redis,
-                                      @Value("${campus.market.identity.verification-secret}") String secret,
-                                      @Value("${campus.market.identity.verification-ttl:10m}") Duration ttl,
-                                      @Value("${campus.market.identity.verification-rate-limit:60s}") Duration rateLimit) {
+                                      @Value("${campus.market.identity.verification-secret}") String secret) {
         this.redis = redis;
         this.secret = secret.getBytes(StandardCharsets.UTF_8);
-        this.ttl = ttl;
-        this.rateLimit = rateLimit;
         if (this.secret.length < 32) {
             throw new IllegalStateException("Verification secret must be at least 256 bits");
         }
     }
 
     public IssuedCode issue(String email, String purpose) {
-        return issue(email, purpose, "unknown-client");
+        return issue(email, purpose, "unknown-ip", "unknown-device");
     }
 
     public IssuedCode issue(String email, String purpose, String client) {
-        String rateKey = "campus:verification:rate:" + digest(email + ":" + purpose);
-        Boolean accepted = redis.opsForValue().setIfAbsent(rateKey, "1", rateLimit);
-        if (!Boolean.TRUE.equals(accepted)) {
-            throw new TooManyVerificationRequestsException();
-        }
-        String clientKey = "campus:verification:client-rate:" + digest(String.valueOf(client));
-        Boolean clientAccepted = redis.opsForValue().setIfAbsent(clientKey, "1", rateLimit);
-        if (!Boolean.TRUE.equals(clientAccepted)) {
-            redis.delete(rateKey);
+        return issue(email, purpose, client, "unknown-device");
+    }
+
+    public IssuedCode issue(String email, String purpose, String remoteIp, String deviceId) {
+        if (!reserve("send", email + ":" + purpose, remoteIp, deviceId,
+            SEND_EMAIL_LIMIT, SEND_IP_LIMIT, SEND_DEVICE_LIMIT)) {
             throw new TooManyVerificationRequestsException();
         }
         String code = String.format("%06d", random.nextInt(1_000_000));
         String hmac = hmac(email, purpose, code);
-        redis.opsForValue().set(codeKey(email, purpose), hmac, ttl);
+        redis.opsForValue().set(codeKey(email, purpose), hmac, WINDOW);
         return new IssuedCode(code, hmac);
     }
 
@@ -73,6 +78,22 @@ public class RedisVerificationCodeStore {
         String expected = hmac(email, purpose, code);
         Long consumed = redis.execute(CONSUME, List.of(codeKey(email, purpose)), expected);
         return Long.valueOf(1L).equals(consumed);
+    }
+
+    public boolean reserveFailureAttempt(String email, String purpose, String remoteIp, String deviceId) {
+        return reserve("failure", email + ":" + purpose, remoteIp, deviceId,
+            FAIL_EMAIL_LIMIT, FAIL_IP_LIMIT, FAIL_DEVICE_LIMIT);
+    }
+
+    private boolean reserve(String kind, String emailPurpose, String remoteIp, String deviceId,
+                            int emailLimit, int ipLimit, int deviceLimit) {
+        Long allowed = redis.execute(RESERVE,
+            List.of(kind + ":email:" + digest(emailPurpose),
+                kind + ":ip:" + digest(String.valueOf(remoteIp)),
+                kind + ":device:" + digest(String.valueOf(deviceId))),
+            String.valueOf(WINDOW.toSeconds()), String.valueOf(emailLimit), String.valueOf(ipLimit),
+            String.valueOf(deviceLimit));
+        return Long.valueOf(1L).equals(allowed);
     }
 
     private String codeKey(String email, String purpose) {

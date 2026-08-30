@@ -28,11 +28,15 @@ public class AuthService {
     }
 
     public void register(String rawEmail, String password, String code) {
+        register(rawEmail, password, code, "unknown-ip", "unknown-device");
+    }
+
+    public void register(String rawEmail, String password, String code, String remoteIp, String deviceId) {
         CampusEmail email = CampusEmail.parse(rawEmail, verificationService.allowedDomains());
         if (password == null || password.length() < 8 || password.length() > 128) {
             throw new IllegalArgumentException("Password must be between 8 and 128 characters");
         }
-        if (!verificationService.verify(email.value(), code, "REGISTER")) {
+        if (!verificationService.verify(email.value(), code, remoteIp, deviceId, "REGISTER")) {
             throw new InvalidVerificationCodeException();
         }
         UUID userId = UUID.randomUUID();

@@ -8,6 +8,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.context.annotation.Profile;
 import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -15,16 +16,21 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.http.ResponseCookie;
 
-import java.time.Duration;
+import java.security.SecureRandom;
+import java.util.Base64;
 import java.util.Set;
 
 @RestController
 @Profile("!test")
 @ConditionalOnBean({EmailVerificationService.class, AuthService.class})
-@RequestMapping(path = "/api/auth", produces = "application/json;charset=UTF-8")
+@RequestMapping(path = "/api/auth", produces = "application/json; charset=UTF-8")
 public class AuthController {
     private static final MediaType JSON_UTF8 = MediaType.parseMediaType("application/json; charset=UTF-8");
+    private static final String DEVICE_COOKIE = "campus_device";
+    private static final SecureRandom RANDOM = new SecureRandom();
     private final EmailVerificationService verificationService;
     private final AuthService authService;
     private final Environment environment;
@@ -38,16 +44,20 @@ public class AuthController {
 
     @PostMapping(path = "/email-verifications", consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<VerificationResponse> issueVerification(@RequestBody AuthRequest request,
-                                                                    jakarta.servlet.http.HttpServletRequest httpRequest) {
-        String client = firstNonBlank(request.client(), request.clientId(), request.clientIp(), httpRequest.getRemoteAddr());
-        String code = verificationService.issue(request.email(), client, request.purpose());
-        String visibleCode = environment.matchesProfiles("local", "test") ? code : null;
-        return json(HttpStatus.OK, new VerificationResponse("sent", visibleCode, 600));
+                                                                    jakarta.servlet.http.HttpServletRequest httpRequest,
+                                                                    jakarta.servlet.http.HttpServletResponse httpResponse) {
+        String deviceId = deviceId(httpRequest, httpResponse);
+        String code = verificationService.issue(request.email(), httpRequest.getRemoteAddr(), deviceId, request.purpose());
+        return json(HttpStatus.OK, new VerificationResponse("sent", null, 600));
     }
 
     @PostMapping(path = "/register", consumes = MediaType.APPLICATION_JSON_VALUE)
-    public ResponseEntity<MessageResponse> register(@RequestBody AuthRequest request) {
-        authService.register(request.email(), request.password(), firstNonBlank(request.code(), request.verificationCode()));
+    public ResponseEntity<MessageResponse> register(@RequestBody AuthRequest request,
+                                                    jakarta.servlet.http.HttpServletRequest httpRequest,
+                                                    jakarta.servlet.http.HttpServletResponse httpResponse) {
+        String deviceId = deviceId(httpRequest, httpResponse);
+        authService.register(request.email(), request.password(), firstNonBlank(request.code(), request.verificationCode()),
+            httpRequest.getRemoteAddr(), deviceId);
         return json(HttpStatus.CREATED, new MessageResponse("registered"));
     }
 
@@ -56,6 +66,11 @@ public class AuthController {
         AuthService.LoginResult result = authService.login(request.email(), request.password());
         return json(HttpStatus.OK, new LoginResponse(result.accessToken(), "Bearer", result.expiresIn().toSeconds(),
             result.userId().toString(), result.roles()));
+    }
+
+    @GetMapping(path = "/admin/probe")
+    public ResponseEntity<MessageResponse> adminProbe() {
+        return json(HttpStatus.OK, new MessageResponse("admin"));
     }
 
     @ExceptionHandler(AuthService.InvalidVerificationCodeException.class)
@@ -88,8 +103,27 @@ public class AuthController {
         return error(HttpStatus.BAD_REQUEST, ex.getMessage());
     }
 
+    private String deviceId(jakarta.servlet.http.HttpServletRequest request,
+                            jakarta.servlet.http.HttpServletResponse response) {
+        if (request.getCookies() != null) {
+            for (jakarta.servlet.http.Cookie cookie : request.getCookies()) {
+                if (DEVICE_COOKIE.equals(cookie.getName()) && cookie.getValue() != null && !cookie.getValue().isBlank()) {
+                    return cookie.getValue();
+                }
+            }
+        }
+        byte[] bytes = new byte[16];
+        RANDOM.nextBytes(bytes);
+        String value = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+        if (response != null) {
+            response.addHeader("Set-Cookie", ResponseCookie.from(DEVICE_COOKIE, value)
+                .httpOnly(true).sameSite("Strict").path("/").maxAge(86400).build().toString());
+        }
+        return value;
+    }
+
     private <T> ResponseEntity<T> json(HttpStatus status, T body) {
-        return ResponseEntity.status(status).contentType(JSON_UTF8).body(body);
+        return ResponseEntity.status(status).header(HttpHeaders.CONTENT_TYPE, "application/json; charset=UTF-8").body(body);
     }
 
     private ResponseEntity<ErrorResponse> error(HttpStatus status, String message) {

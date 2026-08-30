@@ -18,44 +18,59 @@ import java.util.UUID;
 public class EmailVerificationService {
     private final JdbcTemplate jdbc;
     private final RedisVerificationCodeStore store;
+    private final VerificationMailSender mailSender;
     private final Set<String> allowedDomains;
-    private final Duration ttl;
+    private static final Duration TTL = Duration.ofMinutes(10);
 
     public EmailVerificationService(JdbcTemplate jdbc, RedisVerificationCodeStore store,
-                                    @Value("${campus.market.identity.allowed-domains}") Set<String> allowedDomains,
-                                    @Value("${campus.market.identity.verification-ttl:10m}") Duration ttl) {
+                                    VerificationMailSender mailSender,
+                                    @Value("${campus.market.identity.allowed-domains}") Set<String> allowedDomains) {
         this.jdbc = jdbc;
         this.store = store;
+        this.mailSender = mailSender;
         this.allowedDomains = allowedDomains;
-        this.ttl = ttl;
     }
 
     public String issue(String rawEmail, String client) {
-        return issue(rawEmail, client, "REGISTER");
+        return issue(rawEmail, "unknown-ip", "unknown-device", "REGISTER");
     }
 
     public String issue(String rawEmail, String client, String purpose) {
+        return issue(rawEmail, "unknown-ip", "unknown-device", purpose);
+    }
+
+    public String issue(String rawEmail, String remoteIp, String deviceId, String purpose) {
         CampusEmail email = CampusEmail.parse(rawEmail, allowedDomains);
         String normalizedPurpose = normalizePurpose(purpose);
-        RedisVerificationCodeStore.IssuedCode issued = store.issue(email.value(), normalizedPurpose, client);
+        RedisVerificationCodeStore.IssuedCode issued = store.issue(email.value(), normalizedPurpose, remoteIp, deviceId);
         Instant now = Instant.now();
         jdbc.update("INSERT INTO email_verification "
                 + "(id, user_id, email, purpose, code_hmac, status, attempt_count, expires_at, created_at) "
                 + "VALUES (?, NULL, ?, ?, ?, 'PENDING', 0, ?, ?)",
             UUID.randomUUID().toString(), email.value(), normalizedPurpose,
             issued.hmac().getBytes(java.nio.charset.StandardCharsets.UTF_8),
-            Timestamp.from(now.plus(ttl)), Timestamp.from(now));
-        // The code is returned to the local/test simulated mail adapter only.
+            Timestamp.from(now.plus(TTL)), Timestamp.from(now));
+        mailSender.send(email, issued.code());
         return issued.code();
     }
 
     public boolean verify(String rawEmail, String code) {
-        return verify(rawEmail, code, "REGISTER");
+        return verify(rawEmail, code, "unknown-ip", "unknown-device", "REGISTER");
     }
 
     public boolean verify(String rawEmail, String code, String purpose) {
+        return verify(rawEmail, code, "unknown-ip", "unknown-device", purpose);
+    }
+
+    public boolean verify(String rawEmail, String code, String remoteIp, String deviceId, String purpose) {
         CampusEmail email = CampusEmail.parse(rawEmail, allowedDomains);
         String normalizedPurpose = normalizePurpose(purpose);
+        if (!store.reserveFailureAttempt(email.value(), normalizedPurpose, remoteIp, deviceId)) {
+            jdbc.update("UPDATE email_verification SET status = 'LOCKED' "
+                    + "WHERE email = ? AND purpose = ? AND status = 'PENDING' "
+                    + "ORDER BY created_at DESC LIMIT 1", email.value(), normalizedPurpose);
+            return false;
+        }
         boolean consumed = store.consume(email.value(), normalizedPurpose, code);
         if (!consumed) {
             jdbc.update("UPDATE email_verification SET "

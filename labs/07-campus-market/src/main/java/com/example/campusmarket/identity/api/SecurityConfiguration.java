@@ -14,6 +14,8 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 
+import java.io.IOException;
+
 @Configuration
 @Profile("!test")
 @ConditionalOnBean(JwtAuthenticationFilter.class)
@@ -30,12 +32,20 @@ public class SecurityConfiguration {
             .authorizeHttpRequests(auth -> auth
                 .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                 .requestMatchers("/api/auth/**", "/actuator/health").permitAll()
+                .requestMatchers("/api/admin/**").hasRole("ADMIN")
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                 .anyRequest().authenticated())
             .exceptionHandling(exceptions -> exceptions
-                .authenticationEntryPoint((request, response, exception) -> response.sendError(HttpStatus.UNAUTHORIZED.value()))
-                .accessDeniedHandler((request, response, exception) -> response.sendError(HttpStatus.FORBIDDEN.value())))
+                .authenticationEntryPoint((request, response, exception) -> writeJsonError(response, HttpStatus.UNAUTHORIZED.value(), "Unauthorized"))
+                .accessDeniedHandler((request, response, exception) -> writeJsonError(response, HttpStatus.FORBIDDEN.value(), "Forbidden")))
             .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
             .build();
+    }
+
+    private static void writeJsonError(jakarta.servlet.http.HttpServletResponse response,
+                                       int status, String message) throws IOException {
+        response.setStatus(status);
+        response.setHeader("Content-Type", "application/json; charset=UTF-8");
+        response.getWriter().write("{\"error\":\"" + message + "\"}");
     }
 }

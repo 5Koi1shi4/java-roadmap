@@ -21,25 +21,26 @@ import java.util.UUID;
 @Service
 public class JwtService {
     private final SecretKey key;
-    private final Duration ttl;
     private final Clock clock;
 
-    @Autowired
-    public JwtService(@Value("${campus.market.jwt.secret}") String secret,
-                      @Value("${campus.market.jwt.ttl:15m}") Duration ttl) {
-        this(secret, ttl, Clock.systemUTC());
-    }
+    private static final Duration TTL = Duration.ofMinutes(15);
 
-    public JwtService(String secret) {
-        this(secret, Duration.ofMinutes(15), Clock.systemUTC());
+    @Autowired
+    public JwtService(@Value("${campus.market.jwt.secret}") String secret) {
+        this(secret, TTL, Clock.systemUTC());
     }
 
     public JwtService(String secret, Duration ttl, Clock clock) {
         if (secret == null || secret.getBytes(StandardCharsets.UTF_8).length < 32) {
             throw new IllegalStateException("JWT secret must be at least 256 bits");
         }
+        if (!TTL.equals(ttl)) {
+            throw new IllegalArgumentException("JWT TTL is fixed at 15 minutes");
+        }
+        if (clock == null) {
+            throw new IllegalArgumentException("JWT clock is required");
+        }
         this.key = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
-        this.ttl = ttl;
         this.clock = clock;
     }
 
@@ -49,13 +50,27 @@ public class JwtService {
             .subject(user.userId().toString())
             .claim("roles", user.roles())
             .issuedAt(Date.from(issuedAt))
-            .expiration(Date.from(issuedAt.plus(ttl)))
+            .expiration(Date.from(issuedAt.plus(TTL)))
             .signWith(key, Jwts.SIG.HS256)
             .compact();
     }
 
     public Claims parse(String token) {
-        return Jwts.parser().verifyWith(key).build().parseSignedClaims(token).getPayload();
+        Claims claims = Jwts.parser().verifyWith(key).build().parseSignedClaims(token).getPayload();
+        if (claims.getSubject() == null || claims.getSubject().isBlank()
+            || claims.getIssuedAt() == null || claims.getExpiration() == null
+            || claims.get("roles") == null) {
+            throw new IllegalArgumentException("JWT is missing required claims");
+        }
+        Object roles = claims.get("roles");
+        if (!(roles instanceof Iterable<?> iterable) || !iterable.iterator().hasNext()) {
+            throw new IllegalArgumentException("JWT roles claim is invalid");
+        }
+        Duration lifetime = Duration.between(claims.getIssuedAt().toInstant(), claims.getExpiration().toInstant());
+        if (!TTL.equals(lifetime)) {
+            throw new IllegalArgumentException("JWT lifetime must be exactly 15 minutes");
+        }
+        return claims;
     }
 
     public AuthenticatedUser authenticate(String token) {
@@ -74,6 +89,6 @@ public class JwtService {
     }
 
     public Duration ttl() {
-        return ttl;
+        return TTL;
     }
 }
