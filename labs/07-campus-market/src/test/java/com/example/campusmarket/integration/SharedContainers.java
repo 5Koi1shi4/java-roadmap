@@ -9,9 +9,11 @@ import org.testcontainers.containers.Network;
 import org.testcontainers.containers.RabbitMQContainer;
 import org.testcontainers.containers.ToxiproxyContainer;
 import org.testcontainers.elasticsearch.ElasticsearchContainer;
+import org.testcontainers.images.builder.ImageFromDockerfile;
 import org.testcontainers.lifecycle.Startables;
 import org.testcontainers.utility.DockerImageName;
 
+import java.nio.file.Path;
 import java.util.stream.Stream;
 
 /** 所有集成测试共用的六个隔离外部服务容器。 */
@@ -36,10 +38,11 @@ public abstract class SharedContainers {
         .withNetwork(NETWORK)
         .withNetworkAliases("rabbitmq");
 
-    protected static final ElasticsearchContainer ELASTICSEARCH = new ElasticsearchContainer(
-        DockerImageName.parse("docker.elastic.co/elasticsearch/elasticsearch:8.18.8"))
-        .withNetwork(NETWORK)
-        .withNetworkAliases("elasticsearch");
+    private static final ImageFromDockerfile ELASTICSEARCH_IMAGE = new ImageFromDockerfile(
+        "campus-market/elasticsearch:8.18.8-smartcn", true)
+        .withDockerfile(Path.of("docker/elasticsearch/Dockerfile"));
+
+    protected static final ElasticsearchContainer ELASTICSEARCH = elasticsearchContainer();
 
     protected static final GenericContainer<?> MINIO = new GenericContainer<>(DockerImageName.parse(
         "quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z"))
@@ -57,6 +60,16 @@ public abstract class SharedContainers {
 
     static {
         Startables.deepStart(Stream.of(MYSQL, REDIS, RABBITMQ, ELASTICSEARCH, MINIO, TOXIPROXY)).join();
+    }
+
+    private static ElasticsearchContainer elasticsearchContainer() {
+        DockerImageName compatibleImage = DockerImageName.parse("campus-market/elasticsearch:8.18.8-smartcn")
+            .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8");
+        ElasticsearchContainer container = new ElasticsearchContainer(compatibleImage)
+            .withNetwork(NETWORK)
+            .withNetworkAliases("elasticsearch");
+        container.setImage(ELASTICSEARCH_IMAGE);
+        return container;
     }
 
     @DynamicPropertySource
