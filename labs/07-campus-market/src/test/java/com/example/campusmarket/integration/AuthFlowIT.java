@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import com.example.campusmarket.identity.infrastructure.JwtService;
 import com.example.campusmarket.identity.infrastructure.LocalVerificationMailSender;
@@ -45,16 +46,14 @@ class AuthFlowIT extends SharedContainers {
             "{\"email\":\"" + email + "\",\"client\":\"auth-flow\"}");
 
         assertThat(codeResponse.statusCode()).isEqualTo(200);
-        assertThat(codeResponse.headers().firstValue("Content-Type").orElseThrow())
-            .isEqualTo("application/json; charset=UTF-8");
+        assertJsonUtf8(codeResponse);
         String code = mailSender.latestCode(email);
         assertThat(code).isNotBlank();
 
         HttpResponse<String> registered = post("/api/auth/register",
             "{\"email\":\"" + email + "\",\"password\":\"correct horse battery staple\",\"code\":\"" + code + "\"}");
         assertThat(registered.statusCode()).isEqualTo(201);
-        assertThat(registered.headers().firstValue("Content-Type").orElseThrow())
-            .isEqualTo("application/json; charset=UTF-8");
+        assertJsonUtf8(registered);
 
         HttpResponse<String> reused = post("/api/auth/register",
             "{\"email\":\"" + email + "\",\"password\":\"correct horse battery staple\",\"code\":\"" + code + "\"}");
@@ -63,8 +62,7 @@ class AuthFlowIT extends SharedContainers {
         HttpResponse<String> login = post("/api/auth/login",
             "{\"email\":\"" + email + "\",\"password\":\"correct horse battery staple\"}");
         assertThat(login.statusCode()).isEqualTo(200);
-        assertThat(login.headers().firstValue("Content-Type").orElseThrow())
-            .isEqualTo("application/json; charset=UTF-8");
+        assertJsonUtf8(login);
         String token = jsonField(login.body(), "accessToken");
         var claims = jwtService.parse(token);
         assertThat(claims.getExpiration().toInstant())
@@ -81,15 +79,13 @@ class AuthFlowIT extends SharedContainers {
                 .header("Authorization", "Bearer " + token.substring(0, token.length() - 1) + "x")
                 .GET().build(), HttpResponse.BodyHandlers.ofString());
         assertThat(invalidSignature.statusCode()).isEqualTo(401);
-        assertThat(invalidSignature.headers().firstValue("Content-Type").orElseThrow())
-            .isEqualTo("application/json; charset=UTF-8");
+        assertJsonUtf8(invalidSignature);
 
         HttpResponse<String> forbidden = httpClient.send(
             HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/admin/probe"))
                 .header("Authorization", "Bearer " + token).GET().build(), HttpResponse.BodyHandlers.ofString());
         assertThat(forbidden.statusCode()).isEqualTo(403);
-        assertThat(forbidden.headers().firstValue("Content-Type").orElseThrow())
-            .isEqualTo("application/json; charset=UTF-8");
+        assertJsonUtf8(forbidden);
 
         JwtService expiredService = new JwtService(
             "local-only-jwt-secret-change-me-32-bytes", Duration.ofMinutes(15),
@@ -100,8 +96,7 @@ class AuthFlowIT extends SharedContainers {
             HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/private"))
                 .header("Authorization", "Bearer " + expired).GET().build(), HttpResponse.BodyHandlers.ofString());
         assertThat(expiredResponse.statusCode()).isEqualTo(401);
-        assertThat(expiredResponse.headers().firstValue("Content-Type").orElseThrow())
-            .isEqualTo("application/json; charset=UTF-8");
+        assertJsonUtf8(expiredResponse);
     }
 
     private HttpResponse<String> post(String path, String json) throws Exception {
@@ -110,6 +105,14 @@ class AuthFlowIT extends SharedContainers {
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(json))
                 .build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static void assertJsonUtf8(HttpResponse<String> response) {
+        MediaType contentType = MediaType.parseMediaType(response.headers()
+            .firstValue("Content-Type").orElseThrow());
+        assertThat(contentType.getType()).isEqualTo("application");
+        assertThat(contentType.getSubtype()).isEqualTo("json");
+        assertThat(contentType.getCharset()).isEqualTo(java.nio.charset.StandardCharsets.UTF_8);
     }
 
     private static String jsonField(String json, String field) {
