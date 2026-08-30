@@ -8,6 +8,7 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -39,7 +40,13 @@ class SchemaIT extends SharedContainers {
         assertThat(columnType("trade_order", "total_amount_fen")).isEqualTo("bigint");
         assertThat(columnNames("trade_order")).contains("listing_id", "listing_title_snapshot", "unit_price_fen",
             "quantity", "warranty_days", "warranty_scope_snapshot", "t0", "acceptance_deadline",
-            "trial_deadline", "warranty_deadline", "status", "version");
+            "trial_deadline", "warranty_deadline", "payment_deadline", "handoff_deadline", "receipt_deadline",
+            "status", "version");
+        for (String deadline : List.of("payment_deadline", "handoff_deadline", "receipt_deadline",
+            "acceptance_deadline", "trial_deadline", "warranty_deadline")) {
+            assertThat(columnType("trade_order", deadline)).as("deadline %s uses microsecond timestamp", deadline)
+                .isEqualTo("timestamp");
+        }
         assertThat(checkConstraintNames("trade_order")).contains("ck_trade_order_quantity", "ck_trade_order_status");
     }
 
@@ -51,7 +58,9 @@ class SchemaIT extends SharedContainers {
             "signature_valid", "status", "owner_id", "claim_token", "lease_until", "attempt_count");
         assertThat(indexNames("refund_order")).contains("idx_refund_order_amounts");
         assertThat(checkConstraintNames("refund_order")).contains("ck_refund_successful_le_paid",
-            "ck_refund_reserved_le_paid", "ck_refund_amount_le_paid");
+            "ck_refund_reserved_le_paid", "ck_refund_amount_le_paid", "ck_refund_total_le_paid");
+        assertThat(checkClauses("refund_order")).anyMatch(clause -> clause.replace("`", "")
+            .replace(" ", "").toLowerCase().contains("reserved_refund_fen+successful_refund_fen+amount_fen<=paid_amount_fen"));
         assertThat(indexNames("integration_outbox")).contains("uk_integration_outbox_event_id");
         assertThat(indexNames("consumed_event")).contains("uk_consumed_event");
         assertThat(columnNames("integration_outbox")).contains("aggregate_version", "schema_version", "payload",
@@ -149,5 +158,22 @@ class SchemaIT extends SharedContainers {
             }
         }
         return names;
+    }
+
+    private Set<String> checkClauses(String table) throws SQLException {
+        Set<String> clauses = new HashSet<>();
+        try (Connection connection = MYSQL.createConnection("");
+             var statement = connection.prepareStatement(
+                 "SELECT cc.CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS cc "
+                     + "WHERE cc.CONSTRAINT_SCHEMA = ? AND cc.TABLE_NAME = ?")) {
+            statement.setString(1, connection.getCatalog());
+            statement.setString(2, table);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    clauses.add(result.getString(1));
+                }
+            }
+        }
+        return clauses;
     }
 }

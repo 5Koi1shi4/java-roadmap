@@ -12,6 +12,9 @@ CREATE TABLE trade_order (
     warranty_scope_snapshot TEXT,
     manufacturer_warranty_proof_snapshot TEXT,
     manufacturer_warranty_expires_at TIMESTAMP(6),
+    payment_deadline TIMESTAMP(6),
+    handoff_deadline TIMESTAMP(6),
+    receipt_deadline TIMESTAMP(6),
     t0 TIMESTAMP(6),
     acceptance_deadline TIMESTAMP(6),
     trial_deadline TIMESTAMP(6),
@@ -161,6 +164,7 @@ CREATE TABLE refund_order (
     CONSTRAINT ck_refund_successful_le_paid CHECK (successful_refund_fen <= paid_amount_fen),
     CONSTRAINT ck_refund_reserved_le_paid CHECK (reserved_refund_fen <= paid_amount_fen),
     CONSTRAINT ck_refund_reserved_plus_success_le_paid CHECK (reserved_refund_fen + successful_refund_fen <= paid_amount_fen),
+    CONSTRAINT ck_refund_total_le_paid CHECK (reserved_refund_fen + successful_refund_fen + amount_fen <= paid_amount_fen),
     CONSTRAINT ck_refund_order_status CHECK (status IN ('REQUESTED', 'PROCESSING', 'SUCCEEDED', 'FAILED', 'CANCELLED')),
     CONSTRAINT fk_refund_order_order FOREIGN KEY (order_id) REFERENCES trade_order (id),
     CONSTRAINT fk_refund_order_payment FOREIGN KEY (payment_order_id) REFERENCES payment_order (id)
