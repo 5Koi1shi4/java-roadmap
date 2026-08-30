@@ -289,10 +289,12 @@ git commit -m "feat(campus): define schema and shared contracts"
 **Files:**
 - Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/identity/domain/CampusEmail.java`
 - Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/identity/application/EmailVerificationService.java`
+- Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/identity/application/VerificationMailSender.java`
 - Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/identity/application/AuthService.java`
 - Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/identity/application/ExternalIdentityProvider.java`
 - Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/identity/infrastructure/JwtService.java`
 - Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/identity/infrastructure/RedisVerificationCodeStore.java`
+- Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/identity/infrastructure/LocalVerificationMailSender.java`
 - Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/identity/api/AuthController.java`
 - Create: `labs/07-campus-market/src/main/java/com/example/campusmarket/identity/api/JwtAuthenticationFilter.java`
 - Test: `labs/07-campus-market/src/test/java/com/example/campusmarket/unit/identity/CampusEmailTest.java`
@@ -325,7 +327,11 @@ Expected: FAIL，因为邮箱类型不存在。
 
 - [ ] **Step 2: 实现精确域名与验证码端口**
 
-`CampusEmail` 用 `InternetDomainName` 之外的标准 Java IDN/ASCII 规范化，拆分最后一个 `@` 后进行完整域名集合匹配。验证码用 `SecureRandom`，Redis Lua 原子消费；MySQL 记录发送/验证审计，不保存明文。Redis 不可用返回 503，不回退为绕过验证。
+`CampusEmail` 用 `InternetDomainName` 之外的标准 Java IDN/ASCII 规范化，拆分最后一个 `@` 后进行完整域名集合匹配。验证码用 `SecureRandom`，有效期 10 分钟，Redis Lua 原子消费；MySQL 记录发送/验证审计，不保存明文。Redis 不可用返回 503，不回退为绕过验证。
+
+发送窗口固定为 10 分钟：同一邮箱最多 3 次、同一服务端观察到的远端 IP 最多 20 次、同一设备最多 10 次。验证失败窗口也固定为 10 分钟：同一邮箱最多 5 次、同一远端 IP 最多 20 次、同一设备最多 10 次；达到任一阈值必须由 Redis Lua 原子拒绝后续猜测并把对应 MySQL 审计置为 `LOCKED`。IP 只取 `HttpServletRequest.getRemoteAddr()`，不接受请求体或未配置可信代理的转发头。设备 ID 由服务端使用至少 128 位 `SecureRandom` 生成，通过 `campus_device` HttpOnly、SameSite=Strict Cookie 保存；请求体中的 `client/clientId/clientIp/deviceId` 一律不参与安全决策。
+
+定义 `VerificationMailSender.send(CampusEmail email, String code)` 端口；`LocalVerificationMailSender` 只能在 local/test Profile 存在并允许测试读取最近验证码。`EmailVerificationService` 必须实际调用该端口；非 local/test 没有真实 `VerificationMailSender` Bean 时通过必需依赖直接启动失败，禁止用非空配置字符串冒充发送器。
 
 - [ ] **Step 3: 写真实 HTTP RED 测试**
 
@@ -353,7 +359,7 @@ public interface ExternalIdentityProvider {
 }
 ```
 
-不得创建假 CAS 实现或真实学校配置。JWT 密钥少于 256 位、生产邮件发送器缺失或模拟发送器在非 local/test Profile 启用时启动失败。
+不得创建假 CAS 实现或真实学校配置。JWT 密钥少于 256 位、生产邮件发送器缺失或模拟发送器在非 local/test Profile 启用时启动失败。JWT TTL 不得接受配置覆盖，签发与解析都必须强制 `exp - iat = 15 分钟`，并要求 subject、issuedAt、expiration 和 roles claims 存在。
 
 - [ ] **Step 5: 验证并提交**
 
