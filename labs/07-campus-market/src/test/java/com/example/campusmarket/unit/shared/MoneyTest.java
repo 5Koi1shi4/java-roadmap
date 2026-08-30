@@ -24,5 +24,7 @@ class MoneyTest {
     void rejectsNonPositiveQuantity() {
         assertThatThrownBy(() -> Money.ofFen(1).multiply(0))
             .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> Money.ofFen(1).multiply(-1))
+            .isInstanceOf(IllegalArgumentException.class);
     }
 }

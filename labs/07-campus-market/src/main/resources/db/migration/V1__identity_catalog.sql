@@ -1,81 +1,125 @@
 CREATE TABLE campus_user (
     id CHAR(36) NOT NULL,
-    username VARCHAR(100) NOT NULL,
-    display_name VARCHAR(100) NOT NULL,
+    email VARCHAR(320) NOT NULL,
+    password_hash VARCHAR(100) NOT NULL,
     status VARCHAR(20) NOT NULL,
     created_at TIMESTAMP(6) NOT NULL,
     updated_at TIMESTAMP(6) NOT NULL,
     PRIMARY KEY (id),
-    UNIQUE KEY uk_campus_user_username (username),
+    UNIQUE KEY uk_campus_user_email (email),
     CONSTRAINT ck_campus_user_status CHECK (status IN ('ACTIVE', 'SUSPENDED', 'DELETED'))
 );
 
-CREATE TABLE user_login_identity (
+CREATE TABLE email_verification (
+    id CHAR(36) NOT NULL,
+    user_id CHAR(36),
+    email VARCHAR(320) NOT NULL,
+    purpose VARCHAR(30) NOT NULL,
+    code_hmac VARBINARY(64) NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    attempt_count INT NOT NULL DEFAULT 0,
+    expires_at TIMESTAMP(6) NOT NULL,
+    consumed_at TIMESTAMP(6),
+    created_at TIMESTAMP(6) NOT NULL,
+    PRIMARY KEY (id),
+    KEY idx_email_verification_email (email, purpose, status),
+    CONSTRAINT ck_email_verification_purpose CHECK (purpose IN ('REGISTER', 'LOGIN', 'CHANGE_EMAIL')),
+    CONSTRAINT ck_email_verification_status CHECK (status IN ('PENDING', 'VERIFIED', 'EXPIRED', 'LOCKED')),
+    CONSTRAINT ck_email_verification_attempts CHECK (attempt_count >= 0),
+    CONSTRAINT fk_email_verification_user FOREIGN KEY (user_id) REFERENCES campus_user (id)
+);
+
+CREATE TABLE external_identity (
     id CHAR(36) NOT NULL,
     user_id CHAR(36) NOT NULL,
     provider VARCHAR(40) NOT NULL,
-    provider_subject VARCHAR(191) NOT NULL,
+    subject VARCHAR(191) NOT NULL,
+    status VARCHAR(20) NOT NULL,
     created_at TIMESTAMP(6) NOT NULL,
+    updated_at TIMESTAMP(6) NOT NULL,
     PRIMARY KEY (id),
-    UNIQUE KEY uk_login_identity_provider_subject (provider, provider_subject)
-);
-
-CREATE TABLE campus_role (
-    id CHAR(36) NOT NULL,
-    role_name VARCHAR(50) NOT NULL,
-    created_at TIMESTAMP(6) NOT NULL,
-    PRIMARY KEY (id),
-    UNIQUE KEY uk_campus_role_name (role_name)
-);
-
-CREATE TABLE user_role (
-    user_id CHAR(36) NOT NULL,
-    role_id CHAR(36) NOT NULL,
-    created_at TIMESTAMP(6) NOT NULL,
-    PRIMARY KEY (user_id, role_id)
+    UNIQUE KEY uk_external_identity_provider_subject (provider, subject),
+    CONSTRAINT ck_external_identity_status CHECK (status IN ('ACTIVE', 'UNBOUND')),
+    CONSTRAINT fk_external_identity_user FOREIGN KEY (user_id) REFERENCES campus_user (id)
 );
 
 CREATE TABLE listing (
     id CHAR(36) NOT NULL,
     seller_id CHAR(36) NOT NULL,
-    category_id CHAR(36),
     title VARCHAR(200) NOT NULL,
     description TEXT NOT NULL,
+    category VARCHAR(100) NOT NULL,
     unit_price_fen BIGINT NOT NULL,
     available_quantity INT NOT NULL,
     quarantined_quantity INT NOT NULL DEFAULT 0,
+    warranty_days INT,
+    warranty_scope TEXT,
+    manufacturer_warranty_proof_snapshot TEXT,
+    manufacturer_warranty_expires_at TIMESTAMP(6),
     status VARCHAR(20) NOT NULL,
+    version BIGINT NOT NULL DEFAULT 0,
     created_at TIMESTAMP(6) NOT NULL,
     updated_at TIMESTAMP(6) NOT NULL,
     PRIMARY KEY (id),
+    KEY idx_listing_seller_status (seller_id, status),
     CONSTRAINT ck_listing_unit_price CHECK (unit_price_fen >= 0),
     CONSTRAINT ck_listing_available_quantity CHECK (available_quantity >= 0),
     CONSTRAINT ck_listing_quarantined_quantity CHECK (quarantined_quantity >= 0),
-    CONSTRAINT ck_listing_status CHECK (status IN ('DRAFT', 'PUBLISHED', 'SOLD_OUT', 'OFFLINE'))
+    CONSTRAINT ck_listing_warranty_days CHECK (warranty_days IN (30, 90, 180, 365) OR warranty_days IS NULL),
+    CONSTRAINT ck_listing_status CHECK (status IN ('DRAFT', 'ON_SALE', 'SOLD_OUT', 'OFF_SALE')),
+    CONSTRAINT ck_listing_version CHECK (version >= 0),
+    CONSTRAINT fk_listing_seller FOREIGN KEY (seller_id) REFERENCES campus_user (id)
 );
 
-CREATE TABLE listing_image (
+CREATE TABLE listing_media (
     id CHAR(36) NOT NULL,
     listing_id CHAR(36) NOT NULL,
     object_key VARCHAR(512) NOT NULL,
+    media_type VARCHAR(100) NOT NULL,
+    size_bytes BIGINT NOT NULL,
     sort_order INT NOT NULL DEFAULT 0,
     created_at TIMESTAMP(6) NOT NULL,
     PRIMARY KEY (id),
-    UNIQUE KEY uk_listing_image_object (object_key)
+    UNIQUE KEY uk_listing_media_object_key (object_key),
+    KEY idx_listing_media_listing_order (listing_id, sort_order),
+    CONSTRAINT ck_listing_media_size CHECK (size_bytes >= 0),
+    CONSTRAINT ck_listing_media_sort CHECK (sort_order >= 0),
+    CONSTRAINT fk_listing_media_listing FOREIGN KEY (listing_id) REFERENCES listing (id)
 );
 
-CREATE TABLE listing_category (
+CREATE TABLE inventory_movement (
     id CHAR(36) NOT NULL,
-    parent_id CHAR(36),
-    category_name VARCHAR(100) NOT NULL,
+    business_key VARCHAR(191) NOT NULL,
+    listing_id CHAR(36) NOT NULL,
+    order_id CHAR(36),
+    dispute_case_id CHAR(36),
+    reason VARCHAR(40) NOT NULL,
+    quantity_delta INT NOT NULL,
     created_at TIMESTAMP(6) NOT NULL,
     PRIMARY KEY (id),
-    UNIQUE KEY uk_listing_category_name (category_name)
+    UNIQUE KEY uk_inventory_movement_business_key (business_key),
+    KEY idx_inventory_movement_listing_time (listing_id, created_at),
+    CONSTRAINT ck_inventory_movement_delta CHECK (quantity_delta <> 0),
+    CONSTRAINT fk_inventory_movement_listing FOREIGN KEY (listing_id) REFERENCES listing (id)
 );
 
-CREATE TABLE listing_favorite (
+CREATE TABLE search_outbox (
+    id CHAR(36) NOT NULL,
     listing_id CHAR(36) NOT NULL,
-    user_id CHAR(36) NOT NULL,
+    aggregate_version BIGINT NOT NULL,
+    event_type VARCHAR(100) NOT NULL,
+    payload JSON NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    owner_id VARCHAR(100),
+    claim_token VARCHAR(100),
+    lease_until TIMESTAMP(6),
+    attempt_count INT NOT NULL DEFAULT 0,
+    available_at TIMESTAMP(6) NOT NULL,
     created_at TIMESTAMP(6) NOT NULL,
-    PRIMARY KEY (listing_id, user_id)
+    PRIMARY KEY (id),
+    KEY idx_search_outbox_claim (status, available_at, lease_until),
+    CONSTRAINT ck_search_outbox_version CHECK (aggregate_version > 0),
+    CONSTRAINT ck_search_outbox_status CHECK (status IN ('NEW', 'PUBLISHING', 'PUBLISHED', 'FAILED')),
+    CONSTRAINT ck_search_outbox_attempts CHECK (attempt_count >= 0),
+    CONSTRAINT fk_search_outbox_listing FOREIGN KEY (listing_id) REFERENCES listing (id)
 );

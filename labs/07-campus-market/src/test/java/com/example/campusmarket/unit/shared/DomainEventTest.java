@@ -19,6 +19,13 @@ class DomainEventTest {
     }
 
     @Test
+    void rejectsUnknownEventType() {
+        assertThatThrownBy(() -> new DomainEvent(UUID.randomUUID(), "UNKNOWN_EVENT", "o1", 1,
+            Instant.now(), 1, Map.of()))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void acceptsVersionOneAndExposesStableSevenFields() {
         UUID eventId = UUID.randomUUID();
         Instant occurredAt = Instant.now();
