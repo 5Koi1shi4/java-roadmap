@@ -36,8 +36,8 @@ public class SecurityConfiguration {
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                 .anyRequest().authenticated())
             .exceptionHandling(exceptions -> exceptions
-                .authenticationEntryPoint((request, response, exception) -> writeJsonError(response, HttpStatus.UNAUTHORIZED.value(), "Unauthorized"))
-                .accessDeniedHandler((request, response, exception) -> writeJsonError(response, HttpStatus.FORBIDDEN.value(), "Forbidden")))
+                .authenticationEntryPoint((request, response, exception) -> writeJsonError(response, HttpStatus.UNAUTHORIZED.value(), "未认证"))
+                .accessDeniedHandler((request, response, exception) -> writeJsonError(response, HttpStatus.FORBIDDEN.value(), "无权访问")))
             .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
             .build();
     }
