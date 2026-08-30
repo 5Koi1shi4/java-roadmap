@@ -347,8 +347,12 @@ successfulRefundFen + reservedRefundFen + requestedRefundFen <= paidAmountFen
 - `audit_event`：actor、动作、资源逻辑 ID、结果、有限失败分类和数据库时间。
 - `integration_outbox`：事件 ID、类型、聚合、版本、schema version、payload、租约和发布状态。
 - `consumed_event`：消费者、事件 ID、处理状态、租约和完成时间。
+- `object_upload_session`：随机上传会话、提交者、用途、随机 Object Key、状态、租约和过期时间；商品图片与争议证据共用，但逻辑授权仍由各自模块决定。
+- `storage_cleanup_task`：随机 Object Key、唯一业务键、状态、owner、claim token、租约、尝试次数、下次执行时间和有限失败分类。
 
 模块通过公开接口引用逻辑 ID，不查询其他模块的内部表。Flyway 迁移为金额、数量、状态、唯一幂等键和领取索引建立检查约束与索引。
+
+对象上传先在短事务中创建 `object_upload_session`，再在事务外流式写入 MinIO，最后在短事务中绑定 `listing_media` 或 `dispute_evidence` 并完成会话。绑定失败、客户端断开或即时删除失败时创建或保留 `storage_cleanup_task`；清理器在事务外删除对象，并以 claim token 条件完成任务。对象不存在视为幂等成功，数据库事务期间禁止执行 MinIO IO。
 
 ## 10. 可靠事件、调度与故障恢复
 
