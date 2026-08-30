@@ -227,7 +227,29 @@ Expected: FAIL，Flyway 尚无迁移。
 
 - [ ] **Step 4: 写四个迁移**
 
-迁移必须精确创建规格第 9 节所有表。核心约束至少包括：
+迁移必须只创建以下 27 张表，不得用同义表替换，不得加入聊天、通知、多商品订单项等首版范围外表：
+
+```text
+V1 identity/catalog:
+campus_user, email_verification, external_identity, listing, listing_media,
+inventory_movement, search_outbox
+
+V2 order/payment:
+trade_order, order_command, order_transition, order_deadline_claim,
+payment_order, payment_callback_event, refund_order, settlement
+
+V3 dispute/warranty:
+handoff_record, dispute_case, dispute_evidence, return_case,
+warranty_case, seller_obligation
+
+V4 review/audit/messaging:
+trade_review, audit_event, integration_outbox, consumed_event,
+object_upload_session, storage_cleanup_task
+```
+
+`trade_order` 直接保存单发布项快照、单价分、数量、总额分、质保承诺快照、`T0`、支付/交付/确认/验收/试用/延长质保截止时间、完整规格状态和版本，不创建 `trade_order_item`。`integration_outbox` 必须保存事件 ID、类型、聚合 ID、aggregate version、schema version、payload、状态和领取字段；`consumed_event` 必须保存 `PROCESSING/COMPLETED/FAILED` 状态。`payment_callback_event` 必须以 `(provider, provider_event_id)` 唯一；`seller_obligation` 必须保存唯一业务键、应履行/已筹资金、资金期限、未来 settlement 抵扣键、限制状态和版本。同一模块及生命周期依赖的引用添加命名外键，迁移顺序必须保证被引用表先创建。
+
+核心约束至少包括：
 
 ```sql
 CHECK (unit_price_fen >= 0),
