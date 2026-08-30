@@ -23,7 +23,7 @@ public class StorageCleanupScheduler {
     }
 
     public int runOnce(int limit) {
-        if (limit <= 0) throw new IllegalArgumentException("批量大小必须为正数");
+        if (limit <= 0 || limit > 100) throw new IllegalArgumentException("批量大小必须在1到100之间");
         List<Task> tasks = transactions.execute(status -> claimInternal(limit));
         int completed = 0;
         for (Task task : tasks) {
@@ -46,26 +46,32 @@ public class StorageCleanupScheduler {
     protected List<Task> claimInternal(int limit) {
         String owner = "cleanup-" + UUID.randomUUID();
         String token = UUID.randomUUID().toString();
-        Timestamp now = Timestamp.from(Instant.now());
-        jdbc.update("UPDATE storage_cleanup_task SET status='PROCESSING', owner_id=?, claim_token=?, lease_until=?, attempt_count=attempt_count+1, updated_at=? WHERE status='PROCESSING' AND lease_until < ?",
-            owner, token, Timestamp.from(Instant.now().plusSeconds(60)), now, now);
-        return jdbc.query("SELECT id, object_key, owner_id, claim_token FROM storage_cleanup_task WHERE status='PENDING' AND run_after <= ? ORDER BY run_after LIMIT " + limit,
+        jdbc.update("""
+            INSERT INTO storage_cleanup_task (id, cleanup_business_key, object_key, status, run_after, created_at, updated_at)
+            SELECT UUID(), CONCAT('listing-upload:', id), object_key, 'PENDING', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
+            FROM object_upload_session
+            WHERE purpose='LISTING_MEDIA' AND status IN ('OPEN','ABORTED') AND expires_at <= CURRENT_TIMESTAMP(6)
+            ON DUPLICATE KEY UPDATE updated_at=CURRENT_TIMESTAMP(6)
+            """);
+        jdbc.update("UPDATE object_upload_session SET status='EXPIRED', updated_at=CURRENT_TIMESTAMP(6) WHERE purpose='LISTING_MEDIA' AND status='OPEN' AND expires_at <= CURRENT_TIMESTAMP(6)");
+        jdbc.update("UPDATE storage_cleanup_task SET status='PENDING', owner_id=NULL, claim_token=NULL, lease_until=NULL, updated_at=CURRENT_TIMESTAMP(6) WHERE status='PROCESSING' AND lease_until <= CURRENT_TIMESTAMP(6)");
+        return jdbc.query("SELECT id, object_key FROM storage_cleanup_task WHERE status='PENDING' AND run_after <= CURRENT_TIMESTAMP(6) ORDER BY run_after LIMIT ? FOR UPDATE SKIP LOCKED",
             (rs, rowNum) -> {
                 String id = rs.getString("id");
-                int n = jdbc.update("UPDATE storage_cleanup_task SET status='PROCESSING', owner_id=?, claim_token=?, lease_until=?, attempt_count=attempt_count+1, updated_at=? WHERE id=? AND status='PENDING'",
-                    owner, token, Timestamp.from(Instant.now().plusSeconds(60)), now, id);
+                int n = jdbc.update("UPDATE storage_cleanup_task SET status='PROCESSING', owner_id=?, claim_token=?, lease_until=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 60 SECOND), attempt_count=attempt_count+1, updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='PENDING' AND run_after <= CURRENT_TIMESTAMP(6)",
+                    owner, token, id);
                 return n == 1 ? new Task(id, rs.getString("object_key"), owner, token) : null;
-            }, now).stream().filter(java.util.Objects::nonNull).toList();
+            }, limit).stream().filter(java.util.Objects::nonNull).toList();
     }
 
     protected void complete(Task task) {
-        transactions.executeWithoutResult(status -> jdbc.update("UPDATE storage_cleanup_task SET status='COMPLETED', lease_until=NULL, updated_at=? WHERE id=? AND status='PROCESSING' AND owner_id=? AND claim_token=?",
-            Timestamp.from(Instant.now()), task.id(), task.owner(), task.token()));
+        transactions.executeWithoutResult(status -> jdbc.update("UPDATE storage_cleanup_task SET status='COMPLETED', lease_until=NULL, updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='PROCESSING' AND owner_id=? AND claim_token=?",
+            task.id(), task.owner(), task.token()));
     }
 
     protected void release(Task task, String failureClass) {
-        transactions.executeWithoutResult(status -> jdbc.update("UPDATE storage_cleanup_task SET status='PENDING', failure_class=?, lease_until=NULL, run_after=?, updated_at=? WHERE id=? AND status='PROCESSING' AND owner_id=? AND claim_token=?",
-            failureClass, Timestamp.from(Instant.now().plusSeconds(30)), Timestamp.from(Instant.now()), task.id(), task.owner(), task.token()));
+        transactions.executeWithoutResult(status -> jdbc.update("UPDATE storage_cleanup_task SET status='PENDING', failure_class=?, lease_until=NULL, run_after=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND), updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='PROCESSING' AND owner_id=? AND claim_token=?",
+            failureClass, task.id(), task.owner(), task.token()));
     }
 
     private record Task(String id, String objectKey, String owner, String token) { }

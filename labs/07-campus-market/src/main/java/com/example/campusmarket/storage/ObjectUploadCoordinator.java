@@ -5,14 +5,11 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.security.SecureRandom;
-import java.sql.Timestamp;
-import java.time.Instant;
 import java.util.Base64;
 import java.util.UUID;
 
@@ -34,61 +31,82 @@ public class ObjectUploadCoordinator {
 
     public ListingRepository.MediaRecord uploadListingMedia(UUID listingId, UUID actorId, String filename,
                                                               String declaredContentType, InputStream input) {
-        byte[] bytes = readLimit(input, 10 * 1024 * 1024L);
-        String detected = new org.apache.tika.Tika().detect(bytes, filename);
-        validateType(filename, declaredContentType, detected);
+        Path temporaryFile = null;
         String key = "listing-media/" + randomToken();
         UUID sessionId = UUID.randomUUID();
-        Instant expiry = Instant.now().plusSeconds(3600);
-        createSession(sessionId, actorId, key, expiry);
-        boolean stored = false;
+        createSession(sessionId, actorId, key);
         try {
-            storage.put(key, new ByteArrayInputStream(bytes), bytes.length, detected);
-            stored = true;
-            UUID mediaId = UUID.randomUUID();
-            int sortOrder = nextSortOrder(listingId);
-            listings.saveMedia(listingId, mediaId, key, detected, bytes.length, sortOrder);
-            completeSession(sessionId);
-            return new ListingRepository.MediaRecord(mediaId, listingId, key, detected, bytes.length, sortOrder);
-        } catch (RuntimeException e) {
-            abortSession(sessionId);
-            createCleanupTask(sessionId, key);
-            if (stored) {
-                // 清理任务负责事务外补偿，当前请求不再同步重试对象删除。
+            temporaryFile = readToTemporaryFile(input, 10 * 1024 * 1024L);
+            String detected = new org.apache.tika.Tika().detect(temporaryFile.toFile());
+            validateType(filename, declaredContentType, detected);
+            long size = Files.size(temporaryFile);
+            try (InputStream content = Files.newInputStream(temporaryFile)) {
+                storage.put(key, content, size, detected);
             }
+            return bindMediaAndComplete(listingId, sessionId, key, detected, size);
+        } catch (RuntimeException e) {
+            compensateFailure(sessionId, key);
             throw e;
+        } catch (IOException e) {
+            compensateFailure(sessionId, key);
+            throw new IllegalArgumentException("读取媒体失败", e);
+        } finally {
+            if (temporaryFile != null) {
+                try { Files.deleteIfExists(temporaryFile); } catch (IOException ignored) { }
+            }
         }
     }
 
-    private int nextSortOrder(UUID listingId) {
-        Integer max = jdbc.queryForObject("SELECT COALESCE(MAX(sort_order), -1) FROM listing_media WHERE listing_id = ?",
-            Integer.class, listingId.toString());
-        return (max == null ? -1 : max) + 1;
+    private ListingRepository.MediaRecord bindMediaAndComplete(UUID listingId, UUID sessionId, String key,
+                                                                 String detected, long size) {
+        return transactions.execute(status -> {
+            jdbc.query("SELECT id FROM listing WHERE id = ? FOR UPDATE", rs -> {
+                if (!rs.next()) throw new ListingNotFoundException();
+                return null;
+            }, listingId.toString());
+            Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM listing_media WHERE listing_id = ?", Integer.class, listingId.toString());
+            if (count == null || count >= 9) throw new IllegalStateException("每个商品最多添加9张媒体");
+            Integer max = jdbc.queryForObject("SELECT COALESCE(MAX(sort_order), -1) FROM listing_media WHERE listing_id = ?",
+                Integer.class, listingId.toString());
+            UUID mediaId = UUID.randomUUID();
+            int sortOrder = (max == null ? -1 : max) + 1;
+            jdbc.update("INSERT INTO listing_media (id, listing_id, object_key, media_type, size_bytes, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(6))",
+                mediaId.toString(), listingId.toString(), key, detected, size, sortOrder);
+            int completed = jdbc.update("UPDATE object_upload_session SET status='COMPLETED', updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='OPEN'",
+                sessionId.toString());
+            if (completed != 1) throw new IllegalStateException("上传会话状态无效");
+            return new ListingRepository.MediaRecord(mediaId, listingId, key, detected, size, sortOrder);
+        });
     }
 
-    protected void createSession(UUID id, UUID actorId, String key, Instant expiry) {
-        transactions.executeWithoutResult(status -> jdbc.update("INSERT INTO object_upload_session (id, submitted_by, purpose, object_key, status, expires_at, created_at, updated_at) VALUES (?, ?, 'LISTING_MEDIA', ?, 'OPEN', ?, ?, ?)",
-            id.toString(), actorId.toString(), key, Timestamp.from(expiry), Timestamp.from(Instant.now()), Timestamp.from(Instant.now())));
+    protected void createSession(UUID id, UUID actorId, String key) {
+        transactions.executeWithoutResult(status -> jdbc.update("INSERT INTO object_upload_session (id, submitted_by, purpose, object_key, status, expires_at, created_at, updated_at) VALUES (?, ?, 'LISTING_MEDIA', ?, 'OPEN', DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 1 HOUR), CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))",
+            id.toString(), actorId.toString(), key));
     }
 
     protected void completeSession(UUID id) {
-        transactions.executeWithoutResult(status -> jdbc.update("UPDATE object_upload_session SET status='COMPLETED', updated_at=? WHERE id=? AND status='OPEN'",
-            Timestamp.from(Instant.now()), id.toString()));
+        transactions.executeWithoutResult(status -> jdbc.update("UPDATE object_upload_session SET status='COMPLETED', updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='OPEN'",
+            id.toString()));
     }
 
     protected void abortSession(UUID id) {
-        transactions.executeWithoutResult(status -> jdbc.update("UPDATE object_upload_session SET status='ABORTED', updated_at=? WHERE id=? AND status='OPEN'",
-            Timestamp.from(Instant.now()), id.toString()));
+        transactions.executeWithoutResult(status -> jdbc.update("UPDATE object_upload_session SET status='ABORTED', updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='OPEN'",
+            id.toString()));
     }
 
     protected void createCleanupTask(UUID sessionId, String key) {
-        transactions.executeWithoutResult(status -> jdbc.update("INSERT INTO storage_cleanup_task (id, cleanup_business_key, object_key, status, run_after, created_at, updated_at) VALUES (?, ?, ?, 'PENDING', ?, ?, ?) ON DUPLICATE KEY UPDATE updated_at=VALUES(updated_at)",
-            UUID.randomUUID().toString(), "listing-upload:" + sessionId, key, Timestamp.from(Instant.now()),
-            Timestamp.from(Instant.now()), Timestamp.from(Instant.now())));
+        transactions.executeWithoutResult(status -> jdbc.update("INSERT INTO storage_cleanup_task (id, cleanup_business_key, object_key, status, run_after, created_at, updated_at) VALUES (?, ?, ?, 'PENDING', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE updated_at=CURRENT_TIMESTAMP(6)",
+            UUID.randomUUID().toString(), "listing-upload:" + sessionId, key));
     }
 
-    static byte[] readLimit(InputStream input, long limit) {
-        try (InputStream in = input; ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+    private void compensateFailure(UUID sessionId, String key) {
+        try { abortSession(sessionId); } catch (RuntimeException ignored) { }
+        try { createCleanupTask(sessionId, key); } catch (RuntimeException ignored) { }
+    }
+
+    private static Path readToTemporaryFile(InputStream input, long limit) throws IOException {
+        Path file = Files.createTempFile("campus-listing-", ".upload");
+        try (InputStream in = input; java.io.OutputStream out = Files.newOutputStream(file)) {
             byte[] buffer = new byte[8192];
             long total = 0;
             int read;
@@ -97,9 +115,10 @@ public class ObjectUploadCoordinator {
                 if (total > limit) throw new IllegalArgumentException("文件超过10MiB限制");
                 out.write(buffer, 0, read);
             }
-            return out.toByteArray();
-        } catch (IOException e) {
-            throw new IllegalArgumentException("读取媒体失败", e);
+            return file;
+        } catch (IOException | RuntimeException e) {
+            try { Files.deleteIfExists(file); } catch (IOException ignored) { }
+            throw e;
         }
     }
 
@@ -126,4 +145,6 @@ public class ObjectUploadCoordinator {
     private static final class SetTypes {
         private static final java.util.Set<String> ALLOWED = java.util.Set.of("image/jpeg", "image/png", "image/webp");
     }
+
+    public static class ListingNotFoundException extends RuntimeException { }
 }

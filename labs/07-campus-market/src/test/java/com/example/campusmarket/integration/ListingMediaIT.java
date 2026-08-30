@@ -30,6 +30,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ListingMediaIT extends SharedContainers {
     private static final byte[] PNG = Base64.getDecoder().decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+    private static final byte[] JPEG = Base64.getDecoder().decode(
+        "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAP//////////////////////////////////////////////////////////////////////////////////////2wBDAf//////////////////////////////////////////////////////////////////////////////////////wAARCAABAAEDASIAAhEBAxEB/8QAFQABAQAAAAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oADAMBAAIQAxAAAAH/AP/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAT8Af//Z");
+    private static final byte[] WEBP = Base64.getDecoder().decode(
+        "UklGRiIAAABXRUJQVlA4IBAAAADQAQCdASoBAAEAAUAmJaQAA3AA/v89WAAAAAA=");
 
     @LocalServerPort
     private int port;
@@ -67,7 +71,8 @@ class ListingMediaIT extends SharedContainers {
         String listingId = field(request("POST", "/api/listings", token,
             "{\"title\":\"草稿\",\"description\":\"描述\",\"category\":\"教材\",\"unitPriceFen\":100,\"availableQuantity\":1}", "application/json").body(), "id");
         assertThat(multipart("/api/listings/" + listingId + "/media", token, "cover.jpg", "image/png", PNG).statusCode()).isEqualTo(400);
-        assertThat(getBytes("/api/listings/" + listingId + "/media/" + UUID.randomUUID(), token(seller)).statusCode()).isEqualTo(404);
+        String mediaId = field(multipart("/api/listings/" + listingId + "/media", token, "cover.png", "image/png", PNG).body(), "id");
+        assertThat(getBytes("/api/listings/" + listingId + "/media/" + mediaId, token(createUser())).statusCode()).isEqualTo(404);
     }
 
     @Test
@@ -80,6 +85,32 @@ class ListingMediaIT extends SharedContainers {
         byte[] oversized = new byte[10 * 1024 * 1024 + 1];
         System.arraycopy(PNG, 0, oversized, 0, PNG.length);
         assertThat(multipart("/api/listings/" + listingId + "/media", token, "cover.png", "image/png", oversized).statusCode()).isEqualTo(400);
+    }
+
+    @Test
+    void acceptsExactlyTenMiBBasedOnBytes() throws Exception {
+        UUID seller = createUser();
+        String token = token(seller);
+        String listingId = field(request("POST", "/api/listings", token,
+            "{\"title\":\"边界\",\"description\":\"描述\",\"category\":\"教材\",\"unitPriceFen\":100,\"availableQuantity\":1}", "application/json").body(), "id");
+        byte[] exact = new byte[10 * 1024 * 1024];
+        System.arraycopy(PNG, 0, exact, 0, PNG.length);
+        assertThat(multipart("/api/listings/" + listingId + "/media", token, "cover.png", "image/png", exact).statusCode()).isEqualTo(201);
+    }
+
+    @Test
+    void acceptsJpegAndWebpBySignature() throws Exception {
+        UUID seller = createUser();
+        String token = token(seller);
+        String jpegListing = newListing(token);
+        String webpListing = newListing(token);
+        assertThat(multipart("/api/listings/" + jpegListing + "/media", token, "cover.jpg", "image/jpeg", JPEG).statusCode()).isEqualTo(201);
+        assertThat(multipart("/api/listings/" + webpListing + "/media", token, "cover.webp", "image/webp", WEBP).statusCode()).isEqualTo(201);
+    }
+
+    private String newListing(String token) throws Exception {
+        return field(request("POST", "/api/listings", token,
+            "{\"title\":\"图片\",\"description\":\"描述\",\"category\":\"教材\",\"unitPriceFen\":100,\"availableQuantity\":1}", "application/json").body(), "id");
     }
 
     private UUID createUser() {

@@ -60,6 +60,11 @@ public class MinioPrivateObjectStorage implements PrivateObjectStorage, MediaSto
     public void delete(String objectKey) {
         try {
             client.removeObject(RemoveObjectArgs.builder().bucket(bucket).object(objectKey).build());
+        } catch (ErrorResponseException e) {
+            if ("NoSuchKey".equals(e.errorResponse().code()) || "NoSuchObject".equals(e.errorResponse().code())) {
+                return;
+            }
+            throw new StorageUnavailableException("对象存储不可用", e);
         } catch (Exception e) {
             throw new StorageUnavailableException("对象存储不可用", e);
         }
