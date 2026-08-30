@@ -7,13 +7,31 @@ import org.junit.jupiter.api.Test;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+class SchemaCheckClauseNormalizationTest {
+    @Test
+    void normalizesMySqlNestedParenthesesWithoutLooseningTheRefundBound() {
+        String mysqlClause = "((reserved_refund_fen + successful_refund_fen) + amount_fen) <= paid_amount_fen";
+
+        assertThat(CheckClauseNormalizer.normalize(mysqlClause))
+            .isEqualTo("reserved_refund_fen+successful_refund_fen+amount_fen<=paid_amount_fen");
+        assertThat(CheckClauseNormalizer.normalize(
+            "((reserved_refund_fen + successful_refund_fen) + amount_fen) <= paid_amount_fen AND 1=1"))
+            .isNotEqualTo("reserved_refund_fen+successful_refund_fen+amount_fen<=paid_amount_fen");
+    }
+}
+
 class SchemaIT extends SharedContainers {
+    private static final String REFUND_TOTAL_CHECK =
+        "reserved_refund_fen+successful_refund_fen+amount_fen<=paid_amount_fen";
+
     @BeforeAll
     static void migrate() {
         Flyway.configure()
@@ -59,8 +77,8 @@ class SchemaIT extends SharedContainers {
         assertThat(indexNames("refund_order")).contains("idx_refund_order_amounts");
         assertThat(checkConstraintNames("refund_order")).contains("ck_refund_successful_le_paid",
             "ck_refund_reserved_le_paid", "ck_refund_amount_le_paid", "ck_refund_total_le_paid");
-        assertThat(checkClauses("refund_order")).anyMatch(clause -> clause.replace("`", "")
-            .replace(" ", "").toLowerCase().contains("reserved_refund_fen+successful_refund_fen+amount_fen<=paid_amount_fen"));
+        assertThat(checkClauses("refund_order")).anyMatch(clause ->
+            REFUND_TOTAL_CHECK.equals(normalizeCheckClause(clause)));
         assertThat(indexNames("integration_outbox")).contains("uk_integration_outbox_event_id");
         assertThat(indexNames("consumed_event")).contains("uk_consumed_event");
         assertThat(columnNames("integration_outbox")).contains("aggregate_version", "schema_version", "payload",
@@ -179,5 +197,122 @@ class SchemaIT extends SharedContainers {
             }
         }
         return clauses;
+    }
+
+    static String normalizeCheckClause(String clause) {
+        return CheckClauseNormalizer.normalize(clause);
+    }
+}
+
+final class CheckClauseNormalizer {
+    private CheckClauseNormalizer() {
+    }
+
+    static String normalize(String clause) {
+        if (clause == null) {
+            return "";
+        }
+        String compact = clause.replace("`", "")
+            .replaceAll("\\s+", "")
+            .toLowerCase(Locale.ROOT);
+        try {
+            return new CheckClauseParser(compact).parse();
+        } catch (IllegalArgumentException ignored) {
+            return compact;
+        }
+    }
+
+    private static final class CheckClauseParser {
+        private final String input;
+        private int position;
+
+        private CheckClauseParser(String input) {
+            this.input = input;
+        }
+
+        private String parse() {
+            Comparison comparison = parseComparison();
+            if (position != input.length()) {
+                throw invalid();
+            }
+            if (comparison.rightTerms.size() != 1) {
+                throw invalid();
+            }
+            return String.join("+", comparison.leftTerms) + "<=" + comparison.rightTerms.get(0);
+        }
+
+        private Comparison parseComparison() {
+            int start = position;
+            if (consume('(')) {
+                try {
+                    Comparison nested = parseComparison();
+                    require(')');
+                    if (position == input.length()) {
+                        return nested;
+                    }
+                } catch (IllegalArgumentException ignored) {
+                    // The opening parenthesis belongs to a grouped additive term.
+                }
+                position = start;
+            }
+            List<String> leftTerms = parseAdditive();
+            require("<=");
+            List<String> rightTerms = parseAdditive();
+            return new Comparison(leftTerms, rightTerms);
+        }
+
+        private List<String> parseAdditive() {
+            List<String> terms = new ArrayList<>();
+            terms.addAll(parsePrimary());
+            while (consume('+')) {
+                terms.addAll(parsePrimary());
+            }
+            return terms;
+        }
+
+        private List<String> parsePrimary() {
+            if (consume('(')) {
+                List<String> terms = parseAdditive();
+                require(')');
+                return terms;
+            }
+            int start = position;
+            while (position < input.length()
+                && (Character.isLetterOrDigit(input.charAt(position)) || input.charAt(position) == '_')) {
+                position++;
+            }
+            if (start == position) {
+                throw invalid();
+            }
+            return List.of(input.substring(start, position));
+        }
+
+        private boolean consume(char expected) {
+            if (position < input.length() && input.charAt(position) == expected) {
+                position++;
+                return true;
+            }
+            return false;
+        }
+
+        private void require(char expected) {
+            if (!consume(expected)) {
+                throw invalid();
+            }
+        }
+
+        private void require(String expected) {
+            if (!input.startsWith(expected, position)) {
+                throw invalid();
+            }
+            position += expected.length();
+        }
+
+        private IllegalArgumentException invalid() {
+            return new IllegalArgumentException("Unsupported CHECK expression at position " + position);
+        }
+
+        private record Comparison(List<String> leftTerms, List<String> rightTerms) {
+        }
     }
 }
