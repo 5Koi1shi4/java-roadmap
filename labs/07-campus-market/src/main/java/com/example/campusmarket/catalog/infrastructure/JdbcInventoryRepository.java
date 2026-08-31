@@ -36,6 +36,9 @@ public class JdbcInventoryRepository implements InventoryPort {
 
     private boolean change(UUID listingId, int quantity, String key, String reason, boolean restore) {
         validate(quantity, key);
+        var listingExists = jdbc.query("SELECT id FROM listing WHERE id = ? FOR UPDATE",
+            (org.springframework.jdbc.core.ResultSetExtractor<Boolean>) rs -> rs.next(), listingId.toString());
+        if (!listingExists) return false;
         var existing = jdbc.query("SELECT listing_id, reason, quantity_delta FROM inventory_movement WHERE business_key = ? FOR UPDATE",
             rs -> rs.next() ? new Existing(rs.getString(1), rs.getString(2), rs.getInt(3)) : null, key);
         int delta = restore ? quantity : -quantity;
@@ -60,7 +63,7 @@ public class JdbcInventoryRepository implements InventoryPort {
             ? "UPDATE listing SET available_quantity = available_quantity + ?, status = CASE WHEN status = 'SOLD_OUT' THEN 'ON_SALE' ELSE status END, version = version + 1, updated_at = ? WHERE id = ?"
             : (reason.equals("RETURN_QUARANTINE")
                 ? "UPDATE listing SET quarantined_quantity = quarantined_quantity + ?, version = version + 1, updated_at = ? WHERE id = ?"
-                : "UPDATE listing SET available_quantity = available_quantity - ?, status = CASE WHEN available_quantity - ? = 0 THEN 'SOLD_OUT' ELSE status END, version = version + 1, updated_at = ? WHERE id = ? AND status = 'ON_SALE' AND available_quantity >= ?");
+                : "UPDATE listing SET status = CASE WHEN available_quantity - ? = 0 THEN 'SOLD_OUT' ELSE status END, available_quantity = available_quantity - ?, version = version + 1, updated_at = ? WHERE id = ? AND status = 'ON_SALE' AND available_quantity >= ?");
         int changed;
         if (restore) {
             changed = jdbc.update(sql, quantity, Timestamp.from(Instant.now()), listingId.toString());

@@ -57,7 +57,7 @@ public class ObjectUploadCoordinator {
         }
     }
 
-    private ListingRepository.MediaRecord bindMediaAndComplete(UUID listingId, UUID sessionId, String key,
+    public ListingRepository.MediaRecord bindMediaAndComplete(UUID listingId, UUID sessionId, String key,
                                                                  String detected, long size) {
         return transactions.execute(status -> {
             jdbc.query("SELECT id FROM listing WHERE id = ? FOR UPDATE", rs -> {

@@ -57,9 +57,11 @@ public abstract class SharedContainers {
         DockerImageName.parse("ghcr.io/shopify/toxiproxy:2.12.0"))
         .withNetwork(NETWORK)
         .withNetworkAliases("toxiproxy");
+    protected static ToxiproxyContainer.ContainerProxy MINIO_PROXY;
 
     static {
         Startables.deepStart(Stream.of(MYSQL, REDIS, RABBITMQ, ELASTICSEARCH, MINIO, TOXIPROXY)).join();
+        MINIO_PROXY = TOXIPROXY.getProxy(MINIO, 9000);
     }
 
     private static ElasticsearchContainer elasticsearchContainer() {
@@ -83,6 +85,6 @@ public abstract class SharedContainers {
         registry.add("spring.rabbitmq.username", RABBITMQ::getAdminUsername);
         registry.add("spring.rabbitmq.password", RABBITMQ::getAdminPassword);
         registry.add("spring.elasticsearch.uris", ELASTICSEARCH::getHttpHostAddress);
-        registry.add("campus.market.storage.endpoint", () -> "http://" + MINIO.getHost() + ":" + MINIO.getMappedPort(9000));
+        registry.add("campus.market.storage.endpoint", () -> "http://" + MINIO_PROXY.getContainerIpAddress() + ":" + MINIO_PROXY.getProxyPort());
     }
 }

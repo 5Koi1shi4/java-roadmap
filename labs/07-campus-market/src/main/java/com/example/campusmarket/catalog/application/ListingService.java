@@ -45,8 +45,7 @@ public class ListingService {
 
     public ListingRepository.MediaRecord addMedia(UUID sellerId, UUID listingId, String filename,
                                                    String contentType, InputStream input) {
-        Listing listing = owned(sellerId, listingId);
-        if (listing.mediaIds().size() >= 9) throw new IllegalStateException("每个商品最多添加9张媒体");
+        owned(sellerId, listingId);
         return uploads.uploadListingMedia(listingId, sellerId, filename, contentType, input);
     }
 
