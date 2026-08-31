@@ -9,6 +9,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 
 import java.net.URI;
@@ -54,7 +55,7 @@ class ConcurrentOrderIT extends SharedContainers {
             var responses = requests.stream().map(future -> future.join()).toList();
             assertThat(responses.stream().filter(response -> response.statusCode() == 201).count()).isEqualTo(6);
             assertThat(responses.stream().filter(response -> response.statusCode() == 409).count()).isEqualTo(14);
-            assertThat(responses.get(0).headers().firstValue("Content-Type")).contains("application/json; charset=UTF-8");
+            assertJsonUtf8(responses.get(0));
             assertThat(jdbc.queryForObject("SELECT available_quantity FROM listing WHERE id=?", Integer.class, listing.toString())).isZero();
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM trade_order WHERE listing_id=?", Integer.class, listing.toString())).isEqualTo(6);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM inventory_movement WHERE listing_id=? AND order_id IS NOT NULL", Integer.class, listing.toString())).isEqualTo(6);
@@ -78,7 +79,7 @@ class ConcurrentOrderIT extends SharedContainers {
         HttpResponse<String> conflict = post(token, listing, 2, key);
         assertThat(first.statusCode()).isEqualTo(201);
         assertThat(replay.statusCode()).isEqualTo(201);
-        assertThat(replay.headers().firstValue("Content-Type")).contains("application/json; charset=UTF-8");
+        assertJsonUtf8(replay);
         assertThat(replay.body().getBytes(StandardCharsets.UTF_8)).containsExactly(first.body().getBytes(StandardCharsets.UTF_8));
         assertThat(conflict.statusCode()).isEqualTo(409);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM trade_order WHERE listing_id=?", Integer.class, listing.toString())).isEqualTo(1);
@@ -136,5 +137,12 @@ class ConcurrentOrderIT extends SharedContainers {
 
     private String token(UUID user) {
         return jwtService.issue(new AuthenticatedUser(user, Set.of("ROLE_USER")));
+    }
+
+    private static void assertJsonUtf8(HttpResponse<?> response) {
+        String contentType = response.headers().firstValue("Content-Type").orElseThrow();
+        MediaType mediaType = MediaType.parseMediaType(contentType);
+        assertThat(mediaType.isCompatibleWith(MediaType.APPLICATION_JSON)).isTrue();
+        assertThat(mediaType.getCharset()).isEqualTo(StandardCharsets.UTF_8);
     }
 }
