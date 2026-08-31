@@ -10,11 +10,10 @@ import io.minio.PutObjectArgs;
 import io.minio.RemoveObjectArgs;
 import io.minio.errors.ErrorResponseException;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
 import org.springframework.stereotype.Component;
 
 import java.io.InputStream;
+import java.time.Duration;
 
 @Component
 public class MinioPrivateObjectStorage implements PrivateObjectStorage, MediaStorage {
@@ -22,13 +21,34 @@ public class MinioPrivateObjectStorage implements PrivateObjectStorage, MediaSto
     private final String bucket;
     private volatile boolean bucketReady;
 
+    private static final Duration MAX_CONNECT_TIMEOUT = Duration.ofSeconds(10);
+    private static final Duration MAX_READ_TIMEOUT = Duration.ofSeconds(30);
+    private static final Duration MAX_WRITE_TIMEOUT = Duration.ofSeconds(30);
+    private static final Duration MAX_CALL_TIMEOUT = Duration.ofSeconds(45);
+
     public MinioPrivateObjectStorage(
         @Value("${campus.market.storage.endpoint:http://localhost:9000}") String endpoint,
         @Value("${campus.market.storage.access-key:minioadmin}") String accessKey,
         @Value("${campus.market.storage.secret-key:minioadmin-local}") String secretKey,
-        @Value("${campus.market.storage.bucket:campus-market}") String bucket) {
-        this.client = MinioClient.builder().endpoint(endpoint).credentials(accessKey, secretKey).build();
+        @Value("${campus.market.storage.bucket:campus-market}") String bucket,
+        @Value("${campus.market.storage.connect-timeout:3s}") Duration connectTimeout,
+        @Value("${campus.market.storage.read-timeout:10s}") Duration readTimeout,
+        @Value("${campus.market.storage.write-timeout:10s}") Duration writeTimeout,
+        @Value("${campus.market.storage.call-timeout:15s}") Duration callTimeout) {
+        okhttp3.OkHttpClient httpClient = new okhttp3.OkHttpClient.Builder()
+            .connectTimeout(bounded(connectTimeout, MAX_CONNECT_TIMEOUT))
+            .readTimeout(bounded(readTimeout, MAX_READ_TIMEOUT))
+            .writeTimeout(bounded(writeTimeout, MAX_WRITE_TIMEOUT))
+            .callTimeout(bounded(callTimeout, MAX_CALL_TIMEOUT))
+            .build();
+        this.client = MinioClient.builder().endpoint(endpoint).credentials(accessKey, secretKey)
+            .httpClient(httpClient).build();
         this.bucket = bucket;
+    }
+
+    private static Duration bounded(Duration configured, Duration maximum) {
+        if (configured == null || configured.isZero() || configured.isNegative()) return maximum;
+        return configured.compareTo(maximum) > 0 ? maximum : configured;
     }
 
     @Override

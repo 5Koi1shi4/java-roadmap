@@ -12,8 +12,8 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
-import org.springframework.boot.test.mock.mockito.SpyBean;
-import com.example.campusmarket.storage.ObjectUploadCoordinator;
+import org.springframework.boot.test.mock.mockito.MockBean;
+import com.example.campusmarket.storage.UploadBindingHook;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -46,7 +46,7 @@ class ListingMediaIT extends SharedContainers {
     private int port;
     @Autowired private JdbcTemplate jdbc;
     @Autowired private JwtService jwtService;
-    @SpyBean private ObjectUploadCoordinator coordinator;
+    @MockBean private UploadBindingHook bindingHook;
     private final HttpClient client = HttpClient.newHttpClient();
 
     @Test
@@ -79,6 +79,8 @@ class ListingMediaIT extends SharedContainers {
         String listingId = field(request("POST", "/api/listings", token,
             "{\"title\":\"草稿\",\"description\":\"描述\",\"category\":\"教材\",\"unitPriceFen\":100,\"availableQuantity\":1}", "application/json").body(), "id");
         assertThat(multipart("/api/listings/" + listingId + "/media", token, "cover.jpg", "image/png", PNG).statusCode()).isEqualTo(400);
+        assertThat(multipart("/api/listings/" + listingId + "/media", token, "cover.png", "image/png",
+            "not-a-png".getBytes(StandardCharsets.UTF_8)).statusCode()).isEqualTo(400);
         String mediaId = field(multipart("/api/listings/" + listingId + "/media", token, "cover.png", "image/png", PNG).body(), "id");
         assertThat(getBytes("/api/listings/" + listingId + "/media/" + mediaId, token(createUser())).statusCode()).isEqualTo(404);
     }
@@ -110,7 +112,15 @@ class ListingMediaIT extends SharedContainers {
         int second = two.get(20, TimeUnit.SECONDS).statusCode();
         assertThat(java.util.List.of(first, second)).containsExactly(400, 400);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM listing_media WHERE listing_id=?", Integer.class, listingId)).isEqualTo(9);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM storage_cleanup_task WHERE cleanup_business_key LIKE 'listing-upload:%'", Integer.class)).isGreaterThanOrEqualTo(1);
+        var failedSessions = jdbc.query("SELECT id, object_key FROM object_upload_session WHERE submitted_by=? AND status='ABORTED' ORDER BY created_at DESC LIMIT 2",
+            (rs, rowNum) -> new String[]{rs.getString("id"), rs.getString("object_key")}, seller.toString());
+        assertThat(failedSessions).hasSize(2);
+        assertThat(failedSessions.get(0)[1]).isNotEqualTo(failedSessions.get(1)[1]);
+        for (String[] session : failedSessions) {
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM storage_cleanup_task WHERE cleanup_business_key=?", Integer.class,
+                "listing-upload:" + session[0])).isEqualTo(1);
+            assertThat(session[1]).doesNotContain(listingId, seller.toString(), "tenth-a.png", "tenth-b.png", "图片");
+        }
     }
 
     @Test
@@ -142,12 +152,15 @@ class ListingMediaIT extends SharedContainers {
         UUID seller = createUser();
         String token = token(seller);
         String listingId = newListing(token);
-        doThrow(new IllegalStateException("injected binding failure")).when(coordinator)
-            .bindMediaAndComplete(any(), any(), any(), any(), any(Long.class));
+        doThrow(new IllegalStateException("injected binding failure")).when(bindingHook)
+            .afterMediaInserted(any(), any());
         assertThat(multipart("/api/listings/" + listingId + "/media", token, "rollback.png", "image/png", PNG).statusCode()).isEqualTo(400);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM listing_media WHERE listing_id=?", Integer.class, listingId)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM object_upload_session WHERE purpose='LISTING_MEDIA' AND status='ABORTED'", Integer.class)).isGreaterThanOrEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM storage_cleanup_task WHERE cleanup_business_key LIKE 'listing-upload:%'", Integer.class)).isGreaterThanOrEqualTo(1);
+        String sessionId = jdbc.queryForObject("SELECT id FROM object_upload_session WHERE submitted_by=? ORDER BY created_at DESC LIMIT 1",
+            String.class, seller.toString());
+        assertThat(jdbc.queryForObject("SELECT status FROM object_upload_session WHERE id=?", String.class, sessionId)).isEqualTo("ABORTED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM storage_cleanup_task WHERE cleanup_business_key=?", Integer.class,
+            "listing-upload:" + sessionId)).isEqualTo(1);
     }
 
     @Test

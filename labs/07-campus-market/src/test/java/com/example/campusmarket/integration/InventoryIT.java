@@ -76,8 +76,65 @@ class InventoryIT extends SharedContainers {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM inventory_movement WHERE business_key='too-many'", Integer.class)).isZero();
     }
 
+    @Test
+    void restoreReturnsAvailableStockAndReopensSoldOutListing() {
+        UUID seller = UUID.randomUUID();
+        UUID listing = UUID.randomUUID();
+        insertListing(seller, listing, 1, "ON_SALE");
+
+        assertThat(inventory.deduct(listing, 1, "restore-order")).isTrue();
+        assertThat(counts(listing)).containsExactly(0, 0);
+        assertThat(status(listing)).isEqualTo("SOLD_OUT");
+        assertThat(inventory.restore(listing, 1, "restore-cancel")).isTrue();
+        assertThat(counts(listing)).containsExactly(1, 0);
+        assertThat(status(listing)).isEqualTo("ON_SALE");
+        assertThat(inventory.restore(listing, 1, "restore-cancel")).isTrue();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM inventory_movement WHERE listing_id=?", Integer.class, listing.toString())).isEqualTo(2);
+    }
+
+    @Test
+    void sameBusinessKeyAcrossListingsHasOneCommitAndExplicitConflict() throws Exception {
+        UUID seller = UUID.randomUUID();
+        UUID firstListing = UUID.randomUUID();
+        UUID secondListing = UUID.randomUUID();
+        insertListing(seller, firstListing, 1, "ON_SALE");
+        insertListing(seller, secondListing, 1, "ON_SALE");
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            var first = CompletableFuture.supplyAsync(() -> inventory.deduct(firstListing, 1, "cross-listing-key"), pool);
+            var second = CompletableFuture.supplyAsync(() -> inventory.deduct(secondListing, 1, "cross-listing-key"), pool);
+            int successful = 0;
+            var failures = new java.util.ArrayList<Throwable>();
+            for (var result : java.util.List.of(first, second)) {
+                try {
+                    if (result.get(20, TimeUnit.SECONDS)) successful++;
+                } catch (java.util.concurrent.ExecutionException e) {
+                    failures.add(e.getCause());
+                }
+            }
+            assertThat(successful).isEqualTo(1);
+            assertThat(failures).singleElement().isInstanceOf(IllegalArgumentException.class);
+            assertThat(jdbc.queryForObject("SELECT SUM(available_quantity) FROM listing WHERE id IN (?,?)", Integer.class,
+                firstListing.toString(), secondListing.toString())).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM inventory_movement WHERE business_key='cross-listing-key'", Integer.class)).isEqualTo(1);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
     private Integer[] counts(UUID listing) {
         return jdbc.queryForObject("SELECT available_quantity, quarantined_quantity FROM listing WHERE id=?",
             (rs, rowNum) -> new Integer[]{rs.getInt(1), rs.getInt(2)}, listing.toString());
+    }
+
+    private String status(UUID listing) {
+        return jdbc.queryForObject("SELECT status FROM listing WHERE id=?", String.class, listing.toString());
+    }
+
+    private void insertListing(UUID seller, UUID listing, int quantity, String status) {
+        jdbc.update("INSERT INTO campus_user (id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",
+            seller.toString(), seller + "@stu.example.edu.cn", "hash");
+        jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,quarantined_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?, ?,?,0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            listing.toString(), seller.toString(), "教材", "描述", "教材", 100, quantity, 0, status);
     }
 }

@@ -1,11 +1,11 @@
 package com.example.campusmarket.storage;
 
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import java.sql.Timestamp;
-import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -24,7 +24,7 @@ public class StorageCleanupScheduler {
 
     public int runOnce(int limit) {
         if (limit <= 0 || limit > 100) throw new IllegalArgumentException("批量大小必须在1到100之间");
-        List<Task> tasks = transactions.execute(status -> claimInternal(limit));
+        List<Task> tasks = claim(limit);
         int completed = 0;
         for (Task task : tasks) {
             try {
@@ -54,14 +54,36 @@ public class StorageCleanupScheduler {
             ON DUPLICATE KEY UPDATE updated_at=CURRENT_TIMESTAMP(6)
             """);
         jdbc.update("UPDATE object_upload_session SET status='EXPIRED', updated_at=CURRENT_TIMESTAMP(6) WHERE purpose='LISTING_MEDIA' AND status='OPEN' AND expires_at <= CURRENT_TIMESTAMP(6)");
-        jdbc.update("UPDATE storage_cleanup_task SET status='PENDING', owner_id=NULL, claim_token=NULL, lease_until=NULL, updated_at=CURRENT_TIMESTAMP(6) WHERE status='PROCESSING' AND lease_until <= CURRENT_TIMESTAMP(6)");
-        return jdbc.query("SELECT id, object_key FROM storage_cleanup_task WHERE status='PENDING' AND run_after <= CURRENT_TIMESTAMP(6) ORDER BY run_after LIMIT ? FOR UPDATE SKIP LOCKED",
-            (rs, rowNum) -> {
-                String id = rs.getString("id");
-                int n = jdbc.update("UPDATE storage_cleanup_task SET status='PROCESSING', owner_id=?, claim_token=?, lease_until=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 60 SECOND), attempt_count=attempt_count+1, updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='PENDING' AND run_after <= CURRENT_TIMESTAMP(6)",
-                    owner, token, id);
-                return n == 1 ? new Task(id, rs.getString("object_key"), owner, token) : null;
-            }, limit).stream().filter(java.util.Objects::nonNull).toList();
+        List<Candidate> candidates = jdbc.query("""
+            SELECT id, object_key FROM storage_cleanup_task
+            WHERE (status='PENDING' AND run_after <= CURRENT_TIMESTAMP(6))
+               OR (status='PROCESSING' AND lease_until <= CURRENT_TIMESTAMP(6))
+            ORDER BY id LIMIT ? FOR UPDATE SKIP LOCKED
+            """, (rs, rowNum) -> new Candidate(rs.getString("id"), rs.getString("object_key")), limit);
+        List<Task> claimed = new ArrayList<>(candidates.size());
+        for (Candidate candidate : candidates) {
+            int n = jdbc.update("""
+                UPDATE storage_cleanup_task SET status='PROCESSING', owner_id=?, claim_token=?
+                    , lease_until=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 60 SECOND)
+                    , attempt_count=attempt_count+1, updated_at=CURRENT_TIMESTAMP(6)
+                WHERE id=? AND ((status='PENDING' AND run_after <= CURRENT_TIMESTAMP(6))
+                    OR (status='PROCESSING' AND lease_until <= CURRENT_TIMESTAMP(6)))
+                """, owner, token, candidate.id());
+            if (n == 1) claimed.add(new Task(candidate.id(), candidate.objectKey(), owner, token));
+        }
+        return claimed;
+    }
+
+    private List<Task> claim(int limit) {
+        for (int attempt = 0; attempt < 2; attempt++) {
+            try {
+                List<Task> tasks = transactions.execute(status -> claimInternal(limit));
+                return tasks == null ? List.of() : tasks;
+            } catch (CannotAcquireLockException e) {
+                if (attempt == 1) return List.of();
+            }
+        }
+        return List.of();
     }
 
     protected void complete(Task task) {
@@ -74,5 +96,6 @@ public class StorageCleanupScheduler {
             failureClass, task.id(), task.owner(), task.token()));
     }
 
+    private record Candidate(String id, String objectKey) { }
     private record Task(String id, String objectKey, String owner, String token) { }
 }

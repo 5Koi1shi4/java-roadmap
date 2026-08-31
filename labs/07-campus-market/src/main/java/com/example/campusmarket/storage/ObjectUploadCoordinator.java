@@ -18,14 +18,14 @@ public class ObjectUploadCoordinator {
     private static final SecureRandom RANDOM = new SecureRandom();
     private final JdbcTemplate jdbc;
     private final PrivateObjectStorage storage;
-    private final ListingRepository listings;
+    private final UploadBindingHook bindingHook;
     private final TransactionTemplate transactions;
 
-    public ObjectUploadCoordinator(JdbcTemplate jdbc, PrivateObjectStorage storage, ListingRepository listings,
+    public ObjectUploadCoordinator(JdbcTemplate jdbc, PrivateObjectStorage storage, UploadBindingHook bindingHook,
                                    org.springframework.transaction.PlatformTransactionManager transactionManager) {
         this.jdbc = jdbc;
         this.storage = storage;
-        this.listings = listings;
+        this.bindingHook = bindingHook;
         this.transactions = new TransactionTemplate(transactionManager);
     }
 
@@ -57,7 +57,7 @@ public class ObjectUploadCoordinator {
         }
     }
 
-    public ListingRepository.MediaRecord bindMediaAndComplete(UUID listingId, UUID sessionId, String key,
+    private ListingRepository.MediaRecord bindMediaAndComplete(UUID listingId, UUID sessionId, String key,
                                                                  String detected, long size) {
         return transactions.execute(status -> {
             jdbc.query("SELECT id FROM listing WHERE id = ? FOR UPDATE", rs -> {
@@ -72,6 +72,7 @@ public class ObjectUploadCoordinator {
             int sortOrder = (max == null ? -1 : max) + 1;
             jdbc.update("INSERT INTO listing_media (id, listing_id, object_key, media_type, size_bytes, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(6))",
                 mediaId.toString(), listingId.toString(), key, detected, size, sortOrder);
+            bindingHook.afterMediaInserted(sessionId, mediaId);
             int completed = jdbc.update("UPDATE object_upload_session SET status='COMPLETED', updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='OPEN'",
                 sessionId.toString());
             if (completed != 1) throw new IllegalStateException("上传会话状态无效");
@@ -82,11 +83,6 @@ public class ObjectUploadCoordinator {
     protected void createSession(UUID id, UUID actorId, String key) {
         transactions.executeWithoutResult(status -> jdbc.update("INSERT INTO object_upload_session (id, submitted_by, purpose, object_key, status, expires_at, created_at, updated_at) VALUES (?, ?, 'LISTING_MEDIA', ?, 'OPEN', DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 1 HOUR), CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))",
             id.toString(), actorId.toString(), key));
-    }
-
-    protected void completeSession(UUID id) {
-        transactions.executeWithoutResult(status -> jdbc.update("UPDATE object_upload_session SET status='COMPLETED', updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='OPEN'",
-            id.toString()));
     }
 
     protected void abortSession(UUID id) {

@@ -1,37 +1,53 @@
 package com.example.campusmarket.catalog.infrastructure;
 
 import com.example.campusmarket.catalog.application.InventoryPort;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 @Repository
 public class JdbcInventoryRepository implements InventoryPort {
     private final JdbcTemplate jdbc;
+    private final TransactionTemplate transactions;
 
-    public JdbcInventoryRepository(JdbcTemplate jdbc) { this.jdbc = jdbc; }
+    public JdbcInventoryRepository(JdbcTemplate jdbc,
+                                   org.springframework.transaction.PlatformTransactionManager transactionManager) {
+        this.jdbc = jdbc;
+        this.transactions = new TransactionTemplate(transactionManager);
+    }
 
     @Override
-    @Transactional
     public boolean deduct(UUID listingId, int quantity, String businessKey) {
-        return change(listingId, quantity, businessKey, "ORDER_DEDUCT", false);
+        return execute(() -> change(listingId, quantity, businessKey, "ORDER_DEDUCT", false));
     }
 
     @Override
-    @Transactional
     public boolean restore(UUID listingId, int quantity, String businessKey) {
-        return change(listingId, quantity, businessKey, "ORDER_CANCEL_RESTORE", true);
+        return execute(() -> change(listingId, quantity, businessKey, "ORDER_CANCEL_RESTORE", true));
     }
 
     @Override
-    @Transactional
     public boolean quarantine(UUID listingId, int quantity, String businessKey) {
-        return change(listingId, quantity, businessKey, "RETURN_QUARANTINE", false);
+        return execute(() -> change(listingId, quantity, businessKey, "RETURN_QUARANTINE", false));
+    }
+
+    private boolean execute(Supplier<Boolean> operation) {
+        for (int attempt = 0; attempt < 2; attempt++) {
+            try {
+                Boolean result = transactions.execute(status -> operation.get());
+                return Boolean.TRUE.equals(result);
+            } catch (CannotAcquireLockException e) {
+                if (attempt == 1) throw e;
+            }
+        }
+        throw new IllegalStateException("库存事务未执行");
     }
 
     private boolean change(UUID listingId, int quantity, String key, String reason, boolean restore) {
