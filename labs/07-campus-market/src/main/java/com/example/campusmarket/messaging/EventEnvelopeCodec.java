@@ -18,8 +18,8 @@ public final class EventEnvelopeCodec {
         this(new ObjectMapper());
     }
 
-    public EventEnvelopeCodec(ObjectMapper ignored) {
-        this.objectMapper = new ObjectMapper()
+    public EventEnvelopeCodec(ObjectMapper mapper) {
+        this.objectMapper = Objects.requireNonNull(mapper, "ObjectMapper 不能为空").copy()
             .registerModule(new JavaTimeModule())
             .disable(com.fasterxml.jackson.databind.SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
             .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
@@ -40,7 +40,7 @@ public final class EventEnvelopeCodec {
     }
 
     public DomainEvent decode(byte[] jsonUtf8) {
-        Objects.requireNonNull(jsonUtf8, "事件 JSON 不能为空");
+        if (jsonUtf8 == null) throw new IllegalArgumentException("事件 JSON 不能为空");
         try {
             return objectMapper.readValue(jsonUtf8, DomainEvent.class);
         } catch (Exception e) {

@@ -2,11 +2,16 @@ package com.example.campusmarket.messaging;
 
 import org.springframework.amqp.core.Binding;
 import org.springframework.amqp.core.BindingBuilder;
+import org.springframework.amqp.core.Declarable;
+import org.springframework.amqp.core.Declarables;
 import org.springframework.amqp.core.DirectExchange;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.core.QueueBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /** 领域事件交换机与 durable quorum 队列。 */
 @Configuration
@@ -25,8 +30,22 @@ public class RabbitTopology {
     }
 
     @Bean
-    Binding campusMarketOrderEventBinding(Queue campusMarketOrderEventQueue,
+    Declarables campusMarketEventBindings(Queue campusMarketOrderEventQueue,
                                           DirectExchange campusMarketEventExchange) {
-        return BindingBuilder.bind(campusMarketOrderEventQueue).to(campusMarketEventExchange).with("ORDER_CREATED");
+        List<Declarable> bindings = new ArrayList<>();
+        for (String eventType : ALLOWED_EVENT_TYPES) {
+            bindings.add(BindingBuilder.bind(campusMarketOrderEventQueue)
+                .to(campusMarketEventExchange).with(eventType));
+        }
+        return new Declarables(bindings);
     }
+
+    private static final List<String> ALLOWED_EVENT_TYPES = List.of(
+        "LISTING_CREATED", "LISTING_UPDATED", "LISTING_PUBLISHED", "LISTING_OFF_SALE", "LISTING_SOLD_OUT",
+        "INVENTORY_CHANGED", "ORDER_CREATED", "ORDER_CANCELLED", "ORDER_PAID", "ORDER_HANDOFF_CONFIRMED",
+        "ORDER_RECEIPT_CONFIRMED", "ORDER_DISPUTED", "ORDER_REFUNDING_CANCEL", "ORDER_REFUNDED",
+        "ORDER_SETTLED", "PAYMENT_CREATED", "PAYMENT_SUCCEEDED", "PAYMENT_FAILED", "PAYMENT_CALLBACK_RECEIVED",
+        "REFUND_REQUESTED", "REFUND_SUCCEEDED", "REFUND_FAILED", "DISPUTE_CREATED", "DISPUTE_RESOLVED",
+        "WARRANTY_CASE_CREATED", "WARRANTY_RESOLVED", "SELLER_OBLIGATION_CREATED", "SELLER_OBLIGATION_FUNDED",
+        "SETTLEMENT_CREATED", "REVIEW_CREATED");
 }

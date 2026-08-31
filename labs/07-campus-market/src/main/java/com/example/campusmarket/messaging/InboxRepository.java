@@ -46,13 +46,20 @@ public class InboxRepository {
             ON DUPLICATE KEY UPDATE id=id
             """, UUID.randomUUID().toString(), consumerName, eventId.toString(), owner, token, micros);
 
+        jdbc.update("""
+            UPDATE consumed_event
+            SET status='FAILED', owner_id=NULL, claim_token=NULL, lease_until=NULL
+            WHERE consumer_name=? AND event_id=? AND status='PROCESSING'
+              AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count >= 3
+            """, consumerName, eventId.toString());
+
         int changed = jdbc.update("""
             UPDATE consumed_event
             SET status='PROCESSING', owner_id=?, claim_token=?,
                 lease_until=TIMESTAMPADD(MICROSECOND, ?, CURRENT_TIMESTAMP(6)),
                 attempt_count=attempt_count+1
             WHERE consumer_name=? AND event_id=? AND status='PROCESSING'
-              AND ((lease_until < CURRENT_TIMESTAMP(6)) OR (owner_id=? AND claim_token=?))
+              AND (((lease_until <= CURRENT_TIMESTAMP(6)) AND attempt_count < 3) OR (owner_id=? AND claim_token=?))
             """, owner, token, micros, consumerName, eventId.toString(), owner, token);
         if (changed == 1) {
             return Optional.of(new Claim(consumerName, eventId, owner, token, false));
@@ -115,7 +122,9 @@ public class InboxRepository {
         Objects.requireNonNull(duration, "租约不能为空");
         if (duration.isZero() || duration.isNegative()) throw new IllegalArgumentException("租约必须为正数");
         try {
-            return Math.addExact(Math.multiplyExact(duration.getSeconds(), 1_000_000L), duration.getNano() / 1_000L);
+            long micros = Math.addExact(Math.multiplyExact(duration.getSeconds(), 1_000_000L), duration.getNano() / 1_000L);
+            if (micros <= 0) throw new IllegalArgumentException("租约精度不足一微秒");
+            return micros;
         } catch (ArithmeticException e) {
             throw new IllegalArgumentException("租约溢出", e);
         }
@@ -123,7 +132,7 @@ public class InboxRepository {
 
     private static void requireConsumer(String value) {
         Objects.requireNonNull(value, "consumerName 不能为空");
-        if (value.isBlank() || value.length() > 100) throw new IllegalArgumentException("consumerName 无效");
+        if (value.isBlank() || value.length() > 62) throw new IllegalArgumentException("consumerName 无效");
     }
 
     public record Claim(String consumerName, UUID eventId, String ownerId, String claimToken,

@@ -5,6 +5,7 @@ import com.example.campusmarket.messaging.InboxRepository;
 import com.example.campusmarket.messaging.OutboxDispatcher;
 import com.example.campusmarket.messaging.OutboxRepository;
 import com.example.campusmarket.messaging.RabbitTopology;
+import com.example.campusmarket.messaging.EventEnvelopeCodec;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -25,7 +26,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.NONE)
+@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("local")
 class ReliableMessagingIT extends SharedContainers {
     @Autowired JdbcTemplate jdbc;
@@ -33,6 +34,7 @@ class ReliableMessagingIT extends SharedContainers {
     @Autowired InboxRepository inbox;
     @Autowired OutboxDispatcher dispatcher;
     @Autowired RabbitTemplate rabbitTemplate;
+    @Autowired EventEnvelopeCodec codec;
 
     @BeforeAll
     static void migrate() {
@@ -85,6 +87,8 @@ class ReliableMessagingIT extends SharedContainers {
         Message message = rabbitTemplate.receive(RabbitTopology.EVENT_QUEUE, 5_000);
         assertThat(message).isNotNull();
         assertThat(message.getMessageProperties().getMessageId()).isEqualTo(eventId.toString());
+        assertThat(codec.decode(message.getBody()).eventId()).isEqualTo(eventId);
+        assertThat(message.getMessageProperties().getContentEncoding()).isEqualTo("UTF-8");
     }
 
     @Test
@@ -114,6 +118,67 @@ class ReliableMessagingIT extends SharedContainers {
             })).isInstanceOf(IllegalStateException.class);
         assertThat(jdbc.queryForObject("SELECT status FROM consumed_event WHERE consumer_name=? AND event_id=?",
             String.class, "task6-rollback", eventId.toString())).isEqualTo("PROCESSING");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id=?", Integer.class,
+            "task6-derived")).isZero();
+    }
+
+    @Test
+    void inboxLeaseTakeoverFencesOldOwnerAndRejectsSubMicrosecondLease() {
+        UUID eventId = UUID.randomUUID();
+        InboxRepository.Claim old = inbox.claim("task6-fence", eventId, Duration.ofSeconds(1)).orElseThrow();
+        jdbc.update("UPDATE consumed_event SET lease_until=CURRENT_TIMESTAMP(6)-INTERVAL 1 MICROSECOND WHERE event_id=?",
+            eventId.toString());
+        InboxRepository.Claim current = inbox.claim("task6-fence", eventId, Duration.ofMinutes(1)).orElseThrow();
+
+        assertThat(inbox.complete("task6-fence", eventId, old.ownerId(), old.claimToken())).isZero();
+        assertThat(inbox.complete("task6-fence", eventId, current.ownerId(), current.claimToken())).isEqualTo(1);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> inbox.claim("task6-fence-small", UUID.randomUUID(),
+            Duration.ofNanos(1))).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void outboxRetryIsBoundedAtThreeAttemptsAndThenControlledFailed() {
+        UUID eventId = insertOutbox("task6-retry-" + UUID.randomUUID());
+        OutboxRepository.OutboxMessage first = outbox.claimBatch("task6-retry-a", 1, Duration.ofMinutes(1)).get(0);
+        outbox.releaseForRetry(eventId, first.ownerId(), first.claimToken(), Duration.ofMillis(1));
+        jdbc.update("UPDATE integration_outbox SET available_at=CURRENT_TIMESTAMP(6) WHERE event_id=?", eventId.toString());
+        OutboxRepository.OutboxMessage second = outbox.claimBatch("task6-retry-b", 1, Duration.ofMinutes(1)).get(0);
+        outbox.releaseForRetry(eventId, second.ownerId(), second.claimToken(), Duration.ofMillis(1));
+        jdbc.update("UPDATE integration_outbox SET available_at=CURRENT_TIMESTAMP(6) WHERE event_id=?", eventId.toString());
+        OutboxRepository.OutboxMessage third = outbox.claimBatch("task6-retry-c", 1, Duration.ofMinutes(1)).get(0);
+
+        assertThat(third.attemptCount()).isEqualTo(3);
+        assertThat(outbox.fail(eventId, third.ownerId(), third.claimToken(), "EXHAUSTED")).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT status FROM integration_outbox WHERE event_id=?", String.class,
+            eventId.toString())).isEqualTo("FAILED");
+    }
+
+    @Test
+    void successfulInboxBusinessAndCompletedShareTransactionWithDerivedOutbox() {
+        UUID eventId = UUID.randomUUID();
+        assertThat(inbox.process("task6-success", eventId, Duration.ofMinutes(1), claim -> jdbc.update("""
+            INSERT INTO integration_outbox (id,event_id,event_type,aggregate_id,aggregate_version,schema_version,
+                payload,status,attempt_count,available_at,created_at)
+            VALUES (?,?, 'ORDER_CREATED', ?,1,1,CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
+            """, UUID.randomUUID().toString(), UUID.randomUUID().toString(), "task6-success-derived",
+            "{\"orderId\":\"task6-success-derived\"}"))).isTrue();
+        assertThat(jdbc.queryForObject("SELECT status FROM consumed_event WHERE consumer_name=? AND event_id=?",
+            String.class, "task6-success", eventId.toString())).isEqualTo("COMPLETED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id=?", Integer.class,
+            "task6-success-derived")).isEqualTo(1);
+    }
+
+    @Test
+    void invalidOutboxEventTypeReachesPermanentFailedState() {
+        UUID eventId = insertOutbox("task6-bad-" + UUID.randomUUID());
+        jdbc.update("UPDATE integration_outbox SET event_type=? WHERE event_id=?",
+            "NOT_A_REAL_EVENT", eventId.toString());
+
+        assertThat(dispatcher.dispatchOnce(1)).isZero();
+        assertThat(jdbc.queryForObject("SELECT status FROM integration_outbox WHERE event_id=?", String.class,
+            eventId.toString())).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT failure_class FROM integration_outbox WHERE event_id=?", String.class,
+            eventId.toString())).isEqualTo("PERMANENT");
     }
 
     private UUID insertOutbox(String aggregateId) {

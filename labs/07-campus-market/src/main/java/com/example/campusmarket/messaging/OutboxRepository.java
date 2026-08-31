@@ -30,12 +30,18 @@ public class OutboxRepository {
         }
         long micros = leaseMicros(lease);
         List<OutboxMessage> claimed = new ArrayList<>();
+        jdbc.update("""
+            UPDATE integration_outbox
+            SET status='FAILED', failure_class='EXHAUSTED', owner_id=NULL, claim_token=NULL, lease_until=NULL
+            WHERE status='PUBLISHING' AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count >= 3
+            """);
         jdbc.query("""
-            SELECT id,event_id,event_type,aggregate_id,aggregate_version,schema_version,payload,
-                   owner_id,claim_token,lease_until
+            SELECT id,event_id,event_type,aggregate_id,aggregate_version,schema_version,payload,occurred_at,
+                   owner_id,claim_token,lease_until,attempt_count
             FROM integration_outbox
-            WHERE (status='NEW' AND available_at <= CURRENT_TIMESTAMP(6))
-               OR (status='PUBLISHING' AND lease_until < CURRENT_TIMESTAMP(6))
+            WHERE ((status='NEW' AND available_at <= CURRENT_TIMESTAMP(6))
+               OR (status='PUBLISHING' AND lease_until <= CURRENT_TIMESTAMP(6)))
+              AND attempt_count < 3
             ORDER BY available_at,id
             LIMIT ? FOR UPDATE SKIP LOCKED
             """, rs -> {
@@ -47,14 +53,14 @@ public class OutboxRepository {
                     SET status='PUBLISHING', owner_id=?, claim_token=?,
                         lease_until=TIMESTAMPADD(MICROSECOND, ?, CURRENT_TIMESTAMP(6)),
                         attempt_count=attempt_count+1
-                    WHERE id=? AND ((status='NEW' AND available_at <= CURRENT_TIMESTAMP(6))
-                        OR (status='PUBLISHING' AND lease_until < CURRENT_TIMESTAMP(6)))
+                    WHERE id=? AND (((status='NEW' AND available_at <= CURRENT_TIMESTAMP(6))
+                        OR (status='PUBLISHING' AND lease_until <= CURRENT_TIMESTAMP(6))) AND attempt_count < 3)
                     """, owner, token, micros, id.toString());
                 if (changed == 1) {
                     claimed.add(new OutboxMessage(id, eventId, rs.getString("event_type"),
                         rs.getString("aggregate_id"), rs.getLong("aggregate_version"),
-                        rs.getInt("schema_version"), rs.getString("payload"), owner, token,
-                        null));
+                        rs.getInt("schema_version"), rs.getString("payload"), rs.getTimestamp("occurred_at").toInstant(),
+                        owner, token, null, rs.getInt("attempt_count") + 1));
                 }
             }, limit);
         if (!claimed.isEmpty()) {
@@ -83,19 +89,6 @@ public class OutboxRepository {
             """, eventId.toString(), owner, claimToken);
     }
 
-    /** 兼容只持有 token 的调用方；随机 token 本身仍保证旧领取无法完成。 */
-    @Transactional
-    public int complete(UUID eventId, String claimToken) {
-        Objects.requireNonNull(eventId, "eventId 不能为空");
-        Objects.requireNonNull(claimToken, "claim token 不能为空");
-        return jdbc.update("""
-            UPDATE integration_outbox
-            SET status='PUBLISHED', published_at=CURRENT_TIMESTAMP(6),
-                owner_id=NULL, claim_token=NULL, lease_until=NULL
-            WHERE event_id=? AND status='PUBLISHING' AND claim_token=? AND owner_id IS NOT NULL
-            """, eventId.toString(), claimToken);
-    }
-
     @Transactional
     public int releaseForRetry(UUID eventId, String owner, String claimToken, Duration delay) {
         Objects.requireNonNull(eventId, "eventId 不能为空");
@@ -106,8 +99,23 @@ public class OutboxRepository {
             UPDATE integration_outbox
             SET status='NEW', owner_id=NULL, claim_token=NULL, lease_until=NULL,
                 available_at=TIMESTAMPADD(MICROSECOND, ?, CURRENT_TIMESTAMP(6))
-            WHERE event_id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=?
+            WHERE event_id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=? AND attempt_count < 3
             """, micros, eventId.toString(), owner, claimToken);
+    }
+
+    @Transactional
+    public int fail(UUID eventId, String owner, String claimToken, String failureClass) {
+        Objects.requireNonNull(eventId, "eventId 不能为空");
+        requireOwner(owner);
+        Objects.requireNonNull(claimToken, "claim token 不能为空");
+        if (!"PERMANENT".equals(failureClass) && !"EXHAUSTED".equals(failureClass)) {
+            throw new IllegalArgumentException("failureClass 无效");
+        }
+        return jdbc.update("""
+            UPDATE integration_outbox
+            SET status='FAILED', failure_class=?, owner_id=NULL, claim_token=NULL, lease_until=NULL
+            WHERE event_id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=?
+            """, failureClass, eventId.toString(), owner, claimToken);
     }
 
     private static long leaseMicros(Duration duration) {
@@ -131,8 +139,8 @@ public class OutboxRepository {
     }
 
     public record OutboxMessage(UUID id, UUID eventId, String eventType, String aggregateId,
-                                long aggregateVersion, int schemaVersion, String payloadJson,
-                                String ownerId, String claimToken, Instant leaseUntil) {
+                                long aggregateVersion, int schemaVersion, String payloadJson, Instant occurredAt,
+                                String ownerId, String claimToken, Instant leaseUntil, int attemptCount) {
         public OutboxMessage {
             Objects.requireNonNull(id, "id 不能为空");
             Objects.requireNonNull(eventId, "eventId 不能为空");
@@ -140,13 +148,15 @@ public class OutboxRepository {
             Objects.requireNonNull(aggregateId, "aggregateId 不能为空");
             if (aggregateVersion <= 0 || schemaVersion != 1) throw new IllegalArgumentException("事件版本无效");
             Objects.requireNonNull(payloadJson, "payload 不能为空");
+            Objects.requireNonNull(occurredAt, "occurredAt 不能为空");
             Objects.requireNonNull(ownerId, "owner 不能为空");
             Objects.requireNonNull(claimToken, "claim token 不能为空");
+            if (attemptCount <= 0) throw new IllegalArgumentException("attemptCount 无效");
         }
 
         private OutboxMessage withLeaseUntil(Instant value) {
             return new OutboxMessage(id, eventId, eventType, aggregateId, aggregateVersion,
-                schemaVersion, payloadJson, ownerId, claimToken, value);
+                schemaVersion, payloadJson, occurredAt, ownerId, claimToken, value, attemptCount);
         }
     }
 }

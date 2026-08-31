@@ -67,6 +67,18 @@ class EventEnvelopeCodecTest {
             .isInstanceOf(IllegalArgumentException.class);
     }
 
+    @Test
+    void rejectsNullJson() {
+        assertThatThrownBy(() -> codec.decode((byte[]) null)).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void rejectsUnknownEventTypeAtProtocolBoundary() {
+        String json = validJson().replace("ORDER_CREATED", "NOT_A_REAL_EVENT");
+
+        assertThatThrownBy(() -> codec.decode(json)).isInstanceOf(IllegalArgumentException.class);
+    }
+
     private String validJson() {
         return "{\"eventId\":\"00000000-0000-0000-0000-000000000001\","
             + "\"eventType\":\"ORDER_CREATED\",\"aggregateId\":\"order-1\","
