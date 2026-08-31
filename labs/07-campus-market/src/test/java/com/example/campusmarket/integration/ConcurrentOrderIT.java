@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
@@ -42,6 +43,9 @@ import static org.mockito.Mockito.reset;
 class ConcurrentOrderIT extends SharedContainers {
     @LocalServerPort private int port;
     @Autowired private JdbcTemplate jdbc;
+    /** Performance Schema 是服务端诊断表，业务用户不可读；仅在本测试使用容器配置的 root 观测连接。 */
+    private final JdbcTemplate lockObserver = new JdbcTemplate(
+        new DriverManagerDataSource(MYSQL.getJdbcUrl(), "root", MYSQL.getPassword()));
     @Autowired private JwtService jwtService;
     @Autowired private ObjectMapper objectMapper;
     @MockBean private com.example.campusmarket.order.application.OrderCreationHook orderCreationHook;
@@ -106,14 +110,36 @@ class ConcurrentOrderIT extends SharedContainers {
             CompletableFuture<HttpResponse<String>> secondRequest = CompletableFuture.supplyAsync(() -> post(token, listing, 1, key), pool);
             assertThat(secondLockAttempt.await(10, TimeUnit.SECONDS)).isTrue();
             await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
-                assertThat(jdbc.queryForObject("""
+                assertThat(lockObserver.queryForObject("""
                     SELECT COUNT(*)
                     FROM performance_schema.data_lock_waits w
-                    JOIN performance_schema.data_locks l
-                      ON l.ENGINE_LOCK_ID=w.REQUESTING_ENGINE_LOCK_ID
-                    WHERE l.OBJECT_SCHEMA=DATABASE() AND l.OBJECT_NAME='order_command'
-                      AND l.INDEX_NAME='uk_order_command_actor_key' AND l.LOCK_STATUS='WAITING'
-                    """, Long.class)).isGreaterThan(0L));
+                    JOIN performance_schema.data_locks requesting
+                      ON requesting.ENGINE='INNODB'
+                     AND requesting.ENGINE_LOCK_ID=w.REQUESTING_ENGINE_LOCK_ID
+                     AND requesting.ENGINE_TRANSACTION_ID=w.REQUESTING_ENGINE_TRANSACTION_ID
+                    JOIN performance_schema.data_locks blocking
+                      ON blocking.ENGINE='INNODB'
+                     AND blocking.ENGINE_LOCK_ID=w.BLOCKING_ENGINE_LOCK_ID
+                     AND blocking.ENGINE_TRANSACTION_ID=w.BLOCKING_ENGINE_TRANSACTION_ID
+                    WHERE requesting.OBJECT_SCHEMA=DATABASE()
+                      AND requesting.OBJECT_NAME='order_command'
+                      AND requesting.INDEX_NAME='uk_order_command_actor_key'
+                      AND requesting.LOCK_TYPE='RECORD'
+                      AND requesting.LOCK_STATUS='WAITING'
+                      AND blocking.OBJECT_SCHEMA=DATABASE()
+                      AND blocking.OBJECT_NAME='order_command'
+                      AND blocking.INDEX_NAME='uk_order_command_actor_key'
+                      AND blocking.LOCK_TYPE='RECORD'
+                      AND blocking.LOCK_STATUS='GRANTED'
+                      AND requesting.THREAD_ID <> blocking.THREAD_ID
+                      AND requesting.LOCK_DATA IS NOT NULL
+                      AND blocking.LOCK_DATA IS NOT NULL
+                      AND requesting.LOCK_DATA LIKE CONCAT('%', ?, '%')
+                      AND requesting.LOCK_DATA LIKE CONCAT('%', ?, '%')
+                      AND blocking.LOCK_DATA LIKE CONCAT('%', ?, '%')
+                      AND blocking.LOCK_DATA LIKE CONCAT('%', ?, '%')
+                    """, Long.class, buyer.toString(), key, buyer.toString(), key))
+                    .isGreaterThan(0L));
             assertThat(secondRequest.isDone()).as("第二请求释放首锁前仍应等待 command 行锁").isFalse();
             releaseFirst.countDown();
             CompletableFuture.allOf(firstRequest, secondRequest).get(15, TimeUnit.SECONDS);
