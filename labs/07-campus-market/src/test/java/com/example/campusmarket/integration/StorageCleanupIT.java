@@ -3,11 +3,14 @@ package com.example.campusmarket.integration;
 import com.example.campusmarket.CampusMarketApplication;
 import com.example.campusmarket.storage.PrivateObjectStorage;
 import com.example.campusmarket.storage.StorageCleanupScheduler;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
@@ -23,6 +26,15 @@ class StorageCleanupIT extends SharedContainers {
     @Autowired private JdbcTemplate jdbc;
     @Autowired private PrivateObjectStorage storage;
     @Autowired private StorageCleanupScheduler scheduler;
+    @Autowired private PlatformTransactionManager transactionManager;
+
+    @BeforeEach
+    void clearThisTestFixtures() {
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            jdbc.update("DELETE FROM storage_cleanup_task WHERE object_key LIKE 'cleanup-test/%' OR object_key LIKE 'cleanup-failure/%' OR object_key LIKE 'cleanup-concurrent/%' OR object_key LIKE 'expired-session/%'");
+            jdbc.update("DELETE FROM object_upload_session WHERE object_key LIKE 'expired-session/%'");
+        });
+    }
 
     @Test
     void expiredLeaseIsTakenOverAndStaleOwnerCannotComplete() {

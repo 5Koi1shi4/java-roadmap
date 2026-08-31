@@ -1,7 +1,7 @@
 package com.example.campusmarket.storage;
 
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.dao.CannotAcquireLockException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -58,7 +58,7 @@ public class StorageCleanupScheduler {
             SELECT id, object_key FROM storage_cleanup_task
             WHERE (status='PENDING' AND run_after <= CURRENT_TIMESTAMP(6))
                OR (status='PROCESSING' AND lease_until <= CURRENT_TIMESTAMP(6))
-            ORDER BY id LIMIT ? FOR UPDATE SKIP LOCKED
+            ORDER BY run_after, id LIMIT ? FOR UPDATE SKIP LOCKED
             """, (rs, rowNum) -> new Candidate(rs.getString("id"), rs.getString("object_key")), limit);
         List<Task> claimed = new ArrayList<>(candidates.size());
         for (Candidate candidate : candidates) {
@@ -79,7 +79,7 @@ public class StorageCleanupScheduler {
             try {
                 List<Task> tasks = transactions.execute(status -> claimInternal(limit));
                 return tasks == null ? List.of() : tasks;
-            } catch (CannotAcquireLockException e) {
+            } catch (PessimisticLockingFailureException e) {
                 if (attempt == 1) return List.of();
             }
         }

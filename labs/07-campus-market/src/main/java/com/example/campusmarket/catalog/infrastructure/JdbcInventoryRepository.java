@@ -1,8 +1,8 @@
 package com.example.campusmarket.catalog.infrastructure;
 
 import com.example.campusmarket.catalog.application.InventoryPort;
-import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -43,7 +43,7 @@ public class JdbcInventoryRepository implements InventoryPort {
             try {
                 Boolean result = transactions.execute(status -> operation.get());
                 return Boolean.TRUE.equals(result);
-            } catch (CannotAcquireLockException e) {
+            } catch (PessimisticLockingFailureException e) {
                 if (attempt == 1) throw e;
             }
         }

@@ -47,8 +47,13 @@ public class MinioPrivateObjectStorage implements PrivateObjectStorage, MediaSto
     }
 
     private static Duration bounded(Duration configured, Duration maximum) {
-        if (configured == null || configured.isZero() || configured.isNegative()) return maximum;
-        return configured.compareTo(maximum) > 0 ? maximum : configured;
+        if (configured == null || configured.isZero() || configured.isNegative()) {
+            throw new IllegalArgumentException("对象存储超时必须为正数");
+        }
+        if (configured.compareTo(maximum) > 0) {
+            throw new IllegalArgumentException("对象存储超时超过允许上限");
+        }
+        return configured;
     }
 
     @Override
