@@ -18,6 +18,7 @@ import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
+import java.util.Objects;
 
 @RestController
 @RequestMapping(path = "/api/orders", produces = "application/json; charset=UTF-8")
@@ -25,7 +26,7 @@ public class OrderController {
     private final CreateOrderService service;
 
     public OrderController(CreateOrderService service) {
-        this.service = service;
+        this.service = Objects.requireNonNull(service, "订单服务不能为空");
     }
 
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
@@ -39,7 +40,7 @@ public class OrderController {
 
     @ExceptionHandler(CreateOrderService.SelfPurchaseException.class)
     void selfPurchase(CreateOrderService.SelfPurchaseException exception, HttpServletResponse response) throws IOException {
-        writeError(response, HttpStatus.CONFLICT, "不能购买自己的商品");
+        writeError(response, HttpStatus.UNPROCESSABLE_ENTITY, "不能购买自己的商品");
     }
 
     @ExceptionHandler({CreateOrderService.StockConflictException.class, IdempotentCommandService.IdempotencyConflictException.class})

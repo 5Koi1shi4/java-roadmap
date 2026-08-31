@@ -11,6 +11,7 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.UUID;
 import java.util.function.Supplier;
+import java.util.Objects;
 
 @Repository
 public class JdbcInventoryRepository implements InventoryPort {
@@ -19,8 +20,8 @@ public class JdbcInventoryRepository implements InventoryPort {
 
     public JdbcInventoryRepository(JdbcTemplate jdbc,
                                    org.springframework.transaction.PlatformTransactionManager transactionManager) {
-        this.jdbc = jdbc;
-        this.transactions = new TransactionTemplate(transactionManager);
+        this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
+        this.transactions = new TransactionTemplate(Objects.requireNonNull(transactionManager, "事务管理器不能为空"));
     }
 
     @Override
@@ -60,11 +61,13 @@ public class JdbcInventoryRepository implements InventoryPort {
         var listingExists = jdbc.query("SELECT id FROM listing WHERE id = ? FOR UPDATE",
             (org.springframework.jdbc.core.ResultSetExtractor<Boolean>) rs -> rs.next(), listingId.toString());
         if (!listingExists) return false;
-        var existing = jdbc.query("SELECT listing_id, reason, quantity_delta FROM inventory_movement WHERE business_key = ? FOR UPDATE",
-            rs -> rs.next() ? new Existing(rs.getString(1), rs.getString(2), rs.getInt(3)) : null, key);
+        var existing = jdbc.query("SELECT listing_id, order_id, reason, quantity_delta FROM inventory_movement WHERE business_key = ? FOR UPDATE",
+            rs -> rs.next() ? new Existing(rs.getString(1), rs.getString(2), rs.getString(3), rs.getInt(4)) : null, key);
         int delta = restore ? quantity : -quantity;
         if (existing != null) {
-            if (!existing.listingId.equals(listingId.toString()) || !existing.reason.equals(reason) || existing.delta != delta) {
+            if (!existing.listingId.equals(listingId.toString())
+                || !Objects.equals(existing.orderId, orderId == null ? null : orderId.toString())
+                || !existing.reason.equals(reason) || existing.delta != delta) {
                 throw new IllegalArgumentException("库存业务键与请求不一致");
             }
             return true;
@@ -73,9 +76,11 @@ public class JdbcInventoryRepository implements InventoryPort {
             jdbc.update("INSERT INTO inventory_movement (id, business_key, listing_id, order_id, reason, quantity_delta, created_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(6))",
                 UUID.randomUUID().toString(), key, listingId.toString(), orderId == null ? null : orderId.toString(), reason, delta);
         } catch (DuplicateKeyException duplicate) {
-            var raced = jdbc.query("SELECT listing_id, reason, quantity_delta FROM inventory_movement WHERE business_key = ? FOR UPDATE",
-                rs -> rs.next() ? new Existing(rs.getString(1), rs.getString(2), rs.getInt(3)) : null, key);
-            if (raced == null || !raced.listingId.equals(listingId.toString()) || !raced.reason.equals(reason) || raced.delta != delta) {
+            var raced = jdbc.query("SELECT listing_id, order_id, reason, quantity_delta FROM inventory_movement WHERE business_key = ? FOR UPDATE",
+                rs -> rs.next() ? new Existing(rs.getString(1), rs.getString(2), rs.getString(3), rs.getInt(4)) : null, key);
+            if (raced == null || !raced.listingId.equals(listingId.toString())
+                || !Objects.equals(raced.orderId, orderId == null ? null : orderId.toString())
+                || !raced.reason.equals(reason) || raced.delta != delta) {
                 throw new IllegalArgumentException("库存业务键与请求不一致");
             }
             return true;
@@ -105,5 +110,5 @@ public class JdbcInventoryRepository implements InventoryPort {
         if (key == null || key.isBlank()) throw new IllegalArgumentException("库存业务键不能为空");
     }
 
-    private record Existing(String listingId, String reason, int delta) { }
+    private record Existing(String listingId, String orderId, String reason, int delta) { }
 }

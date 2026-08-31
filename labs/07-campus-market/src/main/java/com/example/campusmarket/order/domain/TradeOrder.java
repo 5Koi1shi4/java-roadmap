@@ -27,6 +27,9 @@ public final class TradeOrder {
         this.buyerId = Objects.requireNonNull(buyerId, "买家不能为空");
         this.sellerId = Objects.requireNonNull(sellerId, "卖家不能为空");
         this.snapshot = Objects.requireNonNull(snapshot, "商品快照不能为空");
+        if (!sellerId.equals(snapshot.sellerId())) {
+            throw new IllegalArgumentException("订单卖家与商品快照卖家不一致");
+        }
         if (buyerId.equals(sellerId)) {
             throw new IllegalArgumentException("不能购买自己的商品");
         }

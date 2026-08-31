@@ -28,6 +28,15 @@ class TradeOrderTest {
     }
 
     @Test
+    void rejectsSnapshotSellerMismatch() {
+        TradeOrder.ListingSnapshot snapshot = snapshot(UUID.randomUUID());
+
+        assertThatThrownBy(() -> TradeOrder.create(UUID.randomUUID(), BUYER_ID, SELLER_ID, snapshot, 1, NOW))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("卖家");
+    }
+
+    @Test
     void createsPendingPaymentOrderWithImmutableWarrantySnapshot() {
         TradeOrder.ListingSnapshot snapshot = snapshot(SELLER_ID);
 

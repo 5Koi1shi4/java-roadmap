@@ -122,6 +122,25 @@ class InventoryIT extends SharedContainers {
         }
     }
 
+    @Test
+    void sameBusinessKeyWithDifferentOrderIdIsRejected() {
+        UUID seller = UUID.randomUUID();
+        UUID buyer = UUID.randomUUID();
+        UUID listing = UUID.randomUUID();
+        insertUser(seller);
+        insertUser(buyer);
+        insertListing(seller, listing, 2, "ON_SALE");
+        insertOrder(buyer, seller, listing, UUID.randomUUID());
+        UUID firstOrder = UUID.randomUUID();
+        UUID secondOrder = UUID.randomUUID();
+        insertOrder(buyer, seller, listing, firstOrder);
+        insertOrder(buyer, seller, listing, secondOrder);
+
+        assertThat(inventory.deduct(listing, 1, "order-key-conflict", firstOrder)).isTrue();
+        assertThatThrownBy(() -> inventory.deduct(listing, 1, "order-key-conflict", secondOrder))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
     private Integer[] counts(UUID listing) {
         return jdbc.queryForObject("SELECT available_quantity, quarantined_quantity FROM listing WHERE id=?",
             (rs, rowNum) -> new Integer[]{rs.getInt(1), rs.getInt(2)}, listing.toString());
@@ -132,9 +151,21 @@ class InventoryIT extends SharedContainers {
     }
 
     private void insertListing(UUID seller, UUID listing, int quantity, String status) {
-        jdbc.update("INSERT INTO campus_user (id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",
-            seller.toString(), seller + "@stu.example.edu.cn", "hash");
+        insertUser(seller);
         jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,quarantined_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?, ?,?,0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
             listing.toString(), seller.toString(), "教材", "描述", "教材", 100, quantity, 0, status);
+    }
+
+    private void insertUser(UUID user) {
+        jdbc.update("INSERT INTO campus_user (id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",
+            user.toString(), user + "@stu.example.edu.cn", "hash");
+    }
+
+    private void insertOrder(UUID buyer, UUID seller, UUID listing, UUID order) {
+        jdbc.update("""
+            INSERT INTO trade_order (id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,
+                unit_price_fen,quantity,total_amount_fen,paid_amount_fen,status,version,created_at,updated_at)
+            VALUES (?,?,?,?,?,?,100,1,100,0,'PENDING_PAYMENT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
+            """, order.toString(), buyer.toString(), seller.toString(), listing.toString(), "教材", "描述");
     }
 }

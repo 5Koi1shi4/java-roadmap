@@ -47,8 +47,9 @@ public class CreateOrderService {
             listing.id(), listing.sellerId(), listing.title(), listing.description(), listing.category(),
             listing.unitPrice(), listing.warrantyTerm(), "SELLER_NON_HUMAN_FUNCTIONAL_FAILURE",
             listing.manufacturerWarrantyProofSnapshot(), listing.manufacturerWarrantyExpiresAt());
+        Instant dbNow = repository.currentDatabaseTime();
         TradeOrder order = TradeOrder.create(UUID.randomUUID(), buyerId, listing.sellerId(), snapshot,
-            command.quantity(), Instant.now());
+            command.quantity(), dbNow);
         repository.insertOrder(order);
         if (!inventory.deduct(listing.id(), order.quantity(), "order:" + order.id(), order.id())) {
             throw new StockConflictException();

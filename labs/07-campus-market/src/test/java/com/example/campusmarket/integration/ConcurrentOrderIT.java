@@ -3,6 +3,8 @@ package com.example.campusmarket.integration;
 import com.example.campusmarket.CampusMarketApplication;
 import com.example.campusmarket.identity.application.AuthenticatedUser;
 import com.example.campusmarket.identity.infrastructure.JwtService;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -16,9 +18,12 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.sql.Timestamp;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -36,6 +41,7 @@ class ConcurrentOrderIT extends SharedContainers {
     @LocalServerPort private int port;
     @Autowired private JdbcTemplate jdbc;
     @Autowired private JwtService jwtService;
+    @Autowired private ObjectMapper objectMapper;
     @MockBean private com.example.campusmarket.order.application.OrderCreationHook orderCreationHook;
     private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
 
@@ -74,15 +80,68 @@ class ConcurrentOrderIT extends SharedContainers {
         UUID listing = listing(seller, 2, 777, null);
         String token = token(buyer);
         String key = "same-key-" + UUID.randomUUID();
-        HttpResponse<String> first = post(token, listing, 1, key);
-        HttpResponse<String> replay = post(token, listing, 1, key);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        CompletableFuture<HttpResponse<String>> firstRequest = CompletableFuture.supplyAsync(() -> post(token, listing, 1, key), pool);
+        CompletableFuture<HttpResponse<String>> secondRequest = CompletableFuture.supplyAsync(() -> post(token, listing, 1, key), pool);
+        var concurrent = CompletableFuture.allOf(firstRequest, secondRequest);
+        concurrent.join();
+        var concurrentResponses = java.util.List.of(firstRequest.join(), secondRequest.join());
+        pool.shutdownNow();
+        HttpResponse<String> first = concurrentResponses.get(0);
+        HttpResponse<String> replay = concurrentResponses.get(1);
         HttpResponse<String> conflict = post(token, listing, 2, key);
-        assertThat(first.statusCode()).isEqualTo(201);
-        assertThat(replay.statusCode()).isEqualTo(201);
+        assertThat(concurrentResponses).allMatch(response -> response.statusCode() == 201);
         assertJsonUtf8(replay);
         assertThat(replay.body().getBytes(StandardCharsets.UTF_8)).containsExactly(first.body().getBytes(StandardCharsets.UTF_8));
         assertThat(conflict.statusCode()).isEqualTo(409);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM trade_order WHERE listing_id=?", Integer.class, listing.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM inventory_movement WHERE listing_id=?", Integer.class, listing.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='ORDER_CREATED' AND aggregate_id IN (SELECT id FROM trade_order WHERE listing_id=?)", Integer.class, listing.toString())).isEqualTo(1);
+    }
+
+    @Test
+    void rejectsSelfPurchaseWithUnprocessableEntity() {
+        UUID seller = user();
+        UUID listing = listing(seller, 1, 777, null);
+
+        HttpResponse<String> response = post(token(seller), listing, 1, "self-buy-" + UUID.randomUUID());
+
+        assertThat(response.statusCode()).isEqualTo(422);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM trade_order WHERE listing_id=?", Integer.class, listing.toString())).isZero();
+    }
+
+    @Test
+    void orderSnapshotAndOutboxRemainStableAfterListingChanges() throws Exception {
+        UUID seller = user();
+        UUID buyer = user();
+        Instant manufacturerExpiry = Instant.parse("2027-01-01T00:00:00Z");
+        UUID listing = listing(seller, 1, 1_200, 90, "proof-v1", manufacturerExpiry);
+        HttpResponse<String> response = post(token(buyer), listing, 1, "snapshot-" + UUID.randomUUID());
+        UUID orderId = UUID.fromString(objectMapper.readTree(response.body()).get("orderId").asText());
+
+        jdbc.update("UPDATE listing SET title=?,description=?,category=?,unit_price_fen=?,warranty_days=?,warranty_scope=?,manufacturer_warranty_proof_snapshot=?,manufacturer_warranty_expires_at=? WHERE id=?",
+            "改标题", "改描述", "改分类", 9_999, null, null, "proof-v2", Timestamp.from(Instant.parse("2028-01-01T00:00:00Z")), listing.toString());
+
+        var snapshot = jdbc.queryForMap("SELECT listing_title_snapshot,listing_description_snapshot,unit_price_fen,warranty_days,warranty_scope_snapshot,manufacturer_warranty_proof_snapshot,manufacturer_warranty_expires_at FROM trade_order WHERE id=?", orderId.toString());
+        assertThat(snapshot.get("listing_title_snapshot")).isEqualTo("高等数学");
+        assertThat(snapshot.get("listing_description_snapshot")).isEqualTo("九成新");
+        assertThat(snapshot.get("unit_price_fen")).isEqualTo(1_200L);
+        assertThat(snapshot.get("warranty_days")).isEqualTo(90);
+        assertThat(snapshot.get("warranty_scope_snapshot")).isEqualTo("SELLER_NON_HUMAN_FUNCTIONAL_FAILURE");
+        assertThat(snapshot.get("manufacturer_warranty_proof_snapshot")).isEqualTo("proof-v1");
+        assertThat(((Timestamp) snapshot.get("manufacturer_warranty_expires_at")).toInstant()).isEqualTo(manufacturerExpiry);
+
+        var envelope = jdbc.queryForMap("SELECT event_id,event_type,aggregate_id,aggregate_version,schema_version,payload FROM integration_outbox WHERE aggregate_id=?", orderId.toString());
+        assertThat(UUID.fromString((String) envelope.get("event_id"))).isNotNull();
+        assertThat(envelope.get("event_type")).isEqualTo("ORDER_CREATED");
+        assertThat(envelope.get("aggregate_id")).isEqualTo(orderId.toString());
+        assertThat(envelope.get("aggregate_version")).isEqualTo(1L);
+        assertThat(envelope.get("schema_version")).isEqualTo(1);
+        Map<String, Object> payload = objectMapper.readValue((String) envelope.get("payload"), new TypeReference<>() { });
+        assertThat(payload).containsEntry("orderId", orderId.toString())
+            .containsEntry("buyerId", buyer.toString()).containsEntry("sellerId", seller.toString())
+            .containsEntry("listingId", listing.toString()).containsEntry("quantity", 1)
+            .containsEntry("totalAmountFen", 1_200);
     }
 
     @Test
@@ -128,10 +187,16 @@ class ConcurrentOrderIT extends SharedContainers {
     }
 
     private UUID listing(UUID seller, int quantity, long unitPrice, Integer warrantyDays) {
+        return listing(seller, quantity, unitPrice, warrantyDays, null, null);
+    }
+
+    private UUID listing(UUID seller, int quantity, long unitPrice, Integer warrantyDays,
+                         String manufacturerProof, Instant manufacturerExpiresAt) {
         UUID id = UUID.randomUUID();
-        jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,quarantined_quantity,warranty_days,warranty_scope,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,0,?,?, 'ON_SALE',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+        jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,quarantined_quantity,warranty_days,warranty_scope,manufacturer_warranty_proof_snapshot,manufacturer_warranty_expires_at,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,0,?,?,?,?, 'ON_SALE',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
             id.toString(), seller.toString(), "高等数学", "九成新", "教材", unitPrice, quantity, warrantyDays,
-            warrantyDays == null ? null : "SELLER_NON_HUMAN_FUNCTIONAL_FAILURE");
+            warrantyDays == null ? null : "SELLER_NON_HUMAN_FUNCTIONAL_FAILURE", manufacturerProof,
+            manufacturerExpiresAt == null ? null : Timestamp.from(manufacturerExpiresAt));
         return id;
     }
 

@@ -61,6 +61,10 @@ public class JdbcOrderRepository {
             }, listingId.toString());
     }
 
+    public Instant currentDatabaseTime() {
+        return jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", (rs, rowNum) -> rs.getTimestamp(1).toInstant());
+    }
+
     public void insertOrder(TradeOrder order) {
         TradeOrder.ListingSnapshot snapshot = order.snapshot();
         jdbc.update("""
@@ -68,11 +72,12 @@ public class JdbcOrderRepository {
                 unit_price_fen,quantity,total_amount_fen,warranty_days,warranty_scope_snapshot,
                 manufacturer_warranty_proof_snapshot,manufacturer_warranty_expires_at,payment_deadline,
                 paid_amount_fen,status,version,created_at,updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP(6)+INTERVAL 15 MINUTE,0,?,0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,0,?,?)
             """, order.id().toString(), order.buyerId().toString(), order.sellerId().toString(), snapshot.listingId().toString(),
             snapshot.title(), snapshot.description(), snapshot.unitPrice().fen(), order.quantity(), order.totalAmount().fen(),
             snapshot.warrantyTerm().sellerWarrantyDays(), snapshot.warrantyScope(), snapshot.manufacturerWarrantyProof(),
-            timestamp(snapshot.manufacturerWarrantyExpiresAt()), order.status().name());
+            timestamp(snapshot.manufacturerWarrantyExpiresAt()), timestamp(order.paymentDeadline()), order.status().name(),
+            timestamp(order.createdAt()), timestamp(order.createdAt()));
     }
 
     public void insertOrderCreatedOutbox(TradeOrder order, ObjectMapper objectMapper) {
