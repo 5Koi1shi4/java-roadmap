@@ -98,9 +98,10 @@ public class JdbcOrderRepository {
         UUID eventId = UUID.randomUUID();
         jdbc.update("""
             INSERT INTO integration_outbox (id,event_id,event_type,aggregate_id,aggregate_version,schema_version,
-                payload,status,attempt_count,available_at,created_at)
-            VALUES (?,?, 'ORDER_CREATED', ?,1,1,CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
-            """, UUID.randomUUID().toString(), eventId.toString(), order.id().toString(), json);
+                occurred_at,payload,status,attempt_count,available_at,created_at)
+            VALUES (?,?, 'ORDER_CREATED', ?,1,1,?,CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
+            """, UUID.randomUUID().toString(), eventId.toString(), order.id().toString(),
+            timestamp(order.createdAt()), json);
     }
 
     public record CommandLock(UUID id, UUID orderId, byte[] requestHash, boolean completed, byte[] responseUtf8) {

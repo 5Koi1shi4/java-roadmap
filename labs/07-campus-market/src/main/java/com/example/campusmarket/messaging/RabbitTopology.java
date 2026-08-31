@@ -18,6 +18,8 @@ import java.util.List;
 public class RabbitTopology {
     public static final String EVENT_EXCHANGE = "campus.market.events";
     public static final String EVENT_QUEUE = "campus.market.events.order";
+    public static final String MANUAL_EXCHANGE = "campus.market.manual";
+    public static final String MANUAL_QUEUE = "campus.market.manual.failure";
 
     @Bean
     DirectExchange campusMarketEventExchange() {
@@ -25,8 +27,18 @@ public class RabbitTopology {
     }
 
     @Bean
+    DirectExchange campusMarketManualExchange() {
+        return new DirectExchange(MANUAL_EXCHANGE, true, false);
+    }
+
+    @Bean
     Queue campusMarketOrderEventQueue() {
         return QueueBuilder.durable(EVENT_QUEUE).quorum().build();
+    }
+
+    @Bean
+    Queue campusMarketManualQueue() {
+        return QueueBuilder.durable(MANUAL_QUEUE).quorum().build();
     }
 
     @Bean
@@ -38,6 +50,11 @@ public class RabbitTopology {
                 .to(campusMarketEventExchange).with(eventType));
         }
         return new Declarables(bindings);
+    }
+
+    @Bean
+    Binding campusMarketManualBinding(Queue campusMarketManualQueue, DirectExchange campusMarketManualExchange) {
+        return BindingBuilder.bind(campusMarketManualQueue).to(campusMarketManualExchange).with("FAILURE");
     }
 
     private static final List<String> ALLOWED_EVENT_TYPES = List.of(

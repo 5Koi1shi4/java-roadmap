@@ -74,6 +74,12 @@ class ReliableMessagingIT extends SharedContainers {
         OutboxRepository.OutboxMessage current = outbox.claimBatch("task6-new", 1, Duration.ofMinutes(1)).get(0);
 
         assertThat(outbox.complete(eventId, old.ownerId(), old.claimToken())).isZero();
+        assertThat(current.occurredAt()).isEqualTo(old.occurredAt());
+        assertThat(codec.encode(new com.example.campusmarket.shared.DomainEvent(old.eventId(), old.eventType(),
+            old.aggregateId(), old.aggregateVersion(), old.occurredAt(), old.schemaVersion(), codec.decodePayload(old.payloadJson()))))
+            .isEqualTo(codec.encode(new com.example.campusmarket.shared.DomainEvent(current.eventId(), current.eventType(),
+                current.aggregateId(), current.aggregateVersion(), current.occurredAt(), current.schemaVersion(),
+                codec.decodePayload(current.payloadJson()))));
         assertThat(outbox.complete(eventId, current.ownerId(), current.claimToken())).isEqualTo(1);
     }
 
@@ -88,6 +94,7 @@ class ReliableMessagingIT extends SharedContainers {
         assertThat(message).isNotNull();
         assertThat(message.getMessageProperties().getMessageId()).isEqualTo(eventId.toString());
         assertThat(codec.decode(message.getBody()).eventId()).isEqualTo(eventId);
+        assertThat(codec.decode(message.getBody()).occurredAt()).isEqualTo(Instant.parse("2026-08-30T01:02:03.123456Z"));
         assertThat(message.getMessageProperties().getContentEncoding()).isEqualTo("UTF-8");
     }
 
@@ -186,8 +193,9 @@ class ReliableMessagingIT extends SharedContainers {
         jdbc.update("""
             INSERT INTO integration_outbox (id,event_id,event_type,aggregate_id,aggregate_version,schema_version,
                 payload,status,attempt_count,available_at,created_at)
-            VALUES (?,?, 'ORDER_CREATED', ?,1,1,CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
+            VALUES (?,?, 'ORDER_CREATED', ?,1,1,?,CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
             """, UUID.randomUUID().toString(), eventId.toString(), aggregateId,
+            java.sql.Timestamp.from(Instant.parse("2026-08-30T01:02:03.123456Z")),
             "{\"orderId\":\"" + aggregateId + "\"}");
         return eventId;
     }

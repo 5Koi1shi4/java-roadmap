@@ -70,6 +70,7 @@ class EventEnvelopeCodecTest {
     @Test
     void rejectsNullJson() {
         assertThatThrownBy(() -> codec.decode((byte[]) null)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> codec.decode((String) null)).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

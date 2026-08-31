@@ -1,9 +1,9 @@
 package com.example.campusmarket.messaging;
 
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Propagation;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -14,7 +14,6 @@ import java.util.UUID;
 
 /** integration_outbox 的条件领取与 token fencing。 */
 @Repository
-@ConditionalOnBean(JdbcTemplate.class)
 public class OutboxRepository {
     private final JdbcTemplate jdbc;
 
@@ -103,7 +102,7 @@ public class OutboxRepository {
             """, micros, eventId.toString(), owner, claimToken);
     }
 
-    @Transactional
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
     public int fail(UUID eventId, String owner, String claimToken, String failureClass) {
         Objects.requireNonNull(eventId, "eventId 不能为空");
         requireOwner(owner);
@@ -111,6 +110,13 @@ public class OutboxRepository {
         if (!"PERMANENT".equals(failureClass) && !"EXHAUSTED".equals(failureClass)) {
             throw new IllegalArgumentException("failureClass 无效");
         }
+        jdbc.update("""
+            INSERT INTO manual_failure (id,source_type,source_id,consumer_name,failure_class,payload,status,created_at)
+            SELECT ?, 'OUTBOX', event_id, '', ?, payload, 'NEW', CURRENT_TIMESTAMP(6)
+            FROM integration_outbox
+            WHERE event_id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=?
+            ON DUPLICATE KEY UPDATE id=id
+            """, UUID.randomUUID().toString(), failureClass, eventId.toString(), owner, claimToken);
         return jdbc.update("""
             UPDATE integration_outbox
             SET status='FAILED', failure_class=?, owner_id=NULL, claim_token=NULL, lease_until=NULL

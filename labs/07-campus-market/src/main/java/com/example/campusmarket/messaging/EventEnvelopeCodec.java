@@ -5,12 +5,14 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.Objects;
 
 /** 可靠事件的严格 JSON 编解码器。 */
+@Component
 public final class EventEnvelopeCodec {
     private final ObjectMapper objectMapper;
 
@@ -49,7 +51,7 @@ public final class EventEnvelopeCodec {
     }
 
     public DomainEvent decode(String json) {
-        Objects.requireNonNull(json, "事件 JSON 不能为空");
+        if (json == null) throw new IllegalArgumentException("事件 JSON 不能为空");
         return decode(json.getBytes(StandardCharsets.UTF_8));
     }
 
