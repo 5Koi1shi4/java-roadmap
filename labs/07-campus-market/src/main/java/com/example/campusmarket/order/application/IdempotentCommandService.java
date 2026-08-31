@@ -36,6 +36,7 @@ public class IdempotentCommandService {
         Objects.requireNonNull(action, "下单动作不能为空");
         byte[] digest = requestDigest(command);
         hook.beforeCommand(actorId, idempotencyKey);
+        hook.beforeCommandLockAttempt(actorId, idempotencyKey);
         var commandLock = repository.lockOrCreateCommand(actorId, idempotencyKey, digest);
         hook.afterCommandLocked(actorId, idempotencyKey);
         if (!MessageDigest.isEqual(commandLock.requestHash(), digest)) {

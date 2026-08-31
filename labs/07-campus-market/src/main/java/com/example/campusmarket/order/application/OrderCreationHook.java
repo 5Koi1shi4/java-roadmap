@@ -6,6 +6,9 @@ import java.util.UUID;
 public interface OrderCreationHook {
     default void beforeCommand(UUID actorId, String idempotencyKey) { }
 
+    /** 仅用于测试在进入数据库命令锁尝试前建立可观测边界；生产实现保持空操作。 */
+    default void beforeCommandLockAttempt(UUID actorId, String idempotencyKey) { }
+
     default void afterCommandLocked(UUID actorId, String idempotencyKey) { }
 
     void afterInventoryDeducted(UUID orderId);

@@ -33,8 +33,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.awaitility.Awaitility.await;
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.reset;
 
 @SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
@@ -60,7 +60,7 @@ class ConcurrentOrderIT extends SharedContainers {
                 String key = "order-" + UUID.randomUUID();
                 requests.add(CompletableFuture.supplyAsync(() -> post(token, listing, 1, key), pool));
             }
-            var responses = requests.stream().map(future -> future.join()).toList();
+            var responses = requests.stream().map(ConcurrentOrderIT::awaitFuture).toList();
             assertThat(responses.stream().filter(response -> response.statusCode() == 201).count()).isEqualTo(6);
             assertThat(responses.stream().filter(response -> response.statusCode() == 409).count()).isEqualTo(14);
             assertJsonUtf8(responses.get(0));
@@ -72,6 +72,7 @@ class ConcurrentOrderIT extends SharedContainers {
             assertThat(jdbc.queryForObject("SELECT MIN(warranty_days) FROM trade_order WHERE listing_id=?", Integer.class, listing.toString())).isEqualTo(90);
         } finally {
             pool.shutdownNow();
+            assertThat(pool.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
         }
     }
 
@@ -84,14 +85,14 @@ class ConcurrentOrderIT extends SharedContainers {
         String key = "same-key-" + UUID.randomUUID();
         ExecutorService pool = Executors.newFixedThreadPool(2);
         CountDownLatch firstLocked = new CountDownLatch(1);
-        CountDownLatch secondEntered = new CountDownLatch(1);
         CountDownLatch releaseFirst = new CountDownLatch(1);
-        AtomicInteger beforeCalls = new AtomicInteger();
         AtomicInteger lockedCalls = new AtomicInteger();
+        CountDownLatch secondLockAttempt = new CountDownLatch(1);
+        AtomicInteger lockAttemptCalls = new AtomicInteger();
         org.mockito.Mockito.doAnswer(invocation -> {
-            if (beforeCalls.incrementAndGet() == 2) secondEntered.countDown();
+            if (lockAttemptCalls.incrementAndGet() == 2) secondLockAttempt.countDown();
             return null;
-        }).when(orderCreationHook).beforeCommand(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+        }).when(orderCreationHook).beforeCommandLockAttempt(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
         org.mockito.Mockito.doAnswer(invocation -> {
             if (lockedCalls.incrementAndGet() == 1) {
                 firstLocked.countDown();
@@ -99,25 +100,40 @@ class ConcurrentOrderIT extends SharedContainers {
             }
             return null;
         }).when(orderCreationHook).afterCommandLocked(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
-        CompletableFuture<HttpResponse<String>> firstRequest = CompletableFuture.supplyAsync(() -> post(token, listing, 1, key), pool);
-        assertThat(firstLocked.await(10, TimeUnit.SECONDS)).isTrue();
-        CompletableFuture<HttpResponse<String>> secondRequest = CompletableFuture.supplyAsync(() -> post(token, listing, 1, key), pool);
-        assertThat(secondEntered.await(10, TimeUnit.SECONDS)).isTrue();
-        releaseFirst.countDown();
-        var concurrent = CompletableFuture.allOf(firstRequest, secondRequest);
-        concurrent.join();
-        var concurrentResponses = java.util.List.of(firstRequest.join(), secondRequest.join());
-        pool.shutdownNow();
-        HttpResponse<String> first = concurrentResponses.get(0);
-        HttpResponse<String> replay = concurrentResponses.get(1);
-        HttpResponse<String> conflict = post(token, listing, 2, key);
-        assertThat(concurrentResponses).allMatch(response -> response.statusCode() == 201);
-        assertJsonUtf8(replay);
-        assertThat(replay.body().getBytes(StandardCharsets.UTF_8)).containsExactly(first.body().getBytes(StandardCharsets.UTF_8));
-        assertThat(conflict.statusCode()).isEqualTo(409);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM trade_order WHERE listing_id=?", Integer.class, listing.toString())).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM inventory_movement WHERE listing_id=?", Integer.class, listing.toString())).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='ORDER_CREATED' AND aggregate_id IN (SELECT id FROM trade_order WHERE listing_id=?)", Integer.class, listing.toString())).isEqualTo(1);
+        try {
+            CompletableFuture<HttpResponse<String>> firstRequest = CompletableFuture.supplyAsync(() -> post(token, listing, 1, key), pool);
+            assertThat(firstLocked.await(10, TimeUnit.SECONDS)).isTrue();
+            CompletableFuture<HttpResponse<String>> secondRequest = CompletableFuture.supplyAsync(() -> post(token, listing, 1, key), pool);
+            assertThat(secondLockAttempt.await(10, TimeUnit.SECONDS)).isTrue();
+            await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                assertThat(jdbc.queryForObject("""
+                    SELECT COUNT(*)
+                    FROM performance_schema.data_lock_waits w
+                    JOIN performance_schema.data_locks l
+                      ON l.ENGINE_LOCK_ID=w.REQUESTING_ENGINE_LOCK_ID
+                    WHERE l.OBJECT_SCHEMA=DATABASE() AND l.OBJECT_NAME='order_command'
+                      AND l.INDEX_NAME='uk_order_command_actor_key' AND l.LOCK_STATUS='WAITING'
+                    """, Long.class)).isGreaterThan(0L));
+            assertThat(secondRequest.isDone()).as("第二请求释放首锁前仍应等待 command 行锁").isFalse();
+            releaseFirst.countDown();
+            CompletableFuture.allOf(firstRequest, secondRequest).get(15, TimeUnit.SECONDS);
+            HttpResponse<String> first = firstRequest.get(5, TimeUnit.SECONDS);
+            HttpResponse<String> replay = secondRequest.get(5, TimeUnit.SECONDS);
+            HttpResponse<String> conflict = post(token, listing, 2, key);
+            assertThat(java.util.List.of(first, replay)).allMatch(response -> response.statusCode() == 201);
+            assertJsonUtf8(first);
+            assertJsonUtf8(replay);
+            assertThat(replay.body().getBytes(StandardCharsets.UTF_8)).containsExactly(first.body().getBytes(StandardCharsets.UTF_8));
+            assertThat(conflict.statusCode()).isEqualTo(409);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM order_command WHERE actor_id=? AND idempotency_key=?", Integer.class, buyer.toString(), key)).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM trade_order WHERE listing_id=?", Integer.class, listing.toString())).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM inventory_movement WHERE listing_id=?", Integer.class, listing.toString())).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='ORDER_CREATED' AND aggregate_id IN (SELECT id FROM trade_order WHERE listing_id=?)", Integer.class, listing.toString())).isEqualTo(1);
+        } finally {
+            releaseFirst.countDown();
+            pool.shutdownNow();
+            assertThat(pool.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+        }
     }
 
     @Test
@@ -172,13 +188,18 @@ class ConcurrentOrderIT extends SharedContainers {
         UUID listing = listing(seller, 1, 777, null);
         String token = token(buyer);
         String key = "rollback-key-" + UUID.randomUUID();
-        doThrow(new IllegalStateException("injected failure")).when(orderCreationHook).afterOrderCreatedOutbox(org.mockito.ArgumentMatchers.any());
+        java.util.concurrent.atomic.AtomicReference<UUID> injectedOrderId = new java.util.concurrent.atomic.AtomicReference<>();
+        org.mockito.Mockito.doAnswer(invocation -> {
+            injectedOrderId.set(invocation.getArgument(0, UUID.class));
+            throw new IllegalStateException("injected failure");
+        }).when(orderCreationHook).afterOrderCreatedOutbox(org.mockito.ArgumentMatchers.any());
         try {
             assertThat(post(token, listing, 1, key).statusCode()).isEqualTo(500);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM order_command WHERE actor_id=? AND idempotency_key=?", Integer.class, buyer.toString(), key)).isZero();
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM trade_order WHERE listing_id=?", Integer.class, listing.toString())).isZero();
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM inventory_movement WHERE listing_id=?", Integer.class, listing.toString())).isZero();
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id IN (SELECT id FROM trade_order WHERE listing_id=?)", Integer.class, listing.toString())).isZero();
+            assertThat(injectedOrderId.get()).as("故障注入必须捕获已写入 outbox 的 orderId").isNotNull();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id=?", Integer.class, injectedOrderId.get().toString())).isZero();
             assertThat(jdbc.queryForObject("SELECT available_quantity FROM listing WHERE id=?", Integer.class, listing.toString())).isEqualTo(1);
         } finally {
             reset(orderCreationHook);
@@ -234,5 +255,13 @@ class ConcurrentOrderIT extends SharedContainers {
         MediaType mediaType = MediaType.parseMediaType(contentType);
         assertThat(mediaType.isCompatibleWith(MediaType.APPLICATION_JSON)).isTrue();
         assertThat(mediaType.getCharset()).isEqualTo(StandardCharsets.UTF_8);
+    }
+
+    private static <T> T awaitFuture(CompletableFuture<T> future) {
+        try {
+            return future.get(45, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            throw new AssertionError("异步请求未在限定时间内完成", e);
+        }
     }
 }
