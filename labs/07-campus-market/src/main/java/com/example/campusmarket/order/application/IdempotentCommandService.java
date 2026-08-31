@@ -15,11 +15,13 @@ import java.util.function.Supplier;
 @Service
 public class IdempotentCommandService {
     private final com.example.campusmarket.order.infrastructure.JdbcOrderRepository repository;
+    private final OrderCreationHook hook;
 
     public IdempotentCommandService(com.example.campusmarket.order.infrastructure.JdbcOrderRepository repository,
-                                    ObjectMapper objectMapper) {
+                                    ObjectMapper objectMapper, OrderCreationHook hook) {
         this.repository = Objects.requireNonNull(repository, "订单仓储不能为空");
         Objects.requireNonNull(objectMapper, "JSON序列化器不能为空");
+        this.hook = Objects.requireNonNull(hook, "订单钩子不能为空");
     }
 
     @Transactional
@@ -33,7 +35,9 @@ public class IdempotentCommandService {
         Objects.requireNonNull(command, "下单命令不能为空");
         Objects.requireNonNull(action, "下单动作不能为空");
         byte[] digest = requestDigest(command);
+        hook.beforeCommand(actorId, idempotencyKey);
         var commandLock = repository.lockOrCreateCommand(actorId, idempotencyKey, digest);
+        hook.afterCommandLocked(actorId, idempotencyKey);
         if (!MessageDigest.isEqual(commandLock.requestHash(), digest)) {
             throw new IdempotencyConflictException();
         }

@@ -56,6 +56,7 @@ public class CreateOrderService {
         }
         hook.afterInventoryDeducted(order.id());
         repository.insertOrderCreatedOutbox(order, objectMapper);
+        hook.afterOrderCreatedOutbox(order.id());
         byte[] response = response(order);
         return new CreateOrderResult(201, response, order.id());
     }

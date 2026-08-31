@@ -29,7 +29,9 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.doThrow;
@@ -81,8 +83,27 @@ class ConcurrentOrderIT extends SharedContainers {
         String token = token(buyer);
         String key = "same-key-" + UUID.randomUUID();
         ExecutorService pool = Executors.newFixedThreadPool(2);
+        CountDownLatch firstLocked = new CountDownLatch(1);
+        CountDownLatch secondEntered = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        AtomicInteger beforeCalls = new AtomicInteger();
+        AtomicInteger lockedCalls = new AtomicInteger();
+        org.mockito.Mockito.doAnswer(invocation -> {
+            if (beforeCalls.incrementAndGet() == 2) secondEntered.countDown();
+            return null;
+        }).when(orderCreationHook).beforeCommand(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+        org.mockito.Mockito.doAnswer(invocation -> {
+            if (lockedCalls.incrementAndGet() == 1) {
+                firstLocked.countDown();
+                releaseFirst.await(10, TimeUnit.SECONDS);
+            }
+            return null;
+        }).when(orderCreationHook).afterCommandLocked(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
         CompletableFuture<HttpResponse<String>> firstRequest = CompletableFuture.supplyAsync(() -> post(token, listing, 1, key), pool);
+        assertThat(firstLocked.await(10, TimeUnit.SECONDS)).isTrue();
         CompletableFuture<HttpResponse<String>> secondRequest = CompletableFuture.supplyAsync(() -> post(token, listing, 1, key), pool);
+        assertThat(secondEntered.await(10, TimeUnit.SECONDS)).isTrue();
+        releaseFirst.countDown();
         var concurrent = CompletableFuture.allOf(firstRequest, secondRequest);
         concurrent.join();
         var concurrentResponses = java.util.List.of(firstRequest.join(), secondRequest.join());
@@ -151,12 +172,13 @@ class ConcurrentOrderIT extends SharedContainers {
         UUID listing = listing(seller, 1, 777, null);
         String token = token(buyer);
         String key = "rollback-key-" + UUID.randomUUID();
-        doThrow(new IllegalStateException("injected failure")).when(orderCreationHook).afterInventoryDeducted(org.mockito.ArgumentMatchers.any());
+        doThrow(new IllegalStateException("injected failure")).when(orderCreationHook).afterOrderCreatedOutbox(org.mockito.ArgumentMatchers.any());
         try {
             assertThat(post(token, listing, 1, key).statusCode()).isEqualTo(500);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM order_command WHERE actor_id=? AND idempotency_key=?", Integer.class, buyer.toString(), key)).isZero();
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM trade_order WHERE listing_id=?", Integer.class, listing.toString())).isZero();
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM inventory_movement WHERE listing_id=?", Integer.class, listing.toString())).isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id IN (SELECT id FROM trade_order WHERE listing_id=?)", Integer.class, listing.toString())).isZero();
             assertThat(jdbc.queryForObject("SELECT available_quantity FROM listing WHERE id=?", Integer.class, listing.toString())).isEqualTo(1);
         } finally {
             reset(orderCreationHook);
@@ -164,6 +186,9 @@ class ConcurrentOrderIT extends SharedContainers {
         HttpResponse<String> retry = post(token, listing, 1, key);
         assertThat(retry.statusCode()).isEqualTo(201);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM order_command WHERE actor_id=? AND idempotency_key=?", Integer.class, buyer.toString(), key)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM trade_order WHERE listing_id=?", Integer.class, listing.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM inventory_movement WHERE listing_id=? AND order_id IS NOT NULL", Integer.class, listing.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='ORDER_CREATED' AND aggregate_id IN (SELECT id FROM trade_order WHERE listing_id=?)", Integer.class, listing.toString())).isEqualTo(1);
     }
 
     private HttpResponse<String> post(String token, UUID listing, int quantity, String key) {
