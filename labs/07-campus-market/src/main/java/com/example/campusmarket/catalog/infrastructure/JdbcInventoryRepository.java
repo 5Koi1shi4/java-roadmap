@@ -25,17 +25,22 @@ public class JdbcInventoryRepository implements InventoryPort {
 
     @Override
     public boolean deduct(UUID listingId, int quantity, String businessKey) {
-        return execute(() -> change(listingId, quantity, businessKey, "ORDER_DEDUCT", false));
+        return deduct(listingId, quantity, businessKey, null);
+    }
+
+    @Override
+    public boolean deduct(UUID listingId, int quantity, String businessKey, UUID orderId) {
+        return execute(() -> change(listingId, quantity, businessKey, "ORDER_DEDUCT", false, orderId));
     }
 
     @Override
     public boolean restore(UUID listingId, int quantity, String businessKey) {
-        return execute(() -> change(listingId, quantity, businessKey, "ORDER_CANCEL_RESTORE", true));
+        return execute(() -> change(listingId, quantity, businessKey, "ORDER_CANCEL_RESTORE", true, null));
     }
 
     @Override
     public boolean quarantine(UUID listingId, int quantity, String businessKey) {
-        return execute(() -> change(listingId, quantity, businessKey, "RETURN_QUARANTINE", false));
+        return execute(() -> change(listingId, quantity, businessKey, "RETURN_QUARANTINE", false, null));
     }
 
     private boolean execute(Supplier<Boolean> operation) {
@@ -50,7 +55,7 @@ public class JdbcInventoryRepository implements InventoryPort {
         throw new IllegalStateException("库存事务未执行");
     }
 
-    private boolean change(UUID listingId, int quantity, String key, String reason, boolean restore) {
+    private boolean change(UUID listingId, int quantity, String key, String reason, boolean restore, UUID orderId) {
         validate(quantity, key);
         var listingExists = jdbc.query("SELECT id FROM listing WHERE id = ? FOR UPDATE",
             (org.springframework.jdbc.core.ResultSetExtractor<Boolean>) rs -> rs.next(), listingId.toString());
@@ -65,8 +70,8 @@ public class JdbcInventoryRepository implements InventoryPort {
             return true;
         }
         try {
-            jdbc.update("INSERT INTO inventory_movement (id, business_key, listing_id, reason, quantity_delta, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                UUID.randomUUID().toString(), key, listingId.toString(), reason, delta, Timestamp.from(Instant.now()));
+            jdbc.update("INSERT INTO inventory_movement (id, business_key, listing_id, order_id, reason, quantity_delta, created_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP(6))",
+                UUID.randomUUID().toString(), key, listingId.toString(), orderId == null ? null : orderId.toString(), reason, delta);
         } catch (DuplicateKeyException duplicate) {
             var raced = jdbc.query("SELECT listing_id, reason, quantity_delta FROM inventory_movement WHERE business_key = ? FOR UPDATE",
                 rs -> rs.next() ? new Existing(rs.getString(1), rs.getString(2), rs.getInt(3)) : null, key);
