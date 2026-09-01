@@ -34,6 +34,13 @@ public class ManualFailureScheduler {
         List<ManualFailure> failures = claimWithRetry(owner, limit, Duration.ofSeconds(30));
         int completed = 0;
         for (ManualFailure failure : failures) {
+            // attempt_count=3 means the previous owner may have crashed after
+            // claiming.  Reclaiming it must converge to a terminal state and
+            // must never perform a fourth publish.
+            if (failure.attemptCount() >= 3) {
+                failExhausted(failure.id(), failure.ownerId(), failure.claimToken());
+                continue;
+            }
             try {
                 publisher.publish(failure);
                 completed += complete(failure.id(), failure.ownerId(), failure.claimToken());
@@ -52,22 +59,25 @@ public class ManualFailureScheduler {
         long leaseMicros = durationMicros(lease);
         List<ManualFailure> claimed = new ArrayList<>();
         jdbc.query("""
-            SELECT id,source_type,source_id,consumer_name,failure_class,payload,attempt_count
+            SELECT id,source_type,source_id,consumer_name,failure_class,payload,attempt_count,status
             FROM manual_failure
             WHERE ((status='NEW' AND available_at <= CURRENT_TIMESTAMP(6))
                 OR (status='PUBLISHING' AND lease_until <= CURRENT_TIMESTAMP(6)))
-              AND attempt_count < 3
+              AND ((status='NEW' AND attempt_count < 3)
+                OR (status='PUBLISHING' AND attempt_count <= 3))
             ORDER BY available_at,id LIMIT ? FOR UPDATE SKIP LOCKED
             """, rs -> {
                 UUID id = UUID.fromString(rs.getString("id"));
                 String token = UUID.randomUUID().toString();
+                int previousAttempts = rs.getInt("attempt_count");
+                boolean exhausted = "PUBLISHING".equals(rs.getString("status")) && previousAttempts >= 3;
                 int changed = jdbc.update("""
                     UPDATE manual_failure
                     SET status='PUBLISHING', owner_id=?, claim_token=?,
                         lease_until=TIMESTAMPADD(MICROSECOND, ?, CURRENT_TIMESTAMP(6)),
-                        attempt_count=attempt_count+1
-                    WHERE id=? AND (((status='NEW' AND available_at <= CURRENT_TIMESTAMP(6))
-                        OR (status='PUBLISHING' AND lease_until <= CURRENT_TIMESTAMP(6))) AND attempt_count < 3)
+                        attempt_count=attempt_count+CASE WHEN status='NEW' THEN 1 ELSE 0 END
+                    WHERE id=? AND ((status='NEW' AND available_at <= CURRENT_TIMESTAMP(6) AND attempt_count < 3)
+                        OR (status='PUBLISHING' AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count <= 3))
                     """, owner, token, leaseMicros, id.toString());
                 if (changed == 1) {
                     Instant leaseUntil = jdbc.queryForObject(
@@ -76,7 +86,7 @@ public class ManualFailureScheduler {
                     claimed.add(new ManualFailure(id, rs.getString("source_type"),
                         UUID.fromString(rs.getString("source_id")), rs.getString("consumer_name"),
                         rs.getString("failure_class"), rs.getString("payload"), owner, token,
-                        leaseUntil, rs.getInt("attempt_count") + 1));
+                        leaseUntil, exhausted ? previousAttempts : previousAttempts + 1));
                 }
             }, limit);
         return List.copyOf(claimed);
@@ -91,6 +101,18 @@ public class ManualFailureScheduler {
             SET status='PUBLISHED', published_at=CURRENT_TIMESTAMP(6), owner_id=NULL,
                 claim_token=NULL, lease_until=NULL
             WHERE id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=?
+            """, id.toString(), owner, token));
+    }
+
+    /** 受控事务终结崩溃后已消耗三次尝试的副本；旧 owner/token 无法改变状态。 */
+    public int failExhausted(UUID id, String owner, String token) {
+        Objects.requireNonNull(id, "id 不能为空");
+        requireOwner(owner);
+        Objects.requireNonNull(token, "claim token 不能为空");
+        return transactions.execute(status -> jdbc.update("""
+            UPDATE manual_failure
+            SET status='FAILED', owner_id=NULL, claim_token=NULL, lease_until=NULL
+            WHERE id=? AND status='PUBLISHING' AND attempt_count >= 3 AND owner_id=? AND claim_token=?
             """, id.toString(), owner, token));
     }
 

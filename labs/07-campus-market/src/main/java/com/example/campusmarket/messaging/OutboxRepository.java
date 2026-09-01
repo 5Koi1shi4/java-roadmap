@@ -55,7 +55,8 @@ public class OutboxRepository {
                     claimed.add(new OutboxMessage(id, eventId, rs.getString("event_type"),
                         rs.getString("aggregate_id"), rs.getLong("aggregate_version"),
                         rs.getInt("schema_version"), rs.getString("payload"), rs.getTimestamp("occurred_at").toInstant(),
-                        owner, token, null, exhausted ? rs.getInt("attempt_count") : rs.getInt("attempt_count") + 1));
+                        owner, token, null, exhausted ? rs.getInt("attempt_count") : rs.getInt("attempt_count") + 1,
+                        exhausted));
                 }
             }, limit);
         if (!claimed.isEmpty()) {
@@ -142,7 +143,8 @@ public class OutboxRepository {
 
     public record OutboxMessage(UUID id, UUID eventId, String eventType, String aggregateId,
                                 long aggregateVersion, int schemaVersion, String payloadJson, Instant occurredAt,
-                                String ownerId, String claimToken, Instant leaseUntil, int attemptCount) {
+                                String ownerId, String claimToken, Instant leaseUntil, int attemptCount,
+                                boolean exhaustedTakeover) {
         public OutboxMessage {
             Objects.requireNonNull(id, "id 不能为空");
             Objects.requireNonNull(eventId, "eventId 不能为空");
@@ -158,7 +160,7 @@ public class OutboxRepository {
 
         private OutboxMessage withLeaseUntil(Instant value) {
             return new OutboxMessage(id, eventId, eventType, aggregateId, aggregateVersion,
-                schemaVersion, payloadJson, occurredAt, ownerId, claimToken, value, attemptCount);
+                schemaVersion, payloadJson, occurredAt, ownerId, claimToken, value, attemptCount, exhaustedTakeover);
         }
     }
 }

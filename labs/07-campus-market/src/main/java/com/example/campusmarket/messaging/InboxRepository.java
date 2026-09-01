@@ -97,6 +97,21 @@ public class InboxRepository {
             """, consumerName, eventId.toString(), owner, claimToken);
     }
 
+    /** 业务可恢复失败时立即释放当前租约，让 Rabbit requeue 的下一次 delivery 可重新领取。 */
+    @Transactional
+    public int releaseForRetry(String consumerName, UUID eventId, String owner, String claimToken) {
+        requireConsumer(consumerName);
+        Objects.requireNonNull(eventId, "eventId 不能为空");
+        Objects.requireNonNull(owner, "owner 不能为空");
+        Objects.requireNonNull(claimToken, "claim token 不能为空");
+        return jdbc.update("""
+            UPDATE consumed_event
+            SET lease_until=CURRENT_TIMESTAMP(6)
+            WHERE consumer_name=? AND event_id=? AND status='PROCESSING' AND owner_id=? AND claim_token=?
+              AND attempt_count < 3
+            """, consumerName, eventId.toString(), owner, claimToken);
+    }
+
     public boolean isFailed(String consumerName, UUID eventId) {
         requireConsumer(consumerName);
         Objects.requireNonNull(eventId, "eventId 不能为空");
@@ -173,6 +188,9 @@ public class InboxRepository {
             Integer changed = requiresNew.execute(status -> markFailedInternal(consumerName, eventId,
                 claim.ownerId(), claim.claimToken()));
             return Integer.valueOf(1).equals(changed) ? DeliveryResult.PERMANENT_FAILED : DeliveryResult.STALE;
+        } catch (RuntimeException retryableFailure) {
+            releaseForRetry(consumerName, eventId, claim.ownerId(), claim.claimToken());
+            throw retryableFailure;
         }
     }
 

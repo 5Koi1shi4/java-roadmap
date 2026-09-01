@@ -3,6 +3,7 @@ package com.example.campusmarket.integration;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.context.ActiveProfiles;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
@@ -28,6 +29,7 @@ class SchemaCheckClauseNormalizationTest {
     }
 }
 
+@ActiveProfiles("local")
 class SchemaIT extends SharedContainers {
     private static final String REFUND_TOTAL_CHECK =
         "reserved_refund_fen+successful_refund_fen+amount_fen<=paid_amount_fen";
@@ -48,9 +50,9 @@ class SchemaIT extends SharedContainers {
             "order_deadline_claim", "payment_order", "payment_callback_event", "refund_order", "settlement",
             "handoff_record", "dispute_case", "dispute_evidence", "return_case", "warranty_case",
             "seller_obligation", "trade_review", "audit_event", "integration_outbox", "consumed_event",
-            "object_upload_session", "storage_cleanup_task");
+            "object_upload_session", "storage_cleanup_task", "manual_failure");
         assertThat(tableNames()).containsExactlyInAnyOrderElementsOf(expected);
-        assertThat(expected).hasSize(27);
+        assertThat(expected).hasSize(28);
     }
 
     @Test
@@ -85,6 +87,11 @@ class SchemaIT extends SharedContainers {
             "owner_id", "claim_token", "lease_until", "attempt_count");
         assertThat(columnNames("consumed_event")).contains("status", "owner_id", "claim_token", "lease_until",
             "attempt_count");
+        assertThat(columnNames("manual_failure")).contains("source_type", "source_id", "failure_class", "payload",
+            "status", "owner_id", "claim_token", "lease_until", "attempt_count", "available_at");
+        assertThat(indexNames("manual_failure")).contains("uk_manual_failure_source", "idx_manual_failure_claim");
+        assertThat(checkConstraintNames("manual_failure")).contains("ck_manual_failure_class",
+            "ck_manual_failure_status", "ck_manual_failure_attempt_count", "ck_manual_failure_claim_fields");
     }
 
     @Test

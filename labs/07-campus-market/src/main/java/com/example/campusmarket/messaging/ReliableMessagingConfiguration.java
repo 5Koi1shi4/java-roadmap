@@ -12,8 +12,7 @@ public class ReliableMessagingConfiguration {
     @Profile("!test")
     @ConditionalOnBean(EventBusinessHandler.class)
     ReliableEventConsumer reliableEventConsumer(EventEnvelopeCodec codec, InboxRepository inbox,
-                                                 EventBusinessHandler businessHandler,
-                                                 ManualFailurePublisher manualPublisher) {
-        return new ReliableEventConsumer(codec, inbox, businessHandler, manualPublisher);
+        EventBusinessHandler businessHandler) {
+        return new ReliableEventConsumer(codec, inbox, businessHandler);
     }
 }

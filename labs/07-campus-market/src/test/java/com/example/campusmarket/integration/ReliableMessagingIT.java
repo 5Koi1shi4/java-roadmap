@@ -9,6 +9,7 @@ import com.example.campusmarket.messaging.EventEnvelopeCodec;
 import com.example.campusmarket.messaging.EventBusinessHandler;
 import com.example.campusmarket.messaging.ReliableEventConsumer;
 import com.example.campusmarket.messaging.ManualFailureScheduler;
+import com.example.campusmarket.messaging.ManualFailurePublisher;
 import com.example.campusmarket.shared.DomainEvent;
 import com.rabbitmq.client.Channel;
 import org.flywaydb.core.Flyway;
@@ -61,7 +62,9 @@ class ReliableMessagingIT extends SharedContainers {
     @Autowired ManualFailureScheduler manualFailureScheduler;
 
     private static final AtomicReference<RuntimeException> HANDLER_FAILURE = new AtomicReference<>();
+    private static final AtomicReference<Boolean> FAIL_FIRST_DELIVERY = new AtomicReference<>(false);
     private static final AtomicInteger REAL_DELIVERIES = new AtomicInteger();
+    private static final AtomicInteger BUSINESS_ATTEMPTS = new AtomicInteger();
 
     @TestConfiguration(proxyBeanMethods = false)
     static class ListenerFixture {
@@ -69,7 +72,8 @@ class ReliableMessagingIT extends SharedContainers {
         EventBusinessHandler eventBusinessHandler() {
             return event -> {
                 RuntimeException failure = HANDLER_FAILURE.get();
-                if (failure != null) throw failure;
+                int attempt = BUSINESS_ATTEMPTS.incrementAndGet();
+                if (failure != null && (!FAIL_FIRST_DELIVERY.get() || attempt == 1)) throw failure;
             };
         }
 
@@ -122,12 +126,15 @@ class ReliableMessagingIT extends SharedContainers {
     @BeforeEach
     void cleanFixtures() {
         HANDLER_FAILURE.set(null);
+        FAIL_FIRST_DELIVERY.set(false);
         REAL_DELIVERIES.set(0);
+        BUSINESS_ATTEMPTS.set(0);
         jdbc.update("DELETE FROM consumed_event WHERE consumer_name LIKE 'task6-%' OR consumer_name='campus-market-order'");
         jdbc.update("DELETE FROM integration_outbox WHERE event_type='ORDER_CREATED'");
         jdbc.update("DELETE FROM manual_failure");
         rabbitTemplate.execute(channel -> {
             channel.queuePurge("task6.real.delivery");
+            channel.queuePurge(RabbitTopology.MANUAL_QUEUE);
             return null;
         });
     }
@@ -173,15 +180,20 @@ class ReliableMessagingIT extends SharedContainers {
     void brokerDeliveryNackRequeuesForRetryableBusinessFailure() {
         UUID eventId = UUID.randomUUID();
         HANDLER_FAILURE.set(new IllegalStateException("real broker retry"));
+        FAIL_FIRST_DELIVERY.set(true);
         rabbitTemplate.send(RabbitTopology.EVENT_EXCHANGE, "TASK6_REAL", eventMessage(eventId));
 
-        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(20)).untilAsserted(() ->
-            assertThat(REAL_DELIVERIES.get()).isGreaterThanOrEqualTo(1));
-        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(20)).untilAsserted(() ->
+        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(20)).untilAsserted(() -> {
+            assertThat(REAL_DELIVERIES.get()).isEqualTo(2);
             assertThat(jdbc.queryForObject("SELECT status FROM consumed_event WHERE consumer_name=? AND event_id=?",
-                String.class, "campus-market-order", eventId.toString())).isEqualTo("PROCESSING"));
-        HANDLER_FAILURE.set(null);
-        assertThat(REAL_DELIVERIES.get()).isGreaterThanOrEqualTo(1);
+                String.class, "campus-market-order", eventId.toString())).isEqualTo("COMPLETED");
+        });
+        assertThat(BUSINESS_ATTEMPTS.get()).isEqualTo(2);
+        Integer readyMessages = rabbitTemplate.execute(channel -> channel.queueDeclarePassive("task6.real.delivery")
+            .getMessageCount());
+        assertThat(readyMessages).isZero();
+        org.awaitility.Awaitility.await().during(Duration.ofSeconds(2)).atMost(Duration.ofSeconds(5))
+            .untilAsserted(() -> assertThat(REAL_DELIVERIES.get()).isEqualTo(2));
     }
 
     @Test
@@ -342,6 +354,32 @@ class ReliableMessagingIT extends SharedContainers {
     }
 
     @Test
+    void controlledPublisherNackAndTimeoutConvergeAfterThreeAttempts() {
+        UUID eventId = insertOutbox("task6-controlled-confirm-" + UUID.randomUUID());
+        AtomicInteger publishes = new AtomicInteger();
+        OutboxDispatcher controlled = new OutboxDispatcher(outbox, rabbitTemplate, codec, (routingKey, message) -> {
+            int attempt = publishes.incrementAndGet();
+            throw new IllegalStateException(attempt == 2 ? "confirm timeout" : "publisher NACK");
+        });
+
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            assertThat(controlled.dispatchOnce(1)).isZero();
+            if (attempt < 3) {
+                jdbc.update("UPDATE integration_outbox SET available_at=CURRENT_TIMESTAMP(6) WHERE event_id=?",
+                    eventId.toString());
+            }
+        }
+
+        assertThat(publishes.get()).isEqualTo(3);
+        assertThat(jdbc.queryForObject("SELECT status FROM integration_outbox WHERE event_id=?", String.class,
+            eventId.toString())).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT failure_class FROM integration_outbox WHERE event_id=?", String.class,
+            eventId.toString())).isEqualTo("EXHAUSTED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM manual_failure WHERE source_type='OUTBOX' AND source_id=?",
+            Integer.class, eventId.toString())).isEqualTo(1);
+    }
+
+    @Test
     void expiredThirdOutboxLeaseCreatesManualFailureBeforeSourceFailureCompletes() {
         UUID eventId = insertOutbox("task6-third-expired-" + UUID.randomUUID());
         jdbc.update("UPDATE integration_outbox SET status='PUBLISHING', attempt_count=3, owner_id='crashed-owner', claim_token='crashed-token', lease_until=CURRENT_TIMESTAMP(6) - INTERVAL 1 MICROSECOND WHERE event_id=?", eventId.toString());
@@ -349,6 +387,20 @@ class ReliableMessagingIT extends SharedContainers {
         assertThat(dispatcher.dispatchOnce(1)).isZero();
         assertThat(jdbc.queryForObject("SELECT status FROM integration_outbox WHERE event_id=?", String.class, eventId.toString())).isEqualTo("FAILED");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM manual_failure WHERE source_type='OUTBOX' AND source_id=?", Integer.class, eventId.toString())).isEqualTo(1);
+    }
+
+    @Test
+    void expiredThirdManualFailureLeaseConvergesToFailedAfterCrashWindow() {
+        UUID sourceId = UUID.randomUUID();
+        insertManualFailure(sourceId, "EXHAUSTED");
+        jdbc.update("UPDATE manual_failure SET status='PUBLISHING', attempt_count=3, owner_id='crashed-owner', "
+            + "claim_token='crashed-token', lease_until=CURRENT_TIMESTAMP(6)-INTERVAL 1 MICROSECOND WHERE source_id=?",
+            sourceId.toString());
+
+        assertThat(manualFailureScheduler.runOnce(1)).isZero();
+        assertThat(jdbc.queryForObject("SELECT status FROM manual_failure WHERE source_id=?", String.class,
+            sourceId.toString())).isEqualTo("FAILED");
+        assertThat(rabbitTemplate.receive(RabbitTopology.MANUAL_QUEUE, 100)).isNull();
     }
 
     @Test
@@ -383,6 +435,22 @@ class ReliableMessagingIT extends SharedContainers {
 
         assertThat(manualFailureScheduler.complete(old.id(), old.ownerId(), old.claimToken())).isZero();
         assertThat(manualFailureScheduler.complete(current.id(), current.ownerId(), current.claimToken())).isEqualTo(1);
+    }
+
+    @Test
+    void persistedManualFailureIsTheOnlyNotificationFactSource() {
+        UUID eventId = insertOutbox("task6-manual-single-" + UUID.randomUUID());
+        jdbc.update("UPDATE integration_outbox SET event_type=? WHERE event_id=?", "NOT_A_REAL_EVENT",
+            eventId.toString());
+
+        assertThat(dispatcher.dispatchOnce(1)).isZero();
+        assertThat(jdbc.queryForObject("SELECT status FROM manual_failure WHERE source_type='OUTBOX' AND source_id=?",
+            String.class, eventId.toString())).isEqualTo("NEW");
+        assertThat(manualFailureScheduler.runOnce(1)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT status FROM manual_failure WHERE source_type='OUTBOX' AND source_id=?",
+            String.class, eventId.toString())).isEqualTo("PUBLISHED");
+        assertThat(rabbitTemplate.receive(RabbitTopology.MANUAL_QUEUE, 5_000)).isNotNull();
+        assertThat(rabbitTemplate.receive(RabbitTopology.MANUAL_QUEUE, 100)).isNull();
     }
 
     private void insertManualFailure(UUID sourceId, String failureClass) {

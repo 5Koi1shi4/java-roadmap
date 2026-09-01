@@ -15,14 +15,12 @@ public class ReliableEventConsumer {
     private final EventEnvelopeCodec codec;
     private final InboxRepository inbox;
     private final EventBusinessHandler businessHandler;
-    private final ManualFailurePublisher manualPublisher;
 
     public ReliableEventConsumer(EventEnvelopeCodec codec, InboxRepository inbox,
-                                 EventBusinessHandler businessHandler, ManualFailurePublisher manualPublisher) {
+                                 EventBusinessHandler businessHandler) {
         this.codec = codec;
         this.inbox = inbox;
         this.businessHandler = businessHandler;
-        this.manualPublisher = manualPublisher;
     }
 
     @RabbitListener(queues = RabbitTopology.EVENT_QUEUE, ackMode = "MANUAL")
@@ -40,7 +38,7 @@ public class ReliableEventConsumer {
                         || (!claim.alreadyCompleted() && !claim.failed()
                             && inbox.markFailed(CONSUMER, eventId, claim.ownerId(), claim.claimToken()) == 1))
                     .orElse(false);
-                if (durableFailure && publishManual(eventId, "PERMANENT")) {
+                if (durableFailure) {
                     channel.basicAck(tag, false);
                 } else {
                     channel.basicNack(tag, false, true);
@@ -55,37 +53,15 @@ public class ReliableEventConsumer {
                 claim -> businessHandler.handle(event));
             if (result == InboxRepository.DeliveryResult.COMPLETED) channel.basicAck(tag, false);
             else if (result == InboxRepository.DeliveryResult.PERMANENT_FAILED) {
-                if (publishManual(event.eventId(), "PERMANENT")) {
-                    channel.basicAck(tag, false);
-                } else {
-                    channel.basicNack(tag, false, true);
-                }
+                channel.basicAck(tag, false);
             } else if (result == InboxRepository.DeliveryResult.FAILED) {
-                if (publishManual(event.eventId(), "EXHAUSTED")) {
-                    channel.basicAck(tag, false);
-                } else {
-                    channel.basicNack(tag, false, true);
-                }
+                channel.basicAck(tag, false);
             } else channel.basicNack(tag, false, true);
         } catch (IllegalArgumentException permanent) {
-            if (publishManual(event.eventId(), "PERMANENT")) {
-                channel.basicAck(tag, false);
-            } else {
-                channel.basicNack(tag, false, true);
-            }
+            channel.basicAck(tag, false);
         } catch (RuntimeException retryable) {
             channel.basicNack(tag, false, true);
         }
     }
 
-    private boolean publishManual(UUID eventId, String failureClass) {
-        try {
-            manualPublisher.publish(eventId, failureClass);
-            return true;
-        } catch (RuntimeException ignored) {
-            // manual_failure is durable; keep the broker delivery retryable when
-            // its notification cannot yet be routed or confirmed.
-            return false;
-        }
-    }
 }

@@ -8,6 +8,7 @@ import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -21,21 +22,31 @@ public class OutboxDispatcher {
     private final OutboxRepository repository;
     private final RabbitTemplate rabbitTemplate;
     private final EventEnvelopeCodec codec;
-    private final ManualFailurePublisher manualFailurePublisher;
+    private final EventPublisher eventPublisher;
     private final String owner;
 
-    public OutboxDispatcher(OutboxRepository repository, RabbitTemplate rabbitTemplate, EventEnvelopeCodec codec,
-                            ManualFailurePublisher manualFailurePublisher) {
+    @Autowired
+    public OutboxDispatcher(OutboxRepository repository, RabbitTemplate rabbitTemplate, EventEnvelopeCodec codec) {
         this.repository = Objects.requireNonNull(repository, "outbox repository 不能为空");
         this.rabbitTemplate = Objects.requireNonNull(rabbitTemplate, "RabbitTemplate 不能为空");
         this.codec = Objects.requireNonNull(codec, "codec 不能为空");
-        this.manualFailurePublisher = Objects.requireNonNull(manualFailurePublisher, "人工发布器不能为空");
+        this.eventPublisher = this::publishWithConfirm;
         this.owner = "dispatcher-" + java.util.UUID.randomUUID();
         if (rabbitTemplate.getConnectionFactory() instanceof CachingConnectionFactory factory) {
             factory.setPublisherConfirmType(CachingConnectionFactory.ConfirmType.CORRELATED);
             factory.setPublisherReturns(true);
         }
         rabbitTemplate.setMandatory(true);
+    }
+
+    /** 供集成测试在 RabbitOperations/confirm 边界注入可控 NACK/timeout。 */
+    public OutboxDispatcher(OutboxRepository repository, RabbitTemplate rabbitTemplate, EventEnvelopeCodec codec,
+                            EventPublisher eventPublisher) {
+        this.repository = Objects.requireNonNull(repository, "outbox repository 不能为空");
+        this.rabbitTemplate = Objects.requireNonNull(rabbitTemplate, "RabbitTemplate 不能为空");
+        this.codec = Objects.requireNonNull(codec, "codec 不能为空");
+        this.eventPublisher = Objects.requireNonNull(eventPublisher, "事件发布器不能为空");
+        this.owner = "dispatcher-" + java.util.UUID.randomUUID();
     }
 
     public int dispatchOnce(int limit) {
@@ -48,10 +59,8 @@ public class OutboxDispatcher {
             // A lease that expired after the third delivery attempt is a crash
             // takeover, not a fourth publish. Failing it here keeps the source
             // row and its durable manual copy in one REQUIRES_NEW transaction.
-            if (message.attemptCount() >= 3) {
-                if (repository.fail(message.eventId(), message.ownerId(), message.claimToken(), "EXHAUSTED") == 1) {
-                    publishManualFailure(message.eventId(), "EXHAUSTED");
-                }
+            if (message.exhaustedTakeover()) {
+                repository.fail(message.eventId(), message.ownerId(), message.claimToken(), "EXHAUSTED");
                 continue;
             }
             try {
@@ -63,18 +72,14 @@ public class OutboxDispatcher {
                 properties.setContentEncoding(StandardCharsets.UTF_8.name());
                 properties.setMessageId(message.eventId().toString());
                 properties.setDeliveryMode(MessageDeliveryMode.PERSISTENT);
-                publishWithConfirm(message.eventId().toString(), message.eventType(),
+                eventPublisher.publish(message.eventType(),
                     new Message(codec.encode(event), properties));
                 completed += repository.complete(message.eventId(), message.ownerId(), message.claimToken());
             } catch (RuntimeException failure) {
                 if (failure instanceof IllegalArgumentException) {
-                    if (repository.fail(message.eventId(), message.ownerId(), message.claimToken(), "PERMANENT") == 1) {
-                        publishManualFailure(message.eventId(), "PERMANENT");
-                    }
+                    repository.fail(message.eventId(), message.ownerId(), message.claimToken(), "PERMANENT");
                 } else if (message.attemptCount() >= 3) {
-                    if (repository.fail(message.eventId(), message.ownerId(), message.claimToken(), "EXHAUSTED") == 1) {
-                        publishManualFailure(message.eventId(), "EXHAUSTED");
-                    }
+                    repository.fail(message.eventId(), message.ownerId(), message.claimToken(), "EXHAUSTED");
                 } else {
                     repository.releaseForRetry(message.eventId(), message.ownerId(), message.claimToken(), Duration.ofSeconds(1));
                 }
@@ -83,18 +88,9 @@ public class OutboxDispatcher {
         return completed;
     }
 
-    /** 人工副本已在 REQUIRES_NEW 事务中落库；人工交换机暂不可用时保留 NEW 供补偿调度。 */
-    private void publishManualFailure(java.util.UUID eventId, String failureClass) {
-        try {
-            manualFailurePublisher.publish(eventId, failureClass);
-        } catch (RuntimeException ignored) {
-            // 不将人工通知的瞬时投递失败误报为业务成功，也不泄露 payload/连接细节。
-        }
-    }
-
-    private void publishWithConfirm(String correlationId, String routingKey, Message message) {
+    private void publishWithConfirm(String routingKey, Message message) {
         rabbitTemplate.invoke(operations -> {
-            CorrelationData correlation = new CorrelationData(correlationId);
+            CorrelationData correlation = new CorrelationData(message.getMessageProperties().getMessageId());
             operations.send(EXCHANGE, routingKey, message, correlation);
             awaitConfirmed(correlation);
             return null;
@@ -117,5 +113,10 @@ public class OutboxDispatcher {
         } catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException e) {
             throw new IllegalStateException("Rabbit confirm 超时或失败", e);
         }
+    }
+
+    @FunctionalInterface
+    public interface EventPublisher {
+        void publish(String routingKey, Message message);
     }
 }
