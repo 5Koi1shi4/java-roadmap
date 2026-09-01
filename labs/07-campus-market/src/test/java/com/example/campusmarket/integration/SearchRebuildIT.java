@@ -1,8 +1,10 @@
 package com.example.campusmarket.integration;
 
 import com.example.campusmarket.catalog.search.ProductSearchPort;
+import com.example.campusmarket.catalog.search.ElasticsearchProductSearch;
 import com.example.campusmarket.catalog.search.SearchRebuildService;
 import com.example.campusmarket.catalog.search.SearchProjector;
+import com.example.campusmarket.catalog.search.SearchOutboxDispatcher;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -14,6 +16,7 @@ import org.springframework.test.context.ActiveProfiles;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @ActiveProfiles("local")
 class SearchRebuildIT extends SharedContainers {
@@ -21,6 +24,8 @@ class SearchRebuildIT extends SharedContainers {
     @Autowired ProductSearchPort search;
     @Autowired SearchProjector projector;
     @Autowired SearchRebuildService rebuild;
+    @Autowired SearchOutboxDispatcher dispatcher;
+    @Autowired ElasticsearchProductSearch elasticsearch;
 
     @BeforeAll
     static void migrate() {
@@ -29,6 +34,26 @@ class SearchRebuildIT extends SharedContainers {
 
     @BeforeEach
     void fixture() {
+        jdbc.update("DELETE FROM inventory_movement");
+        jdbc.update("DELETE FROM payment_callback_event");
+        jdbc.update("DELETE FROM refund_order");
+        jdbc.update("DELETE FROM settlement");
+        jdbc.update("DELETE FROM payment_order");
+        jdbc.update("DELETE FROM order_deadline_claim");
+        jdbc.update("DELETE FROM order_transition");
+        jdbc.update("DELETE FROM order_command");
+        jdbc.update("DELETE FROM trade_review");
+        jdbc.update("DELETE FROM handoff_record");
+        jdbc.update("DELETE FROM dispute_evidence");
+        jdbc.update("DELETE FROM return_case");
+        jdbc.update("DELETE FROM seller_obligation");
+        jdbc.update("DELETE FROM warranty_case");
+        jdbc.update("DELETE FROM dispute_case");
+        jdbc.update("DELETE FROM trade_order");
+        jdbc.update("DELETE FROM audit_event");
+        jdbc.update("DELETE FROM object_upload_session");
+        jdbc.update("DELETE FROM email_verification");
+        jdbc.update("DELETE FROM external_identity");
         jdbc.update("DELETE FROM listing_media");
         jdbc.update("DELETE FROM search_outbox");
         jdbc.update("DELETE FROM listing");
@@ -41,6 +66,28 @@ class SearchRebuildIT extends SharedContainers {
             listing.toString(), seller.toString(), "重建并发商品", "在线重建", "教材", 2000L, 4, 1L);
         jdbc.update("INSERT INTO search_outbox(id,listing_id,aggregate_version,event_type,payload,status,attempt_count,available_at,created_at) VALUES (?,?,?,'LISTING_UPDATED',CAST('{}' AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
             UUID.randomUUID().toString(), listing.toString(), 1L);
+    }
+
+    @Test
+    void dispatchesEnqueuedChangeThroughClaimProjectAndPublish() {
+        assertThat(dispatcher.dispatchOnce(10)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT status FROM search_outbox LIMIT 1", String.class)).isEqualTo("PUBLISHED");
+    }
+
+    @Test
+    void restoresEsProxyAfterDisconnectAndRerunsWithoutChangingOldAliasOnFailure() {
+        search.refresh();
+        String previous = elasticsearch.currentReadIndex();
+        try {
+            ELASTICSEARCH_PROXY.setConnectionCut(true);
+            assertThrows(RuntimeException.class, search::refresh);
+        } finally {
+            ELASTICSEARCH_PROXY.setConnectionCut(false);
+        }
+        SearchRebuildService.RebuildReport recovered = rebuild.rebuild();
+        search.refresh();
+        assertThat(recovered.index()).isNotBlank();
+        assertThat(elasticsearch.currentReadIndex()).isNotEqualTo(previous);
     }
 
     @Test

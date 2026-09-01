@@ -2,46 +2,45 @@ package com.example.campusmarket.catalog.search;
 
 import com.example.campusmarket.shared.DomainEvent;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
-import java.sql.Timestamp;
-import java.time.Instant;
 import java.util.Objects;
 import java.util.UUID;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /** 从 MySQL 商品事实投影到搜索索引；事件只作为变更通知和版本 fencing。 */
 @Component
 public final class SearchProjector {
     private final JdbcTemplate jdbc;
     private final ProductSearchPort search;
-    private final ReentrantReadWriteLock rebuildGate = new ReentrantReadWriteLock(true);
+    private final SearchGateRepository gate;
 
     public SearchProjector(JdbcTemplate jdbc, ProductSearchPort search) {
+        this(jdbc, search, null);
+    }
+
+    @Autowired
+    public SearchProjector(JdbcTemplate jdbc, ProductSearchPort search, SearchGateRepository gate) {
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.search = Objects.requireNonNull(search, "搜索端口不能为空");
+        this.gate = gate;
     }
 
     /** 处理商品事件；旧事件即使重放也不会覆盖更新版本。 */
     public void project(DomainEvent event) {
         Objects.requireNonNull(event, "商品事件不能为空");
+        SearchSchema.requireEventType(event.eventType());
         UUID listingId;
         try {
             listingId = UUID.fromString(event.aggregateId());
         } catch (IllegalArgumentException e) {
             throw new IllegalArgumentException("商品事件 aggregateId 无效", e);
         }
-        Lock lock = rebuildGate.readLock();
-        lock.lock();
-        try {
-            if ("LISTING_OFF_SALE".equals(event.eventType()) || "LISTING_SOLD_OUT".equals(event.eventType())) {
-                search.tombstone(listingId.toString(), event.aggregateVersion());
-            } else {
-                projectListing(listingId, event.aggregateVersion(), search);
-            }
-        } finally {
-            lock.unlock();
+        if (gate != null) gate.assertProjectionOpen();
+        if ("LISTING_OFF_SALE".equals(event.eventType()) || "LISTING_SOLD_OUT".equals(event.eventType())) {
+            search.tombstone(listingId.toString(), event.aggregateVersion());
+        } else {
+            projectListing(listingId, event.aggregateVersion(), search);
         }
     }
 
@@ -52,14 +51,20 @@ public final class SearchProjector {
         projectListing(listingId, eventVersion, new TargetIndex(search, index));
     }
 
+    public void projectDocumentInto(String index, ProductSearchPort.ProductDocument document) {
+        Objects.requireNonNull(index, "目标索引不能为空");
+        Objects.requireNonNull(document, "商品文档不能为空");
+        ProductSearchPort target = new TargetIndex(search, index);
+        if ("ON_SALE".equals(document.status()) && document.availableQuantity() > 0) target.index(document);
+        else target.tombstone(document.listingId(), document.aggregateVersion());
+    }
+
     public ProductSearchPort.ProductDocument snapshot(UUID listingId) {
         return jdbc.query("SELECT id,title,description,category,unit_price_fen,available_quantity,status,version FROM listing WHERE id=?",
             rs -> rs.next() ? document(rs.getString("id"), rs.getString("title"), rs.getString("description"),
                 rs.getString("category"), rs.getLong("unit_price_fen"), rs.getInt("available_quantity"),
                 rs.getString("status"), rs.getLong("version")) : null, listingId.toString());
     }
-
-    public Lock acquireRebuildWriteGate() { return rebuildGate.writeLock(); }
 
     private void projectListing(UUID listingId, long eventVersion, ProductSearchPort target) {
         ProductSearchPort.ProductDocument document = snapshot(listingId);

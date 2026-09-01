@@ -45,6 +45,10 @@ campus:
       ttl: 15m
     mail:
       simulation-enabled: false
+    search:
+      dispatcher:
+        enabled: false
+        fixed-delay-ms: 1000
 
 ---
 spring:

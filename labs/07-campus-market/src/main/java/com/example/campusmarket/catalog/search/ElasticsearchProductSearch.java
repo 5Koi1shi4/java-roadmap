@@ -2,12 +2,13 @@ package com.example.campusmarket.catalog.search;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.json.JsonData;
-import co.elastic.clients.elasticsearch._types.Result;
 import co.elastic.clients.elasticsearch._types.VersionType;
 import co.elastic.clients.elasticsearch._types.query_dsl.Query;
+import co.elastic.clients.elasticsearch._types.mapping.TypeMapping;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
 import co.elastic.clients.elasticsearch.core.search.Hit;
 import org.springframework.stereotype.Component;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -22,10 +23,17 @@ import java.util.UUID;
 public final class ElasticsearchProductSearch implements ProductSearchPort {
     private static final String INITIAL_INDEX = "campus-listing-000001";
     private final ElasticsearchClient client;
+    private final org.springframework.jdbc.core.JdbcTemplate jdbc;
     private volatile boolean initialized;
 
     public ElasticsearchProductSearch(ElasticsearchClient client) {
+        this(client, null);
+    }
+
+    @Autowired
+    public ElasticsearchProductSearch(ElasticsearchClient client, org.springframework.jdbc.core.JdbcTemplate jdbc) {
         this.client = Objects.requireNonNull(client, "Elasticsearch 客户端不能为空");
+        this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
     }
 
     @Override
@@ -50,13 +58,8 @@ public final class ElasticsearchProductSearch implements ProductSearchPort {
             throw new IllegalArgumentException("删除版本无效");
         }
         try {
-            var response = client.delete(d -> d.index(WRITE_ALIAS).id(listingId)
-                .version(aggregateVersion).versionType(VersionType.ExternalGte));
-            if (response.result() == Result.NotFound) {
-                // ES returns not_found for a missing document while still accepting the external version.
-                // A missing document has no tombstone in older ES versions; external_gte fencing still
-                // prevents an already-versioned document from being overwritten by a stale event.
-            }
+            client.index(i -> i.index(WRITE_ALIAS).id(listingId).version(aggregateVersion)
+                .versionType(VersionType.ExternalGte).document(toMap(ProductDocument.tombstone(listingId, aggregateVersion))));
         } catch (IOException e) {
             throw new SearchUnavailableException("商品索引删除失败", e);
         } catch (co.elastic.clients.elasticsearch._types.ElasticsearchException e) {
@@ -70,19 +73,27 @@ public final class ElasticsearchProductSearch implements ProductSearchPort {
         Objects.requireNonNull(request, "搜索请求不能为空");
         try {
             Query query = query(request);
-            SearchResponse<Map> response = client.search(s -> s.index(READ_ALIAS)
-                .query(query)
-                .from(Math.multiplyExact(request.page(), request.size()))
-                .size(request.size())
-                .trackTotalHits(t -> t.enabled(true))
-                // Score is ordered first; listing ID is a deterministic tie-breaker.
-                .sort(sort -> sort.score(sc -> sc.order(co.elastic.clients.elasticsearch._types.SortOrder.Desc)))
-                .sort(sort -> sort.field(f -> f.field("listingId")
-                    .order(co.elastic.clients.elasticsearch._types.SortOrder.Asc))), Map.class);
+            SearchResponse<Map> response = client.search(s -> {
+                s.index(READ_ALIAS).query(query).size(request.size() + 1).trackTotalHits(t -> t.enabled(true))
+                    // Score is ordered first; listing ID is a deterministic tie-breaker.
+                    .sort(sort -> sort.score(sc -> sc.order(co.elastic.clients.elasticsearch._types.SortOrder.Desc)))
+                    .sort(sort -> sort.field(f -> f.field("listingId")
+                        .order(co.elastic.clients.elasticsearch._types.SortOrder.Asc)));
+                if (request.searchAfter() != null) s.searchAfter(searchAfter(request.searchAfter()));
+                return s;
+            }, Map.class);
             List<SearchItem> items = new ArrayList<>();
-            for (Hit<Map> hit : response.hits().hits()) items.add(fromMap(hit.source()));
+            String next = null;
+            List<Hit<Map>> hits = response.hits().hits();
+            boolean hasMore = hits.size() > request.size();
+            for (int i = 0; i < Math.min(request.size(), hits.size()); i++) {
+                Hit<Map> hit = hits.get(i);
+                items.add(fromMap(hit.source()));
+                if (hit.sort().size() >= 2) next = ProductSearchPort.encodeCursor(hit.sort().get(0).doubleValue(), hit.sort().get(1).stringValue());
+            }
             long total = response.hits().total() == null ? items.size() : response.hits().total().value();
-            return new SearchPage(items, total, null);
+            if (!hasMore) next = null;
+            return new SearchPage(items, total, next);
         } catch (IOException | ArithmeticException e) {
             throw new SearchUnavailableException("商品搜索失败", e);
         }
@@ -140,14 +151,7 @@ public final class ElasticsearchProductSearch implements ProductSearchPort {
         String index = "campus-listing-rebuild-" + UUID.randomUUID().toString().replace("-", "");
         try {
             client.indices().create(c -> c.index(index).settings(s -> s.numberOfShards("1").numberOfReplicas("0"))
-                .mappings(m -> m.properties("listingId", p -> p.keyword(k -> k))
-                    .properties("title", p -> p.text(t -> t.analyzer("smartcn").searchAnalyzer("smartcn")))
-                    .properties("description", p -> p.text(t -> t.analyzer("smartcn").searchAnalyzer("smartcn")))
-                    .properties("category", p -> p.keyword(k -> k))
-                    .properties("unitPriceFen", p -> p.long_(l -> l))
-                    .properties("availableQuantity", p -> p.integer(i -> i))
-                    .properties("status", p -> p.keyword(k -> k))
-                    .properties("aggregateVersion", p -> p.long_(l -> l))));
+                .mappings(ElasticsearchProductSearch::mapping));
             return index;
         } catch (IOException e) {
             throw new SearchUnavailableException("创建重建索引失败", e);
@@ -167,12 +171,29 @@ public final class ElasticsearchProductSearch implements ProductSearchPort {
 
     public void tombstoneInto(String index, String listingId, long aggregateVersion) {
         try {
-            client.delete(i -> i.index(index).id(listingId).version(aggregateVersion)
-                .versionType(VersionType.ExternalGte));
+            client.index(i -> i.index(index).id(listingId).version(aggregateVersion)
+                .versionType(VersionType.ExternalGte).document(toMap(ProductDocument.tombstone(listingId, aggregateVersion))));
         } catch (IOException e) {
             throw new SearchUnavailableException("重建索引删除失败", e);
         } catch (co.elastic.clients.elasticsearch._types.ElasticsearchException e) {
             if (!isVersionConflict(e)) throw e;
+        }
+    }
+
+    public void scheduleCleanup(String index) {
+        if (index == null || index.isBlank() || index.startsWith("campus-listing-000001")) return;
+        jdbc.update("INSERT INTO search_index_cleanup_task(id,index_name,status,attempt_count,available_at,created_at) VALUES (?,?, 'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE status='NEW',available_at=CURRENT_TIMESTAMP(6)", UUID.randomUUID().toString(), index);
+    }
+
+    public void cleanupPending() {
+        List<String> indexes = jdbc.query("SELECT index_name FROM search_index_cleanup_task WHERE status='NEW' AND available_at <= CURRENT_TIMESTAMP(6) ORDER BY created_at LIMIT 20", (rs, rowNum) -> rs.getString(1));
+        for (String index : indexes) {
+            try {
+                client.indices().delete(d -> d.index(index));
+                jdbc.update("UPDATE search_index_cleanup_task SET status='DONE',attempt_count=attempt_count+1 WHERE index_name=?", index);
+            } catch (RuntimeException | IOException ignored) {
+                jdbc.update("UPDATE search_index_cleanup_task SET attempt_count=attempt_count+1,available_at=TIMESTAMPADD(SECOND,10,CURRENT_TIMESTAMP(6)) WHERE index_name=?", index);
+            }
         }
     }
 
@@ -204,14 +225,18 @@ public final class ElasticsearchProductSearch implements ProductSearchPort {
     private void createIndex(String index) throws IOException {
         client.indices().create(c -> c.index(index)
             .settings(s -> s.numberOfShards("1").numberOfReplicas("0"))
-            .mappings(m -> m.properties("listingId", p -> p.keyword(k -> k))
-                .properties("title", p -> p.text(t -> t.analyzer("smartcn").searchAnalyzer("smartcn")))
-                .properties("description", p -> p.text(t -> t.analyzer("smartcn").searchAnalyzer("smartcn")))
-                .properties("category", p -> p.keyword(k -> k))
-                .properties("unitPriceFen", p -> p.long_(l -> l))
-                .properties("availableQuantity", p -> p.integer(i -> i))
-                .properties("status", p -> p.keyword(k -> k))
-                .properties("aggregateVersion", p -> p.long_(l -> l))));
+            .mappings(ElasticsearchProductSearch::mapping));
+    }
+
+    private static TypeMapping.Builder mapping(TypeMapping.Builder m) {
+        return m.properties("listingId", p -> p.keyword(k -> k))
+            .properties("title", p -> p.text(t -> t.analyzer("smartcn").searchAnalyzer("smartcn")))
+            .properties("description", p -> p.text(t -> t.analyzer("smartcn").searchAnalyzer("smartcn")))
+            .properties("category", p -> p.keyword(k -> k))
+            .properties("unitPriceFen", p -> p.long_(l -> l))
+            .properties("availableQuantity", p -> p.integer(i -> i))
+            .properties("status", p -> p.keyword(k -> k))
+            .properties("aggregateVersion", p -> p.long_(l -> l));
     }
 
     private void ensureAlias(String index, String alias, boolean write) throws IOException {
@@ -229,6 +254,12 @@ public final class ElasticsearchProductSearch implements ProductSearchPort {
         map.put("availableQuantity", d.availableQuantity()); map.put("status", d.status());
         map.put("aggregateVersion", d.aggregateVersion());
         return map;
+    }
+
+    private static List<co.elastic.clients.elasticsearch._types.FieldValue> searchAfter(String encoded) {
+        ProductSearchPort.SearchCursor cursor = ProductSearchPort.decodeCursor(encoded);
+        return List.of(co.elastic.clients.elasticsearch._types.FieldValue.of(cursor.score()),
+            co.elastic.clients.elasticsearch._types.FieldValue.of(cursor.listingId()));
     }
 
     private static boolean isVersionConflict(co.elastic.clients.elasticsearch._types.ElasticsearchException e) {

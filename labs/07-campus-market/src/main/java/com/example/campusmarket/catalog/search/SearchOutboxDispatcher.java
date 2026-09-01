@@ -4,9 +4,8 @@ import com.example.campusmarket.shared.DomainEvent;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.beans.factory.annotation.Autowired;
 
-import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -20,18 +19,25 @@ public class SearchOutboxDispatcher {
     private final JdbcTemplate jdbc;
     private final SearchProjector projector;
     private final ObjectMapper mapper;
+    private final SearchOutboxClaimer claimer;
     private final String owner = "search-dispatcher-" + UUID.randomUUID();
 
     public SearchOutboxDispatcher(JdbcTemplate jdbc, SearchProjector projector, ObjectMapper mapper) {
+        this(jdbc, projector, mapper, null);
+    }
+
+    @Autowired
+    public SearchOutboxDispatcher(JdbcTemplate jdbc, SearchProjector projector, ObjectMapper mapper, SearchOutboxClaimer claimer) {
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.projector = Objects.requireNonNull(projector, "投影器不能为空");
         this.mapper = Objects.requireNonNull(mapper, "ObjectMapper不能为空");
+        this.claimer = claimer;
     }
 
     public int dispatchOnce(int limit) { return dispatchOnce(limit, Duration.ofSeconds(30)); }
 
     public int dispatchOnce(int limit, Duration lease) {
-        List<Claim> claims = claimBatch(limit, lease);
+        List<Claim> claims = claimer == null ? claimBatch(limit, lease) : claimer.claim(owner, limit, lease);
         int completed = 0;
         for (Claim claim : claims) {
             try {
@@ -47,7 +53,6 @@ public class SearchOutboxDispatcher {
         return completed;
     }
 
-    @Transactional
     public List<Claim> claimBatch(int limit, Duration lease) {
         if (limit <= 0 || limit > 1000) throw new IllegalArgumentException("领取数量必须在1到1000之间");
         if (lease == null || lease.isNegative() || lease.isZero()) throw new IllegalArgumentException("租约必须为正数");
@@ -79,7 +84,7 @@ public class SearchOutboxDispatcher {
     private int complete(Claim claim) {
         return jdbc.update("""
             UPDATE search_outbox SET status='PUBLISHED',owner_id=NULL,claim_token=NULL,lease_until=NULL
-            WHERE id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=?
+            WHERE id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=? AND lease_until > CURRENT_TIMESTAMP(6)
             """, claim.id(), owner, claim.claimToken());
     }
 
@@ -87,14 +92,14 @@ public class SearchOutboxDispatcher {
         return jdbc.update("""
             UPDATE search_outbox SET status='NEW',owner_id=NULL,claim_token=NULL,lease_until=NULL,
                 available_at=TIMESTAMPADD(SECOND,1,CURRENT_TIMESTAMP(6))
-            WHERE id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=? AND attempt_count < 3
+            WHERE id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=? AND lease_until > CURRENT_TIMESTAMP(6) AND attempt_count < 3
             """, claim.id(), owner, claim.claimToken());
     }
 
     private int fail(Claim claim) {
         return jdbc.update("""
             UPDATE search_outbox SET status='FAILED',owner_id=NULL,claim_token=NULL,lease_until=NULL
-            WHERE id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=?
+            WHERE id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=? AND lease_until > CURRENT_TIMESTAMP(6)
             """, claim.id(), owner, claim.claimToken());
     }
 

@@ -2,6 +2,9 @@ package com.example.campusmarket.catalog.search;
 
 import java.util.List;
 import java.util.Objects;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+
 
 /** 商品搜索的应用端口；搜索索引不是商品事实源。 */
 public interface ProductSearchPort {
@@ -26,18 +29,24 @@ public interface ProductSearchPort {
                            long unitPriceFen, int availableQuantity, String status, long aggregateVersion) {
         public ProductDocument {
             if (listingId == null || listingId.isBlank()) throw new IllegalArgumentException("商品ID不能为空");
-            if (title == null || title.isBlank()) throw new IllegalArgumentException("标题不能为空");
-            if (description == null) throw new IllegalArgumentException("描述不能为空");
-            if (category == null || category.isBlank()) throw new IllegalArgumentException("分类不能为空");
+            if (title == null || (title.isBlank() && !SearchSchema.TOMBSTONE.equals(status))) throw new IllegalArgumentException("标题不能为空");
+            if (description == null || (description.isBlank() && !SearchSchema.TOMBSTONE.equals(status))) throw new IllegalArgumentException("描述不能为空");
+            if (category == null || (category.isBlank() && !SearchSchema.TOMBSTONE.equals(status))) throw new IllegalArgumentException("分类不能为空");
             if (unitPriceFen < 0 || availableQuantity < 0 || aggregateVersion <= 0) {
                 throw new IllegalArgumentException("商品搜索字段无效");
             }
-            Objects.requireNonNull(status, "商品状态不能为空");
+            SearchSchema.requireStatus(status);
+        }
+        public static ProductDocument tombstone(String listingId, long version) {
+            return new ProductDocument(listingId, "", "", "", 0, 0, SearchSchema.TOMBSTONE, version);
         }
     }
 
     record SearchRequest(String keyword, String category, Long minPriceFen, Long maxPriceFen,
-                         int page, int size) {
+                         int page, int size, String searchAfter) {
+        public SearchRequest(String keyword, String category, Long minPriceFen, Long maxPriceFen, int page, int size) {
+            this(keyword, category, minPriceFen, maxPriceFen, page, size, null);
+        }
         public SearchRequest {
             keyword = keyword == null ? "" : keyword.trim();
             category = category == null || category.isBlank() ? null : category.trim();
@@ -46,7 +55,8 @@ public interface ProductSearchPort {
             if (minPriceFen != null && maxPriceFen != null && minPriceFen > maxPriceFen) {
                 throw new IllegalArgumentException("价格范围无效");
             }
-            if (page < 0 || size <= 0 || size > 100) throw new IllegalArgumentException("分页参数无效");
+            if (page != 0 || size <= 0 || size > 100) throw new IllegalArgumentException("请使用 search_after 游标分页");
+            if (searchAfter != null && searchAfter.isBlank()) throw new IllegalArgumentException("游标不能为空");
         }
     }
 
@@ -57,6 +67,33 @@ public interface ProductSearchPort {
         public SearchPage {
             items = List.copyOf(Objects.requireNonNull(items, "搜索结果不能为空"));
             if (total < 0) throw new IllegalArgumentException("总数不能为负数");
+        }
+    }
+
+    record SearchCursor(double score, String listingId) {
+        public SearchCursor {
+            if (!Double.isFinite(score) || listingId == null || listingId.isBlank() || listingId.length() > 200
+                || listingId.indexOf('\n') >= 0 || listingId.indexOf('\r') >= 0) {
+                throw new IllegalArgumentException("搜索游标无效");
+            }
+        }
+    }
+
+    static String encodeCursor(double score, String listingId) {
+        SearchCursor cursor = new SearchCursor(score, listingId);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(
+            (Double.toHexString(cursor.score()) + "\n" + cursor.listingId()).getBytes(StandardCharsets.UTF_8));
+    }
+
+    static SearchCursor decodeCursor(String encoded) {
+        if (encoded == null || encoded.length() > 1000) throw new IllegalArgumentException("搜索游标无效");
+        try {
+            String value = new String(Base64.getUrlDecoder().decode(encoded), StandardCharsets.UTF_8);
+            String[] parts = value.split("\\n", -1);
+            if (parts.length != 2 || parts[0].isBlank() || parts[1].isBlank()) throw new IllegalArgumentException("搜索游标无效");
+            return new SearchCursor(Double.parseDouble(parts[0]), parts[1]);
+        } catch (RuntimeException e) {
+            throw new IllegalArgumentException("搜索游标无效", e);
         }
     }
 }
