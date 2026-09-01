@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Map;
 import java.util.Objects;
@@ -18,15 +19,11 @@ public class SearchOutboxRepository {
     private final ObjectMapper mapper;
     private final SearchGateRepository gate;
 
-    public SearchOutboxRepository(JdbcTemplate jdbc, ObjectMapper mapper) {
-        this(jdbc, mapper, null);
-    }
-
     @Autowired
     public SearchOutboxRepository(JdbcTemplate jdbc, ObjectMapper mapper, SearchGateRepository gate) {
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.mapper = Objects.requireNonNull(mapper, "ObjectMapper不能为空");
-        this.gate = gate;
+        this.gate = Objects.requireNonNull(gate, "搜索门禁不能为空");
     }
 
     public void enqueue(Listing listing, String eventType) {
@@ -34,6 +31,7 @@ public class SearchOutboxRepository {
         enqueue(listing.id(), listing.version(), eventType);
     }
 
+    @Transactional
     public void enqueue(UUID listingId, long aggregateVersion, String eventType) {
         Objects.requireNonNull(listingId, "商品ID不能为空");
         if (aggregateVersion <= 0 || eventType == null || eventType.isBlank()) {
@@ -41,7 +39,7 @@ public class SearchOutboxRepository {
         }
         SearchSchema.requireEventType(eventType);
         try {
-            if (gate != null) gate.assertWritable();
+            gate.assertWritable();
             String payload = mapper.writeValueAsString(Map.of("listingId", listingId.toString()));
             jdbc.update("""
                 INSERT INTO search_outbox(id,listing_id,aggregate_version,event_type,payload,status,attempt_count,available_at,created_at)

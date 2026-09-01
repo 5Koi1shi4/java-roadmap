@@ -4,29 +4,27 @@ import com.example.campusmarket.shared.DomainEvent;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Objects;
 import java.util.UUID;
 
 /** 从 MySQL 商品事实投影到搜索索引；事件只作为变更通知和版本 fencing。 */
 @Component
-public final class SearchProjector {
+public class SearchProjector {
     private final JdbcTemplate jdbc;
     private final ProductSearchPort search;
     private final SearchGateRepository gate;
-
-    public SearchProjector(JdbcTemplate jdbc, ProductSearchPort search) {
-        this(jdbc, search, null);
-    }
 
     @Autowired
     public SearchProjector(JdbcTemplate jdbc, ProductSearchPort search, SearchGateRepository gate) {
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.search = Objects.requireNonNull(search, "搜索端口不能为空");
-        this.gate = gate;
+        this.gate = Objects.requireNonNull(gate, "搜索门禁不能为空");
     }
 
     /** 处理商品事件；旧事件即使重放也不会覆盖更新版本。 */
+    @Transactional
     public void project(DomainEvent event) {
         Objects.requireNonNull(event, "商品事件不能为空");
         SearchSchema.requireEventType(event.eventType());
@@ -36,7 +34,7 @@ public final class SearchProjector {
         } catch (IllegalArgumentException e) {
             throw new IllegalArgumentException("商品事件 aggregateId 无效", e);
         }
-        if (gate != null) gate.assertProjectionOpen();
+        gate.assertProjectionOpen();
         if ("LISTING_OFF_SALE".equals(event.eventType()) || "LISTING_SOLD_OUT".equals(event.eventType())) {
             search.tombstone(listingId.toString(), event.aggregateVersion());
         } else {
@@ -45,13 +43,16 @@ public final class SearchProjector {
     }
 
     /** 重建期间将文档写入指定索引，不触碰在线别名。 */
-    public void projectInto(String index, UUID listingId, long eventVersion) {
+    /** Replay a change only while the exact rebuild lease is still current. */
+    void projectInto(String index, UUID listingId, long eventVersion, SearchGateRepository.Lease lease) {
+        gate.assertLease(lease);
         Objects.requireNonNull(index, "目标索引不能为空");
         Objects.requireNonNull(listingId, "商品ID不能为空");
         projectListing(listingId, eventVersion, new TargetIndex(search, index));
     }
 
-    public void projectDocumentInto(String index, ProductSearchPort.ProductDocument document) {
+    void projectDocumentInto(String index, ProductSearchPort.ProductDocument document, SearchGateRepository.Lease lease) {
+        gate.assertLease(lease);
         Objects.requireNonNull(index, "目标索引不能为空");
         Objects.requireNonNull(document, "商品文档不能为空");
         ProductSearchPort target = new TargetIndex(search, index);

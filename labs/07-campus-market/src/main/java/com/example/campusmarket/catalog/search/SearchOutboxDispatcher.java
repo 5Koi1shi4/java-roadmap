@@ -8,7 +8,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -22,22 +21,25 @@ public class SearchOutboxDispatcher {
     private final SearchOutboxClaimer claimer;
     private final String owner = "search-dispatcher-" + UUID.randomUUID();
 
-    public SearchOutboxDispatcher(JdbcTemplate jdbc, SearchProjector projector, ObjectMapper mapper) {
-        this(jdbc, projector, mapper, null);
-    }
-
     @Autowired
     public SearchOutboxDispatcher(JdbcTemplate jdbc, SearchProjector projector, ObjectMapper mapper, SearchOutboxClaimer claimer) {
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.projector = Objects.requireNonNull(projector, "投影器不能为空");
         this.mapper = Objects.requireNonNull(mapper, "ObjectMapper不能为空");
-        this.claimer = claimer;
+        this.claimer = Objects.requireNonNull(claimer, "领取器不能为空");
     }
 
     public int dispatchOnce(int limit) { return dispatchOnce(limit, Duration.ofSeconds(30)); }
 
     public int dispatchOnce(int limit, Duration lease) {
-        List<Claim> claims = claimer == null ? claimBatch(limit, lease) : claimer.claim(owner, limit, lease);
+        final List<Claim> claims;
+        try {
+            claims = claimer.claim(owner, limit, lease);
+        } catch (SearchGateRepository.SearchGateClosedException paused) {
+            // Rebuild is an expected pause. No row was claimed, so no
+            // delivery attempt is consumed while the gate is closed.
+            return 0;
+        }
         int completed = 0;
         for (Claim claim : claims) {
             try {
@@ -46,39 +48,12 @@ public class SearchOutboxDispatcher {
                 projector.project(event);
                 completed += complete(claim);
             } catch (RuntimeException failure) {
-                if (claim.attemptCount() >= 3) fail(claim);
+                if (failure instanceof SearchGateRepository.SearchGateClosedException) defer(claim);
+                else if (claim.attemptCount() >= 3) fail(claim);
                 else releaseForRetry(claim);
             }
         }
         return completed;
-    }
-
-    public List<Claim> claimBatch(int limit, Duration lease) {
-        if (limit <= 0 || limit > 1000) throw new IllegalArgumentException("领取数量必须在1到1000之间");
-        if (lease == null || lease.isNegative() || lease.isZero()) throw new IllegalArgumentException("租约必须为正数");
-        long micros = Math.addExact(Math.multiplyExact(lease.getSeconds(), 1_000_000L), lease.getNano() / 1_000L);
-        List<Claim> result = new ArrayList<>();
-        jdbc.query("""
-            SELECT id,listing_id,aggregate_version,event_type,payload,created_at,attempt_count
-            FROM search_outbox
-            WHERE (status='NEW' AND available_at <= CURRENT_TIMESTAMP(6))
-               OR (status='PUBLISHING' AND lease_until <= CURRENT_TIMESTAMP(6))
-            ORDER BY available_at,id LIMIT ? FOR UPDATE SKIP LOCKED
-            """, rs -> {
-                String id = rs.getString("id");
-                String token = UUID.randomUUID().toString();
-                int attempts = rs.getInt("attempt_count") + 1;
-                int changed = jdbc.update("""
-                    UPDATE search_outbox SET status='PUBLISHING',owner_id=?,claim_token=?,
-                        lease_until=TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6)),attempt_count=?
-                    WHERE id=? AND ((status='NEW' AND available_at <= CURRENT_TIMESTAMP(6))
-                       OR (status='PUBLISHING' AND lease_until <= CURRENT_TIMESTAMP(6)))
-                    """, owner, token, micros, attempts, id);
-                if (changed == 1) result.add(new Claim(id, UUID.fromString(rs.getString("listing_id")),
-                    rs.getLong("aggregate_version"), rs.getString("event_type"), rs.getString("payload"),
-                    rs.getTimestamp("created_at").toInstant(), owner, token, attempts));
-            }, limit);
-        return List.copyOf(result);
     }
 
     private int complete(Claim claim) {
@@ -93,6 +68,15 @@ public class SearchOutboxDispatcher {
             UPDATE search_outbox SET status='NEW',owner_id=NULL,claim_token=NULL,lease_until=NULL,
                 available_at=TIMESTAMPADD(SECOND,1,CURRENT_TIMESTAMP(6))
             WHERE id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=? AND lease_until > CURRENT_TIMESTAMP(6) AND attempt_count < 3
+            """, claim.id(), owner, claim.claimToken());
+    }
+
+    /** A rebuild gate is an expected temporary condition, not a delivery failure. */
+    private int defer(Claim claim) {
+        return jdbc.update("""
+            UPDATE search_outbox SET status='NEW',owner_id=NULL,claim_token=NULL,lease_until=NULL,
+                attempt_count=GREATEST(attempt_count-1,0),available_at=TIMESTAMPADD(SECOND,1,CURRENT_TIMESTAMP(6))
+            WHERE id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=? AND lease_until > CURRENT_TIMESTAMP(6)
             """, claim.id(), owner, claim.claimToken());
     }
 

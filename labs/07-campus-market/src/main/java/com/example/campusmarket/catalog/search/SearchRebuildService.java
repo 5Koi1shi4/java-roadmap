@@ -9,6 +9,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** 在线重建：同一 RR 快照和序列高水位，之后按序列补放并用 MySQL 门禁切换。 */
 @Service
@@ -20,55 +21,58 @@ public class SearchRebuildService {
     private final SearchGateRepository gate;
     private final String owner = "search-rebuild-" + UUID.randomUUID();
 
-    public SearchRebuildService(JdbcTemplate jdbc, SearchProjector projector, ElasticsearchProductSearch elasticsearch) {
-        this(jdbc, projector, elasticsearch, null, null);
-    }
-    public SearchRebuildService(JdbcTemplate jdbc, SearchProjector projector, ElasticsearchProductSearch elasticsearch,
-                                PlatformTransactionManager transactionManager) {
-        this(jdbc, projector, elasticsearch, transactionManager, null);
-    }
     @Autowired
     public SearchRebuildService(JdbcTemplate jdbc, SearchProjector projector, ElasticsearchProductSearch elasticsearch,
                                 PlatformTransactionManager transactionManager, SearchGateRepository gate) {
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.projector = Objects.requireNonNull(projector, "投影器不能为空");
         this.elasticsearch = Objects.requireNonNull(elasticsearch, "Elasticsearch不能为空");
-        this.transactions = transactionManager == null ? null : new TransactionTemplate(transactionManager);
-        if (transactions != null) transactions.setIsolationLevelName("ISOLATION_REPEATABLE_READ");
-        this.gate = gate;
+        this.transactions = new TransactionTemplate(Objects.requireNonNull(transactionManager, "事务管理器不能为空"));
+        this.transactions.setIsolationLevelName("ISOLATION_REPEATABLE_READ");
+        this.gate = Objects.requireNonNull(gate, "搜索门禁不能为空");
     }
 
     public RebuildReport rebuild() {
         Snapshot snapshot = captureSnapshot();
         String target = elasticsearch.createRebuildIndex();
-        int snapshotCount = 0;
-        boolean aliasSwitched = false;
+        // Register immediately so a process crash at any later stage leaves a
+        // durable, lease-protected cleanup record instead of an orphan index.
+        elasticsearch.registerRebuildTarget(target);
+        AtomicBoolean aliasSwitched = new AtomicBoolean(false);
         try {
-            for (ProductSearchPort.ProductDocument document : snapshot.documents()) {
-                projector.projectDocumentInto(target, document);
-                snapshotCount++;
-            }
-            elasticsearch.refreshIndex(target);
-            SearchGateRepository.Lease lease = gate == null ? null : gate.acquire(owner);
+            SearchGateRepository.Lease lease = gate.acquire(owner, java.time.Duration.ofSeconds(30));
             try {
-                List<OutboxChange> changes = jdbc.query(
-                    "SELECT listing_id, aggregate_version FROM search_outbox WHERE sequence_no > ? ORDER BY sequence_no",
-                    (rs, rowNum) -> new OutboxChange(UUID.fromString(rs.getString(1)), rs.getLong(2)), snapshot.highWater());
-                for (OutboxChange change : changes) projector.projectInto(target, change.listingId(), change.aggregateVersion());
-                elasticsearch.refreshIndex(target);
-                String previous = elasticsearch.currentReadIndex();
-                elasticsearch.switchAliases(target, previous);
-                aliasSwitched = true;
-                if (previous != null) elasticsearch.scheduleCleanup(previous);
-                elasticsearch.cleanupPending();
-                return new RebuildReport(target, snapshot.highWater(), snapshotCount, changes.size());
+                return transactions.execute(status -> {
+                    if (!gate.renew(lease, java.time.Duration.ofSeconds(30))) throw new IllegalStateException("重建门禁租约已过期");
+                    for (ProductSearchPort.ProductDocument document : snapshot.documents()) {
+                        if (!gate.renew(lease, java.time.Duration.ofSeconds(30))) throw new IllegalStateException("重建门禁租约已过期");
+                        projector.projectDocumentInto(target, document, lease);
+                    }
+                    elasticsearch.refreshIndex(target);
+                    List<OutboxChange> changes = jdbc.query(
+                        "SELECT listing_id, aggregate_version FROM search_outbox WHERE sequence_no > ? ORDER BY sequence_no",
+                        (rs, rowNum) -> new OutboxChange(UUID.fromString(rs.getString(1)), rs.getLong(2)), snapshot.highWater());
+                    for (OutboxChange change : changes) {
+                        if (!gate.renew(lease, java.time.Duration.ofSeconds(30))) throw new IllegalStateException("重建门禁租约已过期");
+                        projector.projectInto(target, change.listingId(), change.aggregateVersion(), lease);
+                    }
+                    elasticsearch.refreshIndex(target);
+                    gate.assertLease(lease);
+                    String previous = elasticsearch.currentReadIndex();
+                    elasticsearch.switchAliases(target, previous);
+                    aliasSwitched.set(true);
+                    elasticsearch.cancelCleanup(target);
+                    if (previous != null) elasticsearch.scheduleCleanup(previous);
+                    return new RebuildReport(target, snapshot.highWater(), snapshot.documents().size(), changes.size());
+                });
             } finally {
-                if (lease != null) gate.release(lease);
+                gate.release(lease);
             }
         } catch (RuntimeException failure) {
-            // Once the alias is live, it is never a cleanup candidate. Before the
-            // switch, persist the target for retryable deletion after a crash.
-            if (!aliasSwitched) elasticsearch.scheduleCleanup(target);
+            // The target was registered immediately after creation and remains
+            // a retryable cleanup candidate unless it became the live alias.
+            if (aliasSwitched.get()) elasticsearch.cancelCleanup(target);
+            else elasticsearch.armCleanup(target);
             throw failure;
         }
     }
@@ -83,7 +87,7 @@ public class SearchRebuildService {
                     rs.getInt("available_quantity"), rs.getString("status"), Math.max(1, rs.getLong("version"))));
             return new Snapshot(highWater == null ? 0 : highWater, documents);
         };
-        return transactions == null ? read.get() : Objects.requireNonNull(transactions.execute(status -> read.get()));
+        return Objects.requireNonNull(transactions.execute(status -> read.get()));
     }
 
     public void cleanupPending() { elasticsearch.cleanupPending(); }

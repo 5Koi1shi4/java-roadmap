@@ -14,8 +14,12 @@ import java.util.UUID;
 @Service
 public class SearchOutboxClaimer {
     private final JdbcTemplate jdbc;
+    private final SearchGateRepository gate;
 
-    public SearchOutboxClaimer(JdbcTemplate jdbc) { this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空"); }
+    public SearchOutboxClaimer(JdbcTemplate jdbc, SearchGateRepository gate) {
+        this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
+        this.gate = Objects.requireNonNull(gate, "搜索门禁不能为空");
+    }
 
     @Transactional
     public List<SearchOutboxDispatcher.Claim> claim(String owner, int limit, Duration lease) {
@@ -24,7 +28,12 @@ public class SearchOutboxClaimer {
         }
         long micros = Math.addExact(Math.multiplyExact(lease.getSeconds(), 1_000_000L), lease.getNano() / 1_000L);
         List<SearchOutboxDispatcher.Claim> result = new ArrayList<>();
-        jdbc.query("SELECT id,listing_id,aggregate_version,event_type,payload,created_at,attempt_count FROM search_outbox WHERE (status='NEW' AND available_at <= CURRENT_TIMESTAMP(6)) OR (status='PUBLISHING' AND lease_until <= CURRENT_TIMESTAMP(6)) ORDER BY sequence_no LIMIT ? FOR UPDATE SKIP LOCKED", rs -> {
+        // Do not even claim while rebuild owns the gate. This makes a closed
+        // gate a pause (rather than a delivery attempt) and serializes claim
+        // with a rebuild boundary through the same MySQL row lock.
+        gate.assertProjectionOpen();
+        jdbc.update("UPDATE search_outbox SET status='FAILED',owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE status='PUBLISHING' AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count >= 3");
+        jdbc.query("SELECT id,listing_id,aggregate_version,event_type,payload,created_at,attempt_count FROM search_outbox WHERE ((status='NEW' AND available_at <= CURRENT_TIMESTAMP(6)) OR (status='PUBLISHING' AND lease_until <= CURRENT_TIMESTAMP(6))) AND attempt_count < 3 ORDER BY sequence_no LIMIT ? FOR UPDATE SKIP LOCKED", rs -> {
             String id = rs.getString("id");
             String token = UUID.randomUUID().toString();
             int attempts = rs.getInt("attempt_count") + 1;

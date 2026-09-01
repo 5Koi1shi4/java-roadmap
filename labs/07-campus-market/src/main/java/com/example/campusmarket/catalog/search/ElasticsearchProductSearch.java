@@ -9,6 +9,7 @@ import co.elastic.clients.elasticsearch.core.SearchResponse;
 import co.elastic.clients.elasticsearch.core.search.Hit;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -20,15 +21,12 @@ import java.util.UUID;
 
 /** Elasticsearch 商品索引实现，所有写入均通过 external_gte 版本保护。 */
 @Component
-public final class ElasticsearchProductSearch implements ProductSearchPort {
+public class ElasticsearchProductSearch implements ProductSearchPort {
     private static final String INITIAL_INDEX = "campus-listing-000001";
     private final ElasticsearchClient client;
     private final org.springframework.jdbc.core.JdbcTemplate jdbc;
     private volatile boolean initialized;
-
-    public ElasticsearchProductSearch(ElasticsearchClient client) {
-        this(client, null);
-    }
+    private final String cleanupOwner = "search-cleanup-" + UUID.randomUUID();
 
     @Autowired
     public ElasticsearchProductSearch(ElasticsearchClient client, org.springframework.jdbc.core.JdbcTemplate jdbc) {
@@ -73,13 +71,19 @@ public final class ElasticsearchProductSearch implements ProductSearchPort {
         Objects.requireNonNull(request, "搜索请求不能为空");
         try {
             Query query = query(request);
+            ProductSearchPort.SearchCursor cursor = request.searchAfter() == null ? null : ProductSearchPort.decodeCursor(request.searchAfter());
+            String fingerprint = fingerprint(request);
+            if (cursor != null && (cursor.pitId().isBlank() || !fingerprint.equals(cursor.fingerprint()))) {
+                throw new IllegalArgumentException("搜索游标与查询条件不匹配");
+            }
+            String pit = cursor == null ? client.openPointInTime(o -> o.index(READ_ALIAS).keepAlive(co.elastic.clients.elasticsearch._types.Time.of(t -> t.time("1m")))).id() : cursor.pitId();
             SearchResponse<Map> response = client.search(s -> {
-                s.index(READ_ALIAS).query(query).size(request.size() + 1).trackTotalHits(t -> t.enabled(true))
+                s.pit(p -> p.id(pit).keepAlive(co.elastic.clients.elasticsearch._types.Time.of(t -> t.time("1m")))).query(query).size(request.size() + 1).trackTotalHits(t -> t.enabled(true))
                     // Score is ordered first; listing ID is a deterministic tie-breaker.
                     .sort(sort -> sort.score(sc -> sc.order(co.elastic.clients.elasticsearch._types.SortOrder.Desc)))
                     .sort(sort -> sort.field(f -> f.field("listingId")
                         .order(co.elastic.clients.elasticsearch._types.SortOrder.Asc)));
-                if (request.searchAfter() != null) s.searchAfter(searchAfter(request.searchAfter()));
+                if (cursor != null) s.searchAfter(searchAfter(cursor));
                 return s;
             }, Map.class);
             List<SearchItem> items = new ArrayList<>();
@@ -89,10 +93,13 @@ public final class ElasticsearchProductSearch implements ProductSearchPort {
             for (int i = 0; i < Math.min(request.size(), hits.size()); i++) {
                 Hit<Map> hit = hits.get(i);
                 items.add(fromMap(hit.source()));
-                if (hit.sort().size() >= 2) next = ProductSearchPort.encodeCursor(hit.sort().get(0).doubleValue(), hit.sort().get(1).stringValue());
+                if (hit.sort().size() >= 2) next = ProductSearchPort.encodeCursor(pit, fingerprint, hit.sort().get(0).doubleValue(), hit.sort().get(1).stringValue());
             }
             long total = response.hits().total() == null ? items.size() : response.hits().total().value();
-            if (!hasMore) next = null;
+            if (!hasMore) {
+                next = null;
+                try { client.closePointInTime(c -> c.id(pit)); } catch (IOException ignored) { }
+            }
             return new SearchPage(items, total, next);
         } catch (IOException | ArithmeticException e) {
             throw new SearchUnavailableException("商品搜索失败", e);
@@ -182,19 +189,57 @@ public final class ElasticsearchProductSearch implements ProductSearchPort {
 
     public void scheduleCleanup(String index) {
         if (index == null || index.isBlank() || index.startsWith("campus-listing-000001")) return;
-        jdbc.update("INSERT INTO search_index_cleanup_task(id,index_name,status,attempt_count,available_at,created_at) VALUES (?,?, 'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE status='NEW',available_at=CURRENT_TIMESTAMP(6)", UUID.randomUUID().toString(), index);
+        jdbc.update("INSERT INTO search_index_cleanup_task(id,index_name,status,attempt_count,available_at,created_at) VALUES (?,?, 'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE status=IF(status='DONE',status,'NEW'),available_at=IF(status='DONE',available_at,CURRENT_TIMESTAMP(6))", UUID.randomUUID().toString(), index);
     }
 
+    /** Register an index while it may still be live or being populated. */
+    public void registerRebuildTarget(String index) {
+        if (index == null || index.isBlank() || index.startsWith("campus-listing-000001")) return;
+        jdbc.update("INSERT INTO search_index_cleanup_task(id,index_name,status,attempt_count,available_at,created_at) VALUES (?,?, 'BUILDING',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE status='BUILDING',owner_id=NULL,claim_token=NULL,lease_until=NULL", UUID.randomUUID().toString(), index);
+    }
+
+    /** Make a failed/unreferenced index eligible for the cleanup worker. */
+    public void armCleanup(String index) {
+        if (index == null || index.isBlank()) return;
+        jdbc.update("UPDATE search_index_cleanup_task SET status='NEW',available_at=CURRENT_TIMESTAMP(6),owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE index_name=? AND status='BUILDING'", index);
+    }
+
+    /** Mark a protected BUILDING target as live before cleanup workers can see it. */
+    public void cancelCleanup(String index) {
+        if (index == null || index.isBlank()) return;
+        jdbc.update("UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL,last_error=NULL,failure_class=NULL WHERE index_name=?", index);
+    }
+
+    @Transactional
     public void cleanupPending() {
-        List<String> indexes = jdbc.query("SELECT index_name FROM search_index_cleanup_task WHERE status='NEW' AND available_at <= CURRENT_TIMESTAMP(6) ORDER BY created_at LIMIT 20", (rs, rowNum) -> rs.getString(1));
-        for (String index : indexes) {
+        // Cleanup must not run while a rebuild owns the gate.  Holding this
+        // row lock across the delete also closes the alias-switch/delete race.
+        String mode = jdbc.queryForObject("SELECT mode FROM search_rebuild_gate WHERE id=1 FOR UPDATE", String.class);
+        if (!"OPEN".equals(mode)) return;
+        List<CleanupClaim> claims = jdbc.query("SELECT id,index_name,attempt_count FROM search_index_cleanup_task WHERE (status='NEW' AND available_at <= CURRENT_TIMESTAMP(6)) OR (status='RUNNING' AND lease_until <= CURRENT_TIMESTAMP(6)) ORDER BY created_at LIMIT 20 FOR UPDATE SKIP LOCKED", (rs, rowNum) -> new CleanupClaim(rs.getString(1), rs.getString(2), rs.getInt(3)));
+        for (CleanupClaim claim : claims) {
+            String token = UUID.randomUUID().toString();
+            if (jdbc.update("UPDATE search_index_cleanup_task SET status='RUNNING',owner_id=?,claim_token=?,lease_until=TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)),attempt_count=attempt_count+1 WHERE id=? AND ((status='NEW' AND available_at <= CURRENT_TIMESTAMP(6)) OR (status='RUNNING' AND lease_until <= CURRENT_TIMESTAMP(6)))", cleanupOwner, token, claim.id()) != 1) continue;
             try {
-                client.indices().delete(d -> d.index(index));
-                jdbc.update("UPDATE search_index_cleanup_task SET status='DONE',attempt_count=attempt_count+1 WHERE index_name=?", index);
-            } catch (RuntimeException | IOException ignored) {
-                jdbc.update("UPDATE search_index_cleanup_task SET attempt_count=attempt_count+1,available_at=TIMESTAMPADD(SECOND,10,CURRENT_TIMESTAMP(6)) WHERE index_name=?", index);
+                try { client.indices().delete(d -> d.index(claim.indexName())); }
+                catch (co.elastic.clients.elasticsearch._types.ElasticsearchException missing) { if (missing.status() != 404) throw missing; }
+                jdbc.update("UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL,last_error=NULL,failure_class=NULL WHERE id=? AND status='RUNNING' AND owner_id=? AND claim_token=? AND lease_until > CURRENT_TIMESTAMP(6)", claim.id(), cleanupOwner, token);
+            } catch (RuntimeException | IOException failure) {
+                String kind = permanentFailure(failure) ? "PERMANENT" : "TRANSIENT";
+                String message = failure.getMessage() == null ? kind : failure.getMessage().substring(0, Math.min(500, failure.getMessage().length()));
+                String status = claim.attemptCount() + 1 >= 3 ? "FAILED" : "NEW";
+                jdbc.update("UPDATE search_index_cleanup_task SET status=?,owner_id=NULL,claim_token=NULL,lease_until=NULL,available_at=TIMESTAMPADD(SECOND,10,CURRENT_TIMESTAMP(6)),last_error=?,failure_class=? WHERE id=? AND status='RUNNING' AND owner_id=? AND claim_token=? AND lease_until > CURRENT_TIMESTAMP(6)", status, message, kind, claim.id(), cleanupOwner, token);
             }
         }
+    }
+
+    private record CleanupClaim(String id, String indexName, int attemptCount) { }
+
+    private static boolean permanentFailure(Throwable failure) {
+        if (failure instanceof co.elastic.clients.elasticsearch._types.ElasticsearchException elastic) {
+            return elastic.status() == 400 || elastic.status() == 403 || elastic.status() == 409;
+        }
+        return false;
     }
 
     private void ensureInitialIndex() {
@@ -256,10 +301,16 @@ public final class ElasticsearchProductSearch implements ProductSearchPort {
         return map;
     }
 
-    private static List<co.elastic.clients.elasticsearch._types.FieldValue> searchAfter(String encoded) {
-        ProductSearchPort.SearchCursor cursor = ProductSearchPort.decodeCursor(encoded);
+    private static List<co.elastic.clients.elasticsearch._types.FieldValue> searchAfter(ProductSearchPort.SearchCursor cursor) {
         return List.of(co.elastic.clients.elasticsearch._types.FieldValue.of(cursor.score()),
             co.elastic.clients.elasticsearch._types.FieldValue.of(cursor.listingId()));
+    }
+
+    private static String fingerprint(ProductSearchPort.SearchRequest request) {
+        return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+            (request.keyword() + "\u0000" + java.util.Objects.toString(request.category(), "") + "\u0000"
+                + java.util.Objects.toString(request.minPriceFen(), "") + "\u0000" + java.util.Objects.toString(request.maxPriceFen(), ""))
+                .getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
     private static boolean isVersionConflict(co.elastic.clients.elasticsearch._types.ElasticsearchException e) {

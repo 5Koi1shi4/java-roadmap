@@ -5,6 +5,7 @@ import com.example.campusmarket.catalog.search.ElasticsearchProductSearch;
 import com.example.campusmarket.catalog.search.SearchRebuildService;
 import com.example.campusmarket.catalog.search.SearchProjector;
 import com.example.campusmarket.catalog.search.SearchOutboxDispatcher;
+import com.example.campusmarket.catalog.search.SearchGateRepository;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -34,6 +35,7 @@ class SearchRebuildIT extends SharedContainers {
 
     @BeforeEach
     void fixture() {
+        jdbc.update("UPDATE search_rebuild_gate SET mode='OPEN',owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE id=1");
         jdbc.update("DELETE FROM inventory_movement");
         jdbc.update("DELETE FROM payment_callback_event");
         jdbc.update("DELETE FROM refund_order");
@@ -69,9 +71,37 @@ class SearchRebuildIT extends SharedContainers {
     }
 
     @Test
+    void expiredLeaseCanBeTakenOverAndStaleOwnerCannotReleaseOrRenew() {
+        SearchGateRepository firstCoordinator = new SearchGateRepository(jdbc);
+        SearchGateRepository secondCoordinator = new SearchGateRepository(jdbc);
+        SearchGateRepository.Lease old = firstCoordinator.acquire("rebuild-old", java.time.Duration.ofMinutes(1));
+        jdbc.update("UPDATE search_rebuild_gate SET lease_until=TIMESTAMPADD(MICROSECOND,-1,CURRENT_TIMESTAMP(6)) WHERE id=1");
+
+        SearchGateRepository.Lease current = secondCoordinator.acquire("rebuild-current", java.time.Duration.ofMinutes(1));
+        firstCoordinator.release(old);
+
+        assertThat(jdbc.queryForObject("SELECT owner_id FROM search_rebuild_gate WHERE id=1", String.class))
+            .isEqualTo("rebuild-current");
+        assertThat(firstCoordinator.renew(old, java.time.Duration.ofMinutes(1))).isFalse();
+        assertThat(secondCoordinator.renew(current, java.time.Duration.ofMinutes(1))).isTrue();
+        secondCoordinator.release(current);
+        assertThat(jdbc.queryForObject("SELECT mode FROM search_rebuild_gate WHERE id=1", String.class)).isEqualTo("OPEN");
+    }
+
+    @Test
     void dispatchesEnqueuedChangeThroughClaimProjectAndPublish() {
         assertThat(dispatcher.dispatchOnce(10)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT status FROM search_outbox LIMIT 1", String.class)).isEqualTo("PUBLISHED");
+    }
+
+    @Test
+    void gateClosedDefersWithoutConsumingDeliveryAttempt() {
+        SearchGateRepository coordinator = new SearchGateRepository(jdbc);
+        SearchGateRepository.Lease lease = coordinator.acquire("rebuild-barrier", java.time.Duration.ofMinutes(1));
+        assertThat(dispatcher.dispatchOnce(10)).isZero();
+        assertThat(jdbc.queryForObject("SELECT status FROM search_outbox LIMIT 1", String.class)).isEqualTo("NEW");
+        assertThat(jdbc.queryForObject("SELECT attempt_count FROM search_outbox LIMIT 1", Integer.class)).isZero();
+        coordinator.release(lease);
     }
 
     @Test
@@ -106,5 +136,7 @@ class SearchRebuildIT extends SharedContainers {
             .containsExactlyElementsOf(firstPage.items().stream().map(ProductSearchPort.SearchItem::listingId).toList());
         assertThat(finalPage.items()).extracting(ProductSearchPort.SearchItem::aggregateVersion)
             .containsExactly(1L);
+        assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, third.index()))
+            .isEqualTo("DONE");
     }
 }

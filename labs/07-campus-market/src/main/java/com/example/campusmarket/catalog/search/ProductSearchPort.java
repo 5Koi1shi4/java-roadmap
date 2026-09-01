@@ -70,9 +70,11 @@ public interface ProductSearchPort {
         }
     }
 
-    record SearchCursor(double score, String listingId) {
+    record SearchCursor(String pitId, String fingerprint, double score, String listingId) {
+        public SearchCursor(double score, String listingId) { this("", "", score, listingId); }
         public SearchCursor {
-            if (!Double.isFinite(score) || listingId == null || listingId.isBlank() || listingId.length() > 200
+            if (pitId == null || fingerprint == null || pitId.length() > 500 || fingerprint.length() > 200
+                || !Double.isFinite(score) || listingId == null || listingId.isBlank() || listingId.length() > 200
                 || listingId.indexOf('\n') >= 0 || listingId.indexOf('\r') >= 0) {
                 throw new IllegalArgumentException("搜索游标无效");
             }
@@ -85,13 +87,27 @@ public interface ProductSearchPort {
             (Double.toHexString(cursor.score()) + "\n" + cursor.listingId()).getBytes(StandardCharsets.UTF_8));
     }
 
+    static String encodeCursor(String pitId, String fingerprint, double score, String listingId) {
+        SearchCursor cursor = new SearchCursor(pitId, fingerprint, score, listingId);
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(
+            (cursor.pitId() + "\n" + cursor.fingerprint() + "\n" + Double.toHexString(cursor.score()) + "\n" + cursor.listingId()).getBytes(StandardCharsets.UTF_8));
+    }
+
     static SearchCursor decodeCursor(String encoded) {
         if (encoded == null || encoded.length() > 1000) throw new IllegalArgumentException("搜索游标无效");
         try {
             String value = new String(Base64.getUrlDecoder().decode(encoded), StandardCharsets.UTF_8);
             String[] parts = value.split("\\n", -1);
-            if (parts.length != 2 || parts[0].isBlank() || parts[1].isBlank()) throw new IllegalArgumentException("搜索游标无效");
-            return new SearchCursor(Double.parseDouble(parts[0]), parts[1]);
+            if (parts.length == 2) {
+                if (parts[0].isBlank() || parts[1].isBlank()) throw new IllegalArgumentException("搜索游标无效");
+                double score = Double.parseDouble(parts[0]);
+                if (!Double.toHexString(score).equals(parts[0])) throw new IllegalArgumentException("游标 score 非 canonical");
+                return new SearchCursor(score, parts[1]);
+            }
+            if (parts.length != 4 || parts[0].isBlank() || parts[1].isBlank() || parts[3].isBlank()) throw new IllegalArgumentException("搜索游标无效");
+            double score = Double.parseDouble(parts[2]);
+            if (!Double.toHexString(score).equals(parts[2])) throw new IllegalArgumentException("游标 score 非 canonical");
+            return new SearchCursor(parts[0], parts[1], score, parts[3]);
         } catch (RuntimeException e) {
             throw new IllegalArgumentException("搜索游标无效", e);
         }

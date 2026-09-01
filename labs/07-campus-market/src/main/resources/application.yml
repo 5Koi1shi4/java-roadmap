@@ -49,6 +49,7 @@ campus:
       dispatcher:
         enabled: false
         fixed-delay-ms: 1000
+        cleanup-delay-ms: 5000
 
 ---
 spring:
