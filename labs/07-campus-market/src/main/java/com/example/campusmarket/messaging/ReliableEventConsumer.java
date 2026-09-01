@@ -4,16 +4,12 @@ import com.example.campusmarket.shared.DomainEvent;
 import com.rabbitmq.client.Channel;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
-import org.springframework.context.annotation.Profile;
-import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.time.Duration;
 import java.util.UUID;
 
 /** Rabbit MANUAL ack 适配器：提交完成后 ACK，业务异常则 NACK/requeue。 */
-@Component
-@Profile("!test")
 public class ReliableEventConsumer {
     private static final String CONSUMER = "campus-market-order";
     private final EventEnvelopeCodec codec;
@@ -44,8 +40,11 @@ public class ReliableEventConsumer {
                         inbox.markFailed(CONSUMER, eventId, claim.ownerId(), claim.claimToken());
                     }
                 });
-                manualPublisher.publish(eventId, "PERMANENT");
-                channel.basicAck(tag, false);
+                if (publishManual(eventId, "PERMANENT")) {
+                    channel.basicAck(tag, false);
+                } else {
+                    channel.basicNack(tag, false, true);
+                }
             } catch (RuntimeException noUsableId) {
                 channel.basicNack(tag, false, false);
             }
@@ -56,14 +55,31 @@ public class ReliableEventConsumer {
                 claim -> businessHandler.handle(event));
             if (acknowledged) channel.basicAck(tag, false);
             else if (inbox.isFailed(CONSUMER, event.eventId())) {
-                manualPublisher.publish(event.eventId(), "EXHAUSTED");
-                channel.basicAck(tag, false);
+                if (publishManual(event.eventId(), "EXHAUSTED")) {
+                    channel.basicAck(tag, false);
+                } else {
+                    channel.basicNack(tag, false, true);
+                }
             } else channel.basicNack(tag, false, true);
         } catch (IllegalArgumentException permanent) {
-            manualPublisher.publish(event.eventId(), "PERMANENT");
-            channel.basicAck(tag, false);
+            if (publishManual(event.eventId(), "PERMANENT")) {
+                channel.basicAck(tag, false);
+            } else {
+                channel.basicNack(tag, false, true);
+            }
         } catch (RuntimeException retryable) {
             channel.basicNack(tag, false, true);
+        }
+    }
+
+    private boolean publishManual(UUID eventId, String failureClass) {
+        try {
+            manualPublisher.publish(eventId, failureClass);
+            return true;
+        } catch (RuntimeException ignored) {
+            // manual_failure is durable; keep the broker delivery retryable when
+            // its notification cannot yet be routed or confirmed.
+            return false;
         }
     }
 }

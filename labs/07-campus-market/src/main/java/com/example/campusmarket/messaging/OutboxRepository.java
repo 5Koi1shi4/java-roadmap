@@ -115,7 +115,7 @@ public class OutboxRepository {
             SELECT ?, 'OUTBOX', event_id, '', ?, payload, 'NEW', CURRENT_TIMESTAMP(6)
             FROM integration_outbox
             WHERE event_id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=?
-            ON DUPLICATE KEY UPDATE id=id
+            ON DUPLICATE KEY UPDATE id=manual_failure.id
             """, UUID.randomUUID().toString(), failureClass, eventId.toString(), owner, claimToken);
         return jdbc.update("""
             UPDATE integration_outbox

@@ -60,11 +60,11 @@ public class OutboxDispatcher {
             } catch (RuntimeException failure) {
                 if (failure instanceof IllegalArgumentException) {
                     if (repository.fail(message.eventId(), message.ownerId(), message.claimToken(), "PERMANENT") == 1) {
-                        manualFailurePublisher.publish(message.eventId(), "PERMANENT");
+                        publishManualFailure(message.eventId(), "PERMANENT");
                     }
                 } else if (message.attemptCount() >= 3) {
                     if (repository.fail(message.eventId(), message.ownerId(), message.claimToken(), "EXHAUSTED") == 1) {
-                        manualFailurePublisher.publish(message.eventId(), "EXHAUSTED");
+                        publishManualFailure(message.eventId(), "EXHAUSTED");
                     }
                 } else {
                     repository.releaseForRetry(message.eventId(), message.ownerId(), message.claimToken(), Duration.ofSeconds(1));
@@ -72,6 +72,15 @@ public class OutboxDispatcher {
             }
         }
         return completed;
+    }
+
+    /** 人工副本已在 REQUIRES_NEW 事务中落库；人工交换机暂不可用时保留 NEW 供补偿调度。 */
+    private void publishManualFailure(java.util.UUID eventId, String failureClass) {
+        try {
+            manualFailurePublisher.publish(eventId, failureClass);
+        } catch (RuntimeException ignored) {
+            // 不将人工通知的瞬时投递失败误报为业务成功，也不泄露 payload/连接细节。
+        }
     }
 
     private void publishWithConfirm(String correlationId, String routingKey, Message message) {
@@ -85,6 +94,11 @@ public class OutboxDispatcher {
 
     private static void awaitConfirmed(CorrelationData correlation) {
         try {
+            // Spring AMQP 3.2's PublisherCallbackChannelImpl first stores the
+            // ReturnedMessage on this correlation, then waits for the return
+            // callback before completing CorrelationData#getFuture. Therefore
+            // this per-publish future is the single convergence point: a late
+            // return cannot contaminate a later retry or another correlation.
             CorrelationData.Confirm confirm = correlation.getFuture().get(10, TimeUnit.SECONDS);
             if (!confirm.isAck()) throw new IllegalStateException("Rabbit publisher NACK");
             if (correlation.getReturned() != null) throw new IllegalStateException("事件不可路由");

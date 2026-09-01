@@ -3,6 +3,7 @@ package com.example.campusmarket.identity.api;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
@@ -19,6 +20,7 @@ import java.io.IOException;
 @Configuration
 @Profile("!test")
 @ConditionalOnBean(JwtAuthenticationFilter.class)
+@ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
 public class SecurityConfiguration {
     @Bean
     PasswordEncoder passwordEncoder() {

@@ -44,7 +44,7 @@ public class InboxRepository {
         jdbc.update("""
             INSERT INTO consumed_event (id,consumer_name,event_id,status,owner_id,claim_token,lease_until,attempt_count,created_at)
             VALUES (?,?,?,'PROCESSING',?,?,TIMESTAMPADD(MICROSECOND, ?, CURRENT_TIMESTAMP(6)),0,CURRENT_TIMESTAMP(6))
-            ON DUPLICATE KEY UPDATE id=id
+            ON DUPLICATE KEY UPDATE id=consumed_event.id
             """, UUID.randomUUID().toString(), consumerName, eventId.toString(), owner, token, micros);
 
         UUID exhaustedManualId = UUID.nameUUIDFromBytes((consumerName + ":" + eventId)
@@ -56,7 +56,7 @@ public class InboxRepository {
             FROM consumed_event
             WHERE consumer_name=? AND event_id=? AND status='PROCESSING'
               AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count >= 3
-            ON DUPLICATE KEY UPDATE id=id
+            ON DUPLICATE KEY UPDATE id=manual_failure.id
             """, exhaustedManualId.toString(), consumerName, eventId.toString());
         jdbc.update("""
             UPDATE consumed_event
@@ -119,7 +119,7 @@ public class InboxRepository {
         jdbc.update("""
             INSERT INTO manual_failure (id,source_type,source_id,consumer_name,failure_class,payload,status,created_at)
             VALUES (?,?,?,?,'PERMANENT',JSON_OBJECT('eventId',?,'consumerName',?),'NEW',CURRENT_TIMESTAMP(6))
-            ON DUPLICATE KEY UPDATE id=id
+            ON DUPLICATE KEY UPDATE id=manual_failure.id
             """, manualId.toString(), "INBOX", eventId.toString(), consumerName,
             eventId.toString(), consumerName);
         return jdbc.update("""

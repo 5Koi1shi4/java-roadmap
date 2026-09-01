@@ -6,6 +6,10 @@ import com.example.campusmarket.messaging.OutboxDispatcher;
 import com.example.campusmarket.messaging.OutboxRepository;
 import com.example.campusmarket.messaging.RabbitTopology;
 import com.example.campusmarket.messaging.EventEnvelopeCodec;
+import com.example.campusmarket.messaging.EventBusinessHandler;
+import com.example.campusmarket.messaging.ReliableEventConsumer;
+import com.example.campusmarket.shared.DomainEvent;
+import com.rabbitmq.client.Channel;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -14,6 +18,9 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.core.Message;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 
@@ -21,13 +28,17 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 @SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("local")
+@Import(ReliableMessagingIT.ListenerFixture.class)
 class ReliableMessagingIT extends SharedContainers {
     @Autowired JdbcTemplate jdbc;
     @Autowired OutboxRepository outbox;
@@ -35,6 +46,20 @@ class ReliableMessagingIT extends SharedContainers {
     @Autowired OutboxDispatcher dispatcher;
     @Autowired RabbitTemplate rabbitTemplate;
     @Autowired EventEnvelopeCodec codec;
+    @Autowired ReliableEventConsumer consumer;
+
+    private static final AtomicReference<RuntimeException> HANDLER_FAILURE = new AtomicReference<>();
+
+    @TestConfiguration(proxyBeanMethods = false)
+    static class ListenerFixture {
+        @Bean
+        EventBusinessHandler eventBusinessHandler() {
+            return event -> {
+                RuntimeException failure = HANDLER_FAILURE.get();
+                if (failure != null) throw failure;
+            };
+        }
+    }
 
     @BeforeAll
     static void migrate() {
@@ -43,8 +68,47 @@ class ReliableMessagingIT extends SharedContainers {
 
     @BeforeEach
     void cleanFixtures() {
-        jdbc.update("DELETE FROM consumed_event WHERE consumer_name LIKE 'task6-%'");
-        jdbc.update("DELETE FROM integration_outbox WHERE event_type='ORDER_CREATED' AND aggregate_id LIKE 'task6-%'");
+        HANDLER_FAILURE.set(null);
+        jdbc.update("DELETE FROM consumed_event WHERE consumer_name LIKE 'task6-%' OR consumer_name='campus-market-order'");
+        jdbc.update("DELETE FROM integration_outbox WHERE event_type='ORDER_CREATED'");
+    }
+
+    @Test
+    void realConsumerAcksOnlyAfterInboxTransactionCommits() throws Exception {
+        UUID eventId = UUID.randomUUID();
+        Channel channel = mock(Channel.class);
+        Message message = eventMessage(eventId);
+
+        consumer.onMessage(message, channel);
+
+        verify(channel).basicAck(0L, false);
+        assertThat(jdbc.queryForObject("SELECT status FROM consumed_event WHERE consumer_name=? AND event_id=?",
+            String.class, "campus-market-order", eventId.toString())).isEqualTo("COMPLETED");
+    }
+
+    @Test
+    void realConsumerNacksAndRequeuesBeforeRetryableBusinessCommit() throws Exception {
+        UUID eventId = UUID.randomUUID();
+        Channel channel = mock(Channel.class);
+        HANDLER_FAILURE.set(new IllegalStateException("retryable test failure"));
+
+        consumer.onMessage(eventMessage(eventId), channel);
+
+        verify(channel).basicNack(0L, false, true);
+        assertThat(jdbc.queryForObject("SELECT status FROM consumed_event WHERE consumer_name=? AND event_id=?",
+            String.class, "campus-market-order", eventId.toString())).isEqualTo("PROCESSING");
+    }
+
+    @Test
+    void realConsumerAcksCompletedDuplicateWithoutRunningBusinessAgain() throws Exception {
+        UUID eventId = UUID.randomUUID();
+        inbox.claim("campus-market-order", eventId, Duration.ofMinutes(1))
+            .ifPresent(claim -> inbox.complete("campus-market-order", eventId, claim.ownerId(), claim.claimToken()));
+        Channel channel = mock(Channel.class);
+
+        consumer.onMessage(eventMessage(eventId), channel);
+
+        verify(channel).basicAck(0L, false);
     }
 
     @Test
@@ -99,6 +163,25 @@ class ReliableMessagingIT extends SharedContainers {
     }
 
     @Test
+    void returnedEventIsNotMarkedPublishedWhenItsBindingIsRemoved() throws Exception {
+        UUID eventId = insertOutbox("task6-unroutable-" + UUID.randomUUID());
+        rabbitTemplate.execute(channel -> {
+            channel.queueUnbind(RabbitTopology.EVENT_QUEUE, RabbitTopology.EVENT_EXCHANGE, "ORDER_CREATED");
+            return null;
+        });
+        try {
+            assertThat(dispatcher.dispatchOnce(1)).isZero();
+            assertThat(jdbc.queryForObject("SELECT status FROM integration_outbox WHERE event_id=?", String.class,
+                eventId.toString())).isEqualTo("NEW");
+        } finally {
+            rabbitTemplate.execute(channel -> {
+                channel.queueBind(RabbitTopology.EVENT_QUEUE, RabbitTopology.EVENT_EXCHANGE, "ORDER_CREATED");
+                return null;
+            });
+        }
+    }
+
+    @Test
     void duplicateInboxEventIsAlreadyAcknowledgedAndProcessingIsNotCompletedEarly() {
         UUID eventId = UUID.randomUUID();
         InboxRepository.Claim first = inbox.claim("task6-consumer", eventId, Duration.ofMinutes(1)).orElseThrow();
@@ -117,9 +200,10 @@ class ReliableMessagingIT extends SharedContainers {
             Duration.ofMinutes(1), claim -> {
                 jdbc.update("""
                     INSERT INTO integration_outbox (id,event_id,event_type,aggregate_id,aggregate_version,schema_version,
-                        payload,status,attempt_count,available_at,created_at)
-                    VALUES (?,?, 'ORDER_CREATED', ?,1,1,CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
+                        occurred_at,payload,status,attempt_count,available_at,created_at)
+                    VALUES (?,?, 'ORDER_CREATED', ?,1,1,?,CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
                     """, UUID.randomUUID().toString(), UUID.randomUUID().toString(), "task6-derived",
+                    java.sql.Timestamp.from(Instant.parse("2026-08-30T01:02:03.123456Z")),
                     "{\"orderId\":\"task6-derived\"}");
                 throw new IllegalStateException("业务事务故意回滚");
             })).isInstanceOf(IllegalStateException.class);
@@ -165,9 +249,10 @@ class ReliableMessagingIT extends SharedContainers {
         UUID eventId = UUID.randomUUID();
         assertThat(inbox.process("task6-success", eventId, Duration.ofMinutes(1), claim -> jdbc.update("""
             INSERT INTO integration_outbox (id,event_id,event_type,aggregate_id,aggregate_version,schema_version,
-                payload,status,attempt_count,available_at,created_at)
-            VALUES (?,?, 'ORDER_CREATED', ?,1,1,CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
+                occurred_at,payload,status,attempt_count,available_at,created_at)
+            VALUES (?,?, 'ORDER_CREATED', ?,1,1,?,CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
             """, UUID.randomUUID().toString(), UUID.randomUUID().toString(), "task6-success-derived",
+            java.sql.Timestamp.from(Instant.parse("2026-08-30T01:02:03.123456Z")),
             "{\"orderId\":\"task6-success-derived\"}"))).isTrue();
         assertThat(jdbc.queryForObject("SELECT status FROM consumed_event WHERE consumer_name=? AND event_id=?",
             String.class, "task6-success", eventId.toString())).isEqualTo("COMPLETED");
@@ -188,15 +273,51 @@ class ReliableMessagingIT extends SharedContainers {
             eventId.toString())).isEqualTo("PERMANENT");
     }
 
+    @Test
+    void manualFailureRemainsNewWhenManualNotificationIsUnroutable() throws Exception {
+        UUID eventId = insertOutbox("task6-manual-unroutable-" + UUID.randomUUID());
+        jdbc.update("UPDATE integration_outbox SET event_type=? WHERE event_id=?",
+            "NOT_A_REAL_EVENT", eventId.toString());
+        rabbitTemplate.execute(channel -> {
+            channel.queueUnbind(RabbitTopology.MANUAL_QUEUE, RabbitTopology.MANUAL_EXCHANGE, "FAILURE");
+            return null;
+        });
+        try {
+            dispatcher.dispatchOnce(1);
+            assertThat(jdbc.queryForObject("SELECT status FROM integration_outbox WHERE event_id=?", String.class,
+                eventId.toString())).isEqualTo("FAILED");
+            assertThat(jdbc.queryForObject("SELECT status FROM manual_failure WHERE source_type='OUTBOX' AND source_id=?",
+                String.class, eventId.toString())).isEqualTo("NEW");
+        } finally {
+            rabbitTemplate.execute(channel -> {
+                channel.queueBind(RabbitTopology.MANUAL_QUEUE, RabbitTopology.MANUAL_EXCHANGE, "FAILURE");
+                return null;
+            });
+        }
+    }
+
     private UUID insertOutbox(String aggregateId) {
         UUID eventId = UUID.randomUUID();
+        aggregateId = UUID.randomUUID().toString();
         jdbc.update("""
             INSERT INTO integration_outbox (id,event_id,event_type,aggregate_id,aggregate_version,schema_version,
-                payload,status,attempt_count,available_at,created_at)
+                occurred_at,payload,status,attempt_count,available_at,created_at)
             VALUES (?,?, 'ORDER_CREATED', ?,1,1,?,CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
             """, UUID.randomUUID().toString(), eventId.toString(), aggregateId,
             java.sql.Timestamp.from(Instant.parse("2026-08-30T01:02:03.123456Z")),
             "{\"orderId\":\"" + aggregateId + "\"}");
         return eventId;
+    }
+
+    private Message eventMessage(UUID eventId) {
+        DomainEvent event = new DomainEvent(eventId, "ORDER_CREATED", "task6-listener", 1,
+            Instant.parse("2026-08-30T01:02:03.123456Z"), 1,
+            java.util.Map.of("orderId", "task6-listener"));
+        org.springframework.amqp.core.MessageProperties properties =
+            new org.springframework.amqp.core.MessageProperties();
+        properties.setDeliveryTag(0L);
+        properties.setMessageId(eventId.toString());
+        properties.setContentEncoding("UTF-8");
+        return new Message(codec.encode(event), properties);
     }
 }
