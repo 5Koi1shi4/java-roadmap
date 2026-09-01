@@ -2,9 +2,11 @@ package com.example.campusmarket.catalog.application;
 
 import com.example.campusmarket.catalog.domain.Listing;
 import com.example.campusmarket.catalog.domain.WarrantyTerm;
+import com.example.campusmarket.catalog.search.SearchOutboxRepository;
 import com.example.campusmarket.storage.ObjectUploadCoordinator;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.io.InputStream;
 import java.util.UUID;
@@ -13,10 +15,17 @@ import java.util.UUID;
 public class ListingService {
     private final ListingRepository listings;
     private final ObjectUploadCoordinator uploads;
+    private final SearchOutboxRepository searchOutbox;
 
     public ListingService(ListingRepository listings, ObjectUploadCoordinator uploads) {
+        this(listings, uploads, null);
+    }
+
+    @Autowired
+    public ListingService(ListingRepository listings, ObjectUploadCoordinator uploads, SearchOutboxRepository searchOutbox) {
         this.listings = listings;
         this.uploads = uploads;
+        this.searchOutbox = searchOutbox;
     }
 
     @Transactional
@@ -33,7 +42,9 @@ public class ListingService {
         Listing listing = owned(sellerId, listingId);
         if (!listings.hasMedia(listingId)) throw new IllegalStateException("商品至少需要一张媒体");
         listing.publish();
-        return listings.save(listing);
+        Listing saved = listings.save(listing);
+        if (searchOutbox != null) searchOutbox.enqueue(saved, "LISTING_PUBLISHED");
+        return saved;
     }
 
     @Transactional
@@ -41,6 +52,7 @@ public class ListingService {
         Listing listing = owned(sellerId, listingId);
         listing.takeOffSale();
         listings.save(listing);
+        if (searchOutbox != null) searchOutbox.enqueue(listing, "LISTING_OFF_SALE");
     }
 
     public ListingRepository.MediaRecord addMedia(UUID sellerId, UUID listingId, String filename,

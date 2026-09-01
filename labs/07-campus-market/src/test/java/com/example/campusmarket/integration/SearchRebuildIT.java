@@ -1,0 +1,63 @@
+package com.example.campusmarket.integration;
+
+import com.example.campusmarket.catalog.search.ProductSearchPort;
+import com.example.campusmarket.catalog.search.SearchRebuildService;
+import com.example.campusmarket.catalog.search.SearchProjector;
+import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.ActiveProfiles;
+
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+@ActiveProfiles("local")
+class SearchRebuildIT extends SharedContainers {
+    @Autowired JdbcTemplate jdbc;
+    @Autowired ProductSearchPort search;
+    @Autowired SearchProjector projector;
+    @Autowired SearchRebuildService rebuild;
+
+    @BeforeAll
+    static void migrate() {
+        Flyway.configure().dataSource(MYSQL.getJdbcUrl(), MYSQL.getUsername(), MYSQL.getPassword()).load().migrate();
+    }
+
+    @BeforeEach
+    void fixture() {
+        jdbc.update("DELETE FROM listing_media");
+        jdbc.update("DELETE FROM search_outbox");
+        jdbc.update("DELETE FROM listing");
+        jdbc.update("DELETE FROM campus_user");
+        UUID seller = UUID.randomUUID();
+        jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            seller.toString(), seller + "@stu.example.edu.cn", "hash");
+        UUID listing = UUID.randomUUID();
+        jdbc.update("INSERT INTO listing(id,seller_id,title,description,category,unit_price_fen,available_quantity,quarantined_quantity,warranty_days,warranty_scope,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,0,NULL,NULL,'ON_SALE',?,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            listing.toString(), seller.toString(), "重建并发商品", "在线重建", "教材", 2000L, 4, 1L);
+        jdbc.update("INSERT INTO search_outbox(id,listing_id,aggregate_version,event_type,payload,status,attempt_count,available_at,created_at) VALUES (?,?,?,'LISTING_UPDATED',CAST('{}' AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            UUID.randomUUID().toString(), listing.toString(), 1L);
+    }
+
+    @Test
+    void switchesAliasesAtomicallyAndThreeRunsDoNotRegressVersions() {
+        SearchRebuildService.RebuildReport first = rebuild.rebuild();
+        search.refresh();
+        ProductSearchPort.SearchPage firstPage = search.search(new ProductSearchPort.SearchRequest("重建", null, null, null, 0, 20));
+        SearchRebuildService.RebuildReport second = rebuild.rebuild();
+        SearchRebuildService.RebuildReport third = rebuild.rebuild();
+        search.refresh();
+        ProductSearchPort.SearchPage finalPage = search.search(new ProductSearchPort.SearchRequest("重建", null, null, null, 0, 20));
+
+        assertThat(first.index()).isNotEqualTo(second.index()).isNotEqualTo(third.index());
+        assertThat(firstPage.items()).hasSize(1);
+        assertThat(finalPage.items()).extracting(ProductSearchPort.SearchItem::listingId)
+            .containsExactlyElementsOf(firstPage.items().stream().map(ProductSearchPort.SearchItem::listingId).toList());
+        assertThat(finalPage.items()).extracting(ProductSearchPort.SearchItem::aggregateVersion)
+            .containsExactly(1L);
+    }
+}

@@ -68,6 +68,7 @@ public abstract class SharedContainers {
         DockerImageName compatibleImage = DockerImageName.parse("campus-market/elasticsearch:8.18.8-smartcn")
             .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8");
         ElasticsearchContainer container = new ElasticsearchContainer(compatibleImage)
+            .withEnv("xpack.security.enabled", "false")
             .withNetwork(NETWORK)
             .withNetworkAliases("elasticsearch");
         container.setImage(ELASTICSEARCH_IMAGE);
