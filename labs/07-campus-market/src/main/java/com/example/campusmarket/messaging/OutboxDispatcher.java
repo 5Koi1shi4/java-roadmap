@@ -45,6 +45,15 @@ public class OutboxDispatcher {
     public int dispatchOnce(int limit, Duration lease) {
         int completed = 0;
         for (OutboxRepository.OutboxMessage message : repository.claimBatch(owner, limit, lease)) {
+            // A lease that expired after the third delivery attempt is a crash
+            // takeover, not a fourth publish. Failing it here keeps the source
+            // row and its durable manual copy in one REQUIRES_NEW transaction.
+            if (message.attemptCount() >= 3) {
+                if (repository.fail(message.eventId(), message.ownerId(), message.claimToken(), "EXHAUSTED") == 1) {
+                    publishManualFailure(message.eventId(), "EXHAUSTED");
+                }
+                continue;
+            }
             try {
                 DomainEvent event = new DomainEvent(message.eventId(), message.eventType(), message.aggregateId(),
                     message.aggregateVersion(), message.occurredAt(), message.schemaVersion(),

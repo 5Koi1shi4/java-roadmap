@@ -29,13 +29,24 @@ public class ManualFailurePublisher {
         if (sourceId == null || (!"PERMANENT".equals(failureClass) && !"EXHAUSTED".equals(failureClass))) {
             throw new IllegalArgumentException("人工消息参数无效");
         }
+        publishMessage(sourceId.toString(), failureClass,
+            ("{\"sourceId\":\"" + sourceId + "\",\"failureClass\":\"" + failureClass + "\"}")
+                .getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** 发布持久副本本身；调度器只有在该 publish 成功后才完成副本。 */
+    public void publish(ManualFailureScheduler.ManualFailure failure) {
+        if (failure == null) throw new IllegalArgumentException("人工副本不能为空");
+        publishMessage(failure.id().toString(), failure.failureClass(),
+            failure.payload().getBytes(StandardCharsets.UTF_8));
+    }
+
+    private void publishMessage(String messageId, String failureClass, byte[] payload) {
         MessageProperties properties = new MessageProperties();
         properties.setContentType(MessageProperties.CONTENT_TYPE_JSON);
         properties.setContentEncoding(StandardCharsets.UTF_8.name());
         properties.setDeliveryMode(MessageDeliveryMode.PERSISTENT);
-        properties.setMessageId(sourceId.toString());
-        byte[] payload = ("{\"sourceId\":\"" + sourceId + "\",\"failureClass\":\"" + failureClass + "\"}")
-            .getBytes(StandardCharsets.UTF_8);
+        properties.setMessageId(messageId);
         rabbitTemplate.invoke(ops -> {
             CorrelationData correlation = new CorrelationData(properties.getMessageId());
             ops.send(RabbitTopology.MANUAL_EXCHANGE, "FAILURE", new Message(payload, properties), correlation);

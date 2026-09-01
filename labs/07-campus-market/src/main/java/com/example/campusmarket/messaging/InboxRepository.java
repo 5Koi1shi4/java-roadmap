@@ -49,21 +49,22 @@ public class InboxRepository {
 
         UUID exhaustedManualId = UUID.nameUUIDFromBytes((consumerName + ":" + eventId)
             .getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        jdbc.update("""
-            INSERT INTO manual_failure (id,source_type,source_id,consumer_name,failure_class,payload,status,created_at)
-            SELECT ?, 'INBOX', event_id, consumer_name, 'EXHAUSTED',
-                   JSON_OBJECT('eventId',event_id,'consumerName',consumer_name), 'NEW', CURRENT_TIMESTAMP(6)
-            FROM consumed_event
-            WHERE consumer_name=? AND event_id=? AND status='PROCESSING'
-              AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count >= 3
-            ON DUPLICATE KEY UPDATE id=manual_failure.id
-            """, exhaustedManualId.toString(), consumerName, eventId.toString());
-        jdbc.update("""
+        int exhausted = jdbc.update("""
             UPDATE consumed_event
             SET status='FAILED', owner_id=NULL, claim_token=NULL, lease_until=NULL
             WHERE consumer_name=? AND event_id=? AND status='PROCESSING'
               AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count >= 3
             """, consumerName, eventId.toString());
+        if (exhausted == 1) {
+            jdbc.update("""
+                INSERT INTO manual_failure (id,source_type,source_id,consumer_name,failure_class,payload,status,created_at)
+                SELECT ?, 'INBOX', event_id, consumer_name, 'EXHAUSTED',
+                       JSON_OBJECT('eventId',event_id,'consumerName',consumer_name), 'NEW', CURRENT_TIMESTAMP(6)
+                FROM consumed_event
+                WHERE consumer_name=? AND event_id=? AND status='FAILED'
+                ON DUPLICATE KEY UPDATE id=manual_failure.id
+                """, exhaustedManualId.toString(), consumerName, eventId.toString());
+        }
 
         int changed = jdbc.update("""
             UPDATE consumed_event
@@ -74,12 +75,12 @@ public class InboxRepository {
               AND (((lease_until <= CURRENT_TIMESTAMP(6)) AND attempt_count < 3) OR (owner_id=? AND claim_token=?))
             """, owner, token, micros, consumerName, eventId.toString(), owner, token);
         if (changed == 1) {
-            return Optional.of(new Claim(consumerName, eventId, owner, token, false));
+            return Optional.of(new Claim(consumerName, eventId, owner, token, false, false));
         }
         String status = jdbc.queryForObject("SELECT status FROM consumed_event WHERE consumer_name=? AND event_id=?",
             String.class, consumerName, eventId.toString());
-        return "COMPLETED".equals(status)
-            ? Optional.of(new Claim(consumerName, eventId, null, null, true))
+        return "COMPLETED".equals(status) || "FAILED".equals(status)
+            ? Optional.of(new Claim(consumerName, eventId, null, null, "COMPLETED".equals(status), "FAILED".equals(status)))
             : Optional.empty();
     }
 
@@ -116,27 +117,44 @@ public class InboxRepository {
     private int markFailedInternal(String consumerName, UUID eventId, String owner, String claimToken) {
         UUID manualId = UUID.nameUUIDFromBytes((consumerName + ":" + eventId)
             .getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        jdbc.update("""
-            INSERT INTO manual_failure (id,source_type,source_id,consumer_name,failure_class,payload,status,created_at)
-            VALUES (?,?,?,?,'PERMANENT',JSON_OBJECT('eventId',?,'consumerName',?),'NEW',CURRENT_TIMESTAMP(6))
-            ON DUPLICATE KEY UPDATE id=manual_failure.id
-            """, manualId.toString(), "INBOX", eventId.toString(), consumerName,
-            eventId.toString(), consumerName);
-        return jdbc.update("""
+        int changed = jdbc.update("""
             UPDATE consumed_event SET status='FAILED', owner_id=NULL, claim_token=NULL, lease_until=NULL
             WHERE consumer_name=? AND event_id=? AND status='PROCESSING' AND owner_id=? AND claim_token=?
             """, consumerName, eventId.toString(), owner, claimToken);
+        if (changed == 1) {
+            jdbc.update("""
+                INSERT INTO manual_failure (id,source_type,source_id,consumer_name,failure_class,payload,status,created_at)
+                VALUES (?,?,?,?,'PERMANENT',JSON_OBJECT('eventId',?,'consumerName',?),'NEW',CURRENT_TIMESTAMP(6))
+                ON DUPLICATE KEY UPDATE id=manual_failure.id
+                """, manualId.toString(), "INBOX", eventId.toString(), consumerName,
+                eventId.toString(), consumerName);
+        }
+        return changed;
     }
 
     /**
      * 执行业务变更和 COMPLETED 标记的同一事务。返回 true 才允许消息适配器 ACK；异常会回滚两者。
      */
     public boolean process(String consumerName, UUID eventId, Duration lease, Consumer<Claim> businessWork) {
+        DeliveryResult result = processForDelivery(consumerName, eventId, lease, businessWork);
+        if (result == DeliveryResult.PERMANENT_FAILED) {
+            throw new IllegalArgumentException("业务处理不可恢复失败");
+        }
+        return result == DeliveryResult.COMPLETED;
+    }
+
+    /**
+     * 为真实 Rabbit delivery 返回带 fencing 语义的结果。STALE 绝不能依据数据库 FAILED 状态
+     * 替旧 owner ACK 或再次发布人工通知。
+     */
+    public DeliveryResult processForDelivery(String consumerName, UUID eventId, Duration lease,
+                                             Consumer<Claim> businessWork) {
         Objects.requireNonNull(businessWork, "业务处理器不能为空");
         Optional<Claim> claimed = claim(consumerName, eventId, lease);
-        if (claimed.isEmpty()) return false;
+        if (claimed.isEmpty()) return DeliveryResult.NOT_CLAIMED;
         Claim claim = claimed.get();
-        if (claim.alreadyCompleted()) return true;
+        if (claim.alreadyCompleted()) return DeliveryResult.COMPLETED;
+        if (claim.failed()) return DeliveryResult.FAILED;
         if (transactionTemplate == null) {
             throw new IllegalStateException("process 需要事务管理器");
         }
@@ -148,14 +166,18 @@ public class InboxRepository {
                 }
                 return true;
             });
-            return Boolean.TRUE.equals(committed);
+            return Boolean.TRUE.equals(committed) ? DeliveryResult.COMPLETED : DeliveryResult.NOT_CLAIMED;
         } catch (IllegalArgumentException permanentFailure) {
             TransactionTemplate requiresNew = new TransactionTemplate(transactionManager);
             requiresNew.setPropagationBehaviorName("PROPAGATION_REQUIRES_NEW");
-            requiresNew.executeWithoutResult(status -> markFailedInternal(consumerName, eventId,
+            Integer changed = requiresNew.execute(status -> markFailedInternal(consumerName, eventId,
                 claim.ownerId(), claim.claimToken()));
-            throw permanentFailure;
+            return Integer.valueOf(1).equals(changed) ? DeliveryResult.PERMANENT_FAILED : DeliveryResult.STALE;
         }
+    }
+
+    public enum DeliveryResult {
+        COMPLETED, FAILED, NOT_CLAIMED, PERMANENT_FAILED, STALE
     }
 
     private static long durationMicros(Duration duration) {
@@ -176,6 +198,6 @@ public class InboxRepository {
     }
 
     public record Claim(String consumerName, UUID eventId, String ownerId, String claimToken,
-                        boolean alreadyCompleted) {
+                        boolean alreadyCompleted, boolean failed) {
     }
 }

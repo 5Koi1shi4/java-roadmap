@@ -35,12 +35,12 @@ public class ReliableEventConsumer {
             String messageId = message.getMessageProperties().getMessageId();
             try {
                 UUID eventId = UUID.fromString(messageId);
-                inbox.claim(CONSUMER, eventId, Duration.ofMinutes(1)).ifPresent(claim -> {
-                    if (!claim.alreadyCompleted()) {
-                        inbox.markFailed(CONSUMER, eventId, claim.ownerId(), claim.claimToken());
-                    }
-                });
-                if (publishManual(eventId, "PERMANENT")) {
+                boolean durableFailure = inbox.claim(CONSUMER, eventId, Duration.ofMinutes(1))
+                    .map(claim -> claim.alreadyCompleted() || claim.failed()
+                        || (!claim.alreadyCompleted() && !claim.failed()
+                            && inbox.markFailed(CONSUMER, eventId, claim.ownerId(), claim.claimToken()) == 1))
+                    .orElse(false);
+                if (durableFailure && publishManual(eventId, "PERMANENT")) {
                     channel.basicAck(tag, false);
                 } else {
                     channel.basicNack(tag, false, true);
@@ -51,10 +51,16 @@ public class ReliableEventConsumer {
             return;
         }
         try {
-            boolean acknowledged = inbox.process(CONSUMER, event.eventId(), Duration.ofMinutes(1),
+            InboxRepository.DeliveryResult result = inbox.processForDelivery(CONSUMER, event.eventId(), Duration.ofMinutes(1),
                 claim -> businessHandler.handle(event));
-            if (acknowledged) channel.basicAck(tag, false);
-            else if (inbox.isFailed(CONSUMER, event.eventId())) {
+            if (result == InboxRepository.DeliveryResult.COMPLETED) channel.basicAck(tag, false);
+            else if (result == InboxRepository.DeliveryResult.PERMANENT_FAILED) {
+                if (publishManual(event.eventId(), "PERMANENT")) {
+                    channel.basicAck(tag, false);
+                } else {
+                    channel.basicNack(tag, false, true);
+                }
+            } else if (result == InboxRepository.DeliveryResult.FAILED) {
                 if (publishManual(event.eventId(), "EXHAUSTED")) {
                     channel.basicAck(tag, false);
                 } else {

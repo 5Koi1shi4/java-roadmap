@@ -29,37 +29,33 @@ public class OutboxRepository {
         }
         long micros = leaseMicros(lease);
         List<OutboxMessage> claimed = new ArrayList<>();
-        jdbc.update("""
-            UPDATE integration_outbox
-            SET status='FAILED', failure_class='EXHAUSTED', owner_id=NULL, claim_token=NULL, lease_until=NULL
-            WHERE status='PUBLISHING' AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count >= 3
-            """);
         jdbc.query("""
             SELECT id,event_id,event_type,aggregate_id,aggregate_version,schema_version,payload,occurred_at,
-                   owner_id,claim_token,lease_until,attempt_count
+                   owner_id,claim_token,lease_until,attempt_count,status
             FROM integration_outbox
             WHERE ((status='NEW' AND available_at <= CURRENT_TIMESTAMP(6))
                OR (status='PUBLISHING' AND lease_until <= CURRENT_TIMESTAMP(6)))
-              AND attempt_count < 3
             ORDER BY available_at,id
             LIMIT ? FOR UPDATE SKIP LOCKED
             """, rs -> {
                 UUID id = UUID.fromString(rs.getString("id"));
                 UUID eventId = UUID.fromString(rs.getString("event_id"));
                 String token = UUID.randomUUID().toString();
+                boolean exhausted = "PUBLISHING".equals(rs.getString("status")) && rs.getInt("attempt_count") >= 3;
                 int changed = jdbc.update("""
                     UPDATE integration_outbox
                     SET status='PUBLISHING', owner_id=?, claim_token=?,
                         lease_until=TIMESTAMPADD(MICROSECOND, ?, CURRENT_TIMESTAMP(6)),
-                        attempt_count=attempt_count+1
-                    WHERE id=? AND (((status='NEW' AND available_at <= CURRENT_TIMESTAMP(6))
-                        OR (status='PUBLISHING' AND lease_until <= CURRENT_TIMESTAMP(6))) AND attempt_count < 3)
-                    """, owner, token, micros, id.toString());
+                        attempt_count=attempt_count+?
+                    WHERE id=? AND ((status='NEW' AND available_at <= CURRENT_TIMESTAMP(6))
+                        OR (status='PUBLISHING' AND lease_until <= CURRENT_TIMESTAMP(6)))
+                        AND (attempt_count < 3 OR (status='PUBLISHING' AND attempt_count >= 3))
+                    """, owner, token, micros, exhausted ? 0 : 1, id.toString());
                 if (changed == 1) {
                     claimed.add(new OutboxMessage(id, eventId, rs.getString("event_type"),
                         rs.getString("aggregate_id"), rs.getLong("aggregate_version"),
                         rs.getInt("schema_version"), rs.getString("payload"), rs.getTimestamp("occurred_at").toInstant(),
-                        owner, token, null, rs.getInt("attempt_count") + 1));
+                        owner, token, null, exhausted ? rs.getInt("attempt_count") : rs.getInt("attempt_count") + 1));
                 }
             }, limit);
         if (!claimed.isEmpty()) {

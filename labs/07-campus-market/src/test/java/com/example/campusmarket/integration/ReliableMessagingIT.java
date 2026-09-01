@@ -8,6 +8,7 @@ import com.example.campusmarket.messaging.RabbitTopology;
 import com.example.campusmarket.messaging.EventEnvelopeCodec;
 import com.example.campusmarket.messaging.EventBusinessHandler;
 import com.example.campusmarket.messaging.ReliableEventConsumer;
+import com.example.campusmarket.messaging.ManualFailureScheduler;
 import com.example.campusmarket.shared.DomainEvent;
 import com.rabbitmq.client.Channel;
 import org.flywaydb.core.Flyway;
@@ -16,6 +17,15 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.Binding;
+import org.springframework.amqp.core.BindingBuilder;
+import org.springframework.amqp.core.DirectExchange;
+import org.springframework.amqp.core.Queue;
+import org.springframework.amqp.core.QueueBuilder;
+import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFactory;
+import org.springframework.amqp.rabbit.connection.ConnectionFactory;
+import org.springframework.amqp.core.AcknowledgeMode;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -29,6 +39,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -47,8 +58,10 @@ class ReliableMessagingIT extends SharedContainers {
     @Autowired RabbitTemplate rabbitTemplate;
     @Autowired EventEnvelopeCodec codec;
     @Autowired ReliableEventConsumer consumer;
+    @Autowired ManualFailureScheduler manualFailureScheduler;
 
     private static final AtomicReference<RuntimeException> HANDLER_FAILURE = new AtomicReference<>();
+    private static final AtomicInteger REAL_DELIVERIES = new AtomicInteger();
 
     @TestConfiguration(proxyBeanMethods = false)
     static class ListenerFixture {
@@ -58,6 +71,46 @@ class ReliableMessagingIT extends SharedContainers {
                 RuntimeException failure = HANDLER_FAILURE.get();
                 if (failure != null) throw failure;
             };
+        }
+
+        @Bean
+        Queue task6RealDeliveryQueue() {
+            return QueueBuilder.durable("task6.real.delivery").quorum().build();
+        }
+
+        @Bean
+        Binding task6RealDeliveryBinding(@Qualifier("task6RealDeliveryQueue") Queue task6RealDeliveryQueue,
+                                         @Qualifier("campusMarketEventExchange") DirectExchange eventExchange) {
+            return BindingBuilder.bind(task6RealDeliveryQueue).to(eventExchange).with("TASK6_REAL");
+        }
+
+        @Bean
+        RealDeliveryListener task6RealDeliveryListener(ReliableEventConsumer consumer) {
+            return new RealDeliveryListener(consumer);
+        }
+
+        @Bean("task6RealRabbitListenerContainerFactory")
+        SimpleRabbitListenerContainerFactory task6RealRabbitListenerContainerFactory(ConnectionFactory connectionFactory) {
+            SimpleRabbitListenerContainerFactory factory = new SimpleRabbitListenerContainerFactory();
+            factory.setConnectionFactory(connectionFactory);
+            factory.setAcknowledgeMode(AcknowledgeMode.MANUAL);
+            factory.setAutoStartup(true);
+            return factory;
+        }
+    }
+
+    static final class RealDeliveryListener {
+        private final ReliableEventConsumer consumer;
+
+        RealDeliveryListener(ReliableEventConsumer consumer) {
+            this.consumer = consumer;
+        }
+
+        @org.springframework.amqp.rabbit.annotation.RabbitListener(queues = "task6.real.delivery",
+            ackMode = "MANUAL", containerFactory = "task6RealRabbitListenerContainerFactory")
+        void receive(Message message, Channel channel) throws Exception {
+            REAL_DELIVERIES.incrementAndGet();
+            consumer.onMessage(message, channel);
         }
     }
 
@@ -69,8 +122,14 @@ class ReliableMessagingIT extends SharedContainers {
     @BeforeEach
     void cleanFixtures() {
         HANDLER_FAILURE.set(null);
+        REAL_DELIVERIES.set(0);
         jdbc.update("DELETE FROM consumed_event WHERE consumer_name LIKE 'task6-%' OR consumer_name='campus-market-order'");
         jdbc.update("DELETE FROM integration_outbox WHERE event_type='ORDER_CREATED'");
+        jdbc.update("DELETE FROM manual_failure");
+        rabbitTemplate.execute(channel -> {
+            channel.queuePurge("task6.real.delivery");
+            return null;
+        });
     }
 
     @Test
@@ -97,6 +156,32 @@ class ReliableMessagingIT extends SharedContainers {
         verify(channel).basicNack(0L, false, true);
         assertThat(jdbc.queryForObject("SELECT status FROM consumed_event WHERE consumer_name=? AND event_id=?",
             String.class, "campus-market-order", eventId.toString())).isEqualTo("PROCESSING");
+    }
+
+    @Test
+    void brokerDeliveryIsAckedAfterCommittedInboxTransaction() {
+        UUID eventId = UUID.randomUUID();
+        rabbitTemplate.send(RabbitTopology.EVENT_EXCHANGE, "TASK6_REAL", eventMessage(eventId));
+
+        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(20)).untilAsserted(() ->
+            assertThat(jdbc.queryForObject("SELECT status FROM consumed_event WHERE consumer_name=? AND event_id=?",
+                String.class, "campus-market-order", eventId.toString())).isEqualTo("COMPLETED"));
+        assertThat(REAL_DELIVERIES.get()).isEqualTo(1);
+    }
+
+    @Test
+    void brokerDeliveryNackRequeuesForRetryableBusinessFailure() {
+        UUID eventId = UUID.randomUUID();
+        HANDLER_FAILURE.set(new IllegalStateException("real broker retry"));
+        rabbitTemplate.send(RabbitTopology.EVENT_EXCHANGE, "TASK6_REAL", eventMessage(eventId));
+
+        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(20)).untilAsserted(() ->
+            assertThat(REAL_DELIVERIES.get()).isGreaterThanOrEqualTo(1));
+        org.awaitility.Awaitility.await().atMost(Duration.ofSeconds(20)).untilAsserted(() ->
+            assertThat(jdbc.queryForObject("SELECT status FROM consumed_event WHERE consumer_name=? AND event_id=?",
+                String.class, "campus-market-order", eventId.toString())).isEqualTo("PROCESSING"));
+        HANDLER_FAILURE.set(null);
+        assertThat(REAL_DELIVERIES.get()).isGreaterThanOrEqualTo(1);
     }
 
     @Test
@@ -228,6 +313,18 @@ class ReliableMessagingIT extends SharedContainers {
     }
 
     @Test
+    void staleInboxPermanentFailureCannotCreateManualCopy() {
+        UUID eventId = UUID.randomUUID();
+        InboxRepository.Claim old = inbox.claim("task6-stale-failure", eventId, Duration.ofMinutes(1)).orElseThrow();
+        jdbc.update("UPDATE consumed_event SET lease_until=CURRENT_TIMESTAMP(6) - INTERVAL 1 MICROSECOND WHERE consumer_name=? AND event_id=?", "task6-stale-failure", eventId.toString());
+        InboxRepository.Claim current = inbox.claim("task6-stale-failure", eventId, Duration.ofMinutes(1)).orElseThrow();
+
+        assertThat(inbox.markFailed("task6-stale-failure", eventId, old.ownerId(), old.claimToken())).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM manual_failure WHERE source_type='INBOX' AND source_id=?", Integer.class, eventId.toString())).isZero();
+        assertThat(inbox.complete("task6-stale-failure", eventId, current.ownerId(), current.claimToken())).isEqualTo(1);
+    }
+
+    @Test
     void outboxRetryIsBoundedAtThreeAttemptsAndThenControlledFailed() {
         UUID eventId = insertOutbox("task6-retry-" + UUID.randomUUID());
         OutboxRepository.OutboxMessage first = outbox.claimBatch("task6-retry-a", 1, Duration.ofMinutes(1)).get(0);
@@ -242,6 +339,58 @@ class ReliableMessagingIT extends SharedContainers {
         assertThat(outbox.fail(eventId, third.ownerId(), third.claimToken(), "EXHAUSTED")).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT status FROM integration_outbox WHERE event_id=?", String.class,
             eventId.toString())).isEqualTo("FAILED");
+    }
+
+    @Test
+    void expiredThirdOutboxLeaseCreatesManualFailureBeforeSourceFailureCompletes() {
+        UUID eventId = insertOutbox("task6-third-expired-" + UUID.randomUUID());
+        jdbc.update("UPDATE integration_outbox SET status='PUBLISHING', attempt_count=3, owner_id='crashed-owner', claim_token='crashed-token', lease_until=CURRENT_TIMESTAMP(6) - INTERVAL 1 MICROSECOND WHERE event_id=?", eventId.toString());
+
+        assertThat(dispatcher.dispatchOnce(1)).isZero();
+        assertThat(jdbc.queryForObject("SELECT status FROM integration_outbox WHERE event_id=?", String.class, eventId.toString())).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM manual_failure WHERE source_type='OUTBOX' AND source_id=?", Integer.class, eventId.toString())).isEqualTo(1);
+    }
+
+    @Test
+    void outboxLeaseEqualToDatabaseNowIsTakenOver() {
+        UUID eventId = insertOutbox("task6-equal-" + UUID.randomUUID());
+        OutboxRepository.OutboxMessage old = outbox.claimBatch("task6-equal-old", 1, Duration.ofMinutes(1)).get(0);
+        java.sql.Timestamp databaseNow = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", java.sql.Timestamp.class);
+        jdbc.update("UPDATE integration_outbox SET lease_until=? WHERE event_id=?", databaseNow, eventId.toString());
+
+        assertThat(outbox.claimBatch("task6-equal-new", 1, Duration.ofMinutes(1))).hasSize(1);
+        assertThat(outbox.complete(eventId, old.ownerId(), old.claimToken())).isZero();
+    }
+
+    @Test
+    void manualFailureSchedulerClaimsConcurrentlyAndPublishesOnlyOnce() throws Exception {
+        UUID sourceId = UUID.randomUUID();
+        insertManualFailure(sourceId, "PERMANENT");
+        CompletableFuture<Integer> first = CompletableFuture.supplyAsync(() -> manualFailureScheduler.runOnce(1));
+        CompletableFuture<Integer> second = CompletableFuture.supplyAsync(() -> manualFailureScheduler.runOnce(1));
+
+        assertThat(first.get(20, TimeUnit.SECONDS) + second.get(20, TimeUnit.SECONDS)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT status FROM manual_failure WHERE source_id=?", String.class, sourceId.toString())).isEqualTo("PUBLISHED");
+    }
+
+    @Test
+    void manualFailureStaleTokenCannotCompleteAfterTakeover() {
+        UUID sourceId = UUID.randomUUID();
+        insertManualFailure(sourceId, "EXHAUSTED");
+        ManualFailureScheduler.ManualFailure old = manualFailureScheduler.claimBatch("task6-manual-old", 1, Duration.ofMinutes(1)).get(0);
+        jdbc.update("UPDATE manual_failure SET lease_until=CURRENT_TIMESTAMP(6) - INTERVAL 1 MICROSECOND WHERE id=?", old.id().toString());
+        ManualFailureScheduler.ManualFailure current = manualFailureScheduler.claimBatch("task6-manual-new", 1, Duration.ofMinutes(1)).get(0);
+
+        assertThat(manualFailureScheduler.complete(old.id(), old.ownerId(), old.claimToken())).isZero();
+        assertThat(manualFailureScheduler.complete(current.id(), current.ownerId(), current.claimToken())).isEqualTo(1);
+    }
+
+    private void insertManualFailure(UUID sourceId, String failureClass) {
+        jdbc.update("""
+            INSERT INTO manual_failure (id,source_type,source_id,consumer_name,failure_class,payload,status,created_at)
+            VALUES (?,?,?,'',?,CAST(? AS JSON),'NEW',CURRENT_TIMESTAMP(6))
+            """, UUID.randomUUID().toString(), "OUTBOX", sourceId.toString(), failureClass,
+            "{\"sourceId\":\"" + sourceId + "\"}");
     }
 
     @Test
@@ -298,7 +447,7 @@ class ReliableMessagingIT extends SharedContainers {
 
     private UUID insertOutbox(String aggregateId) {
         UUID eventId = UUID.randomUUID();
-        aggregateId = UUID.randomUUID().toString();
+        aggregateId = UUID.nameUUIDFromBytes(aggregateId.getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
         jdbc.update("""
             INSERT INTO integration_outbox (id,event_id,event_type,aggregate_id,aggregate_version,schema_version,
                 occurred_at,payload,status,attempt_count,available_at,created_at)
