@@ -28,6 +28,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import javax.sql.DataSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @ActiveProfiles("local")
@@ -214,8 +215,96 @@ class SearchRebuildIT extends SharedContainers {
     }
 
     @Test
+    void staleAliasWorkerIsFencedAfterReadingMembersBeforeUpdate() throws Exception {
+        String previous = elasticsearch.currentReadIndex();
+        String targetA = elasticsearch.createRebuildIndex();
+        elasticsearch.recordRebuildIntent(targetA, previous);
+        elasticsearch.markRebuildIntentBuilding(targetA);
+        elasticsearch.registerRebuildTarget(targetA);
+        SearchGateRepository oldGate = new SearchGateRepository(new JdbcTemplate(dataSource));
+        SearchGateRepository.Lease oldLease = oldGate.acquire("alias-old", java.time.Duration.ofSeconds(30));
+        String oldToken = UUID.randomUUID().toString();
+        assertThat(elasticsearch.claimRebuildIntentSwitch(targetA, oldLease.owner(), oldToken, oldLease.generation())).isTrue();
+
+        CountDownLatch readMembers = new CountDownLatch(1);
+        CountDownLatch releaseAliasRequest = new CountDownLatch(1);
+        ElasticsearchProductSearch oldWorker = new ElasticsearchProductSearch(elasticsearchClient, new JdbcTemplate(dataSource), members -> {
+            readMembers.countDown();
+            awaitBarrier(readMembers, releaseAliasRequest);
+        });
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<ElasticsearchProductSearch.AliasTransition> stale = workers.submit(() -> oldWorker.switchAliasesToSingleLive(
+                targetA, new ElasticsearchProductSearch.AliasFence(oldLease.owner(), oldLease.token(), oldToken, oldLease.generation())));
+            assertThat(readMembers.await(30, TimeUnit.SECONDS)).isTrue();
+
+            // The first worker is paused while still holding the named lock.
+            // Expire and replace the MySQL gate, then queue B behind that
+            // same lock. A's second fence check must reject its late request.
+            jdbc.update("UPDATE search_rebuild_gate SET lease_until=TIMESTAMPADD(MICROSECOND,-1,CURRENT_TIMESTAMP(6)) WHERE id=1");
+            SearchGateRepository newGate = new SearchGateRepository(new JdbcTemplate(dataSource));
+            SearchGateRepository.Lease newLease = newGate.acquire("alias-new", java.time.Duration.ofSeconds(30));
+            String targetB = elasticsearch.createRebuildIndex();
+            elasticsearch.recordRebuildIntent(targetB, previous);
+            elasticsearch.markRebuildIntentBuilding(targetB);
+            elasticsearch.registerRebuildTarget(targetB);
+            String newToken = UUID.randomUUID().toString();
+            assertThat(elasticsearch.claimRebuildIntentSwitch(targetB, newLease.owner(), newToken, newLease.generation())).isTrue();
+            Future<ElasticsearchProductSearch.AliasTransition> current = workers.submit(() -> elasticsearch.switchAliasesToSingleLive(
+                targetB, new ElasticsearchProductSearch.AliasFence(newLease.owner(), newLease.token(), newToken, newLease.generation())));
+            assertThat(current.isDone()).isFalse();
+            releaseAliasRequest.countDown();
+
+            assertThatThrownBy(stale::get).hasCauseInstanceOf(SearchGateRepository.SearchGateClosedException.class);
+            current.get(30, TimeUnit.SECONDS);
+            assertThat(elasticsearch.currentReadIndexes()).containsExactly(targetB);
+            assertThat(elasticsearch.currentWriteIndexes()).containsExactly(targetB);
+        } finally {
+            releaseAliasRequest.countDown();
+            workers.shutdownNow();
+        }
+    }
+
+    @Test
+    void aliasReconciliationRemovesAllDriftedMembersAndCleanupProtectsAnyLiveMember() throws Exception {
+        String first = elasticsearch.createRebuildIndex();
+        String authoritative = elasticsearch.createRebuildIndex();
+        elasticsearchClient.indices().updateAliases(a -> a
+            .actions(x -> x.add(v -> v.index(first).alias(ProductSearchPort.READ_ALIAS)))
+            .actions(x -> x.add(v -> v.index(first).alias(ProductSearchPort.WRITE_ALIAS)))
+            .actions(x -> x.add(v -> v.index(authoritative).alias(ProductSearchPort.READ_ALIAS)))
+            .actions(x -> x.add(v -> v.index(authoritative).alias(ProductSearchPort.WRITE_ALIAS))));
+
+        elasticsearch.scheduleCleanup(first);
+        elasticsearch.cleanupPending();
+        assertThat(elasticsearchClient.indices().exists(e -> e.index(first)).value()).isTrue();
+        assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, first))
+            .isEqualTo("DONE");
+        elasticsearch.switchAliasesToSingleLive(authoritative);
+        assertThat(elasticsearch.currentReadIndexes()).containsExactly(authoritative);
+        assertThat(elasticsearch.currentWriteIndexes()).containsExactly(authoritative);
+    }
+
+    @Test
+    void reconciliationCannotRollbackWhileHigherGenerationIsSwitching() {
+        SearchRebuildService.RebuildReport old = rebuild.rebuild();
+        String target = elasticsearch.createRebuildIndex();
+        elasticsearch.recordRebuildIntent(target, old.index());
+        elasticsearch.markRebuildIntentBuilding(target);
+        elasticsearch.registerRebuildTarget(target);
+        long activeGeneration = jdbc.queryForObject("SELECT generation FROM search_rebuild_gate WHERE id=1", Long.class) + 1;
+        jdbc.update("UPDATE search_rebuild_intent SET phase='SWITCHING',generation=?,owner_id='new-owner',claim_token='new-token',lease_until=TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)) WHERE target_index=?", activeGeneration, target);
+        elasticsearch.switchAliasesToSingleLive(target);
+
+        elasticsearch.cleanupPending();
+
+        assertThat(elasticsearch.currentReadIndexes()).containsExactly(target);
+        assertThat(elasticsearch.currentWriteIndexes()).containsExactly(target);
+    }
+
+    @Test
     void stageFailureLeavesOldAliasAndRecoveryConverges() {
-        for (String failedStage : java.util.List.of("FILL", "REPLAY", "ALIAS_SWAP")) {
+        for (String failedStage : java.util.List.of("FILL", "REFRESH_FILL", "REPLAY", "REFRESH_REPLAY", "ALIAS_SWAP")) {
             jdbc.update("UPDATE search_rebuild_gate SET mode='OPEN',owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE id=1");
             String previous = elasticsearch.currentReadIndex();
             AtomicBoolean tripped = new AtomicBoolean();
@@ -288,14 +377,31 @@ class SearchRebuildIT extends SharedContainers {
     void twoCleanupWorkersUseSkipLockedAndOwnerFencing() throws Exception {
         String target = elasticsearch.createRebuildIndex();
         elasticsearch.scheduleCleanup(target);
+        CountDownLatch claimCommitted = new CountDownLatch(1);
+        CountDownLatch releaseDelete = new CountDownLatch(1);
+        ElasticsearchProductSearch firstWorker = new ElasticsearchProductSearch(elasticsearchClient, new JdbcTemplate(dataSource),
+            ignored -> { }, index -> {
+                claimCommitted.countDown();
+                awaitBarrier(claimCommitted, releaseDelete);
+            });
         ElasticsearchProductSearch secondWorker = new ElasticsearchProductSearch(elasticsearchClient, new JdbcTemplate(dataSource));
         ExecutorService workers = Executors.newFixedThreadPool(2);
         try {
-            var first = workers.submit(elasticsearch::cleanupPending);
-            var second = workers.submit(() -> new TransactionTemplate(transactionManager).executeWithoutResult(status -> secondWorker.cleanupPending()));
+            var first = workers.submit(firstWorker::cleanupPending);
+            assertThat(claimCommitted.await(30, TimeUnit.SECONDS)).isTrue();
+            assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, target))
+                .isEqualTo("RUNNING");
+            // The claim transaction has committed before the first worker
+            // enters ES delete. A second independent worker can observe it.
+            var observer = workers.submit(secondWorker::cleanupPending);
+            observer.get(30, TimeUnit.SECONDS);
+            jdbc.update("UPDATE search_index_cleanup_task SET lease_until=TIMESTAMPADD(MICROSECOND,-1,CURRENT_TIMESTAMP(6)) WHERE index_name=?", target);
+            var takeover = workers.submit(secondWorker::cleanupPending);
+            takeover.get(30, TimeUnit.SECONDS);
+            releaseDelete.countDown();
             first.get(30, TimeUnit.SECONDS);
-            second.get(30, TimeUnit.SECONDS);
         } finally {
+            releaseDelete.countDown();
             workers.shutdownNow();
         }
         assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, target))

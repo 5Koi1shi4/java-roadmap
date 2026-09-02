@@ -72,5 +72,8 @@ public class SearchGateRepository {
     public record Lease(String owner, String token, long generation, java.sql.Timestamp leaseUntil) {
         public Lease { Objects.requireNonNull(owner); Objects.requireNonNull(token); Objects.requireNonNull(leaseUntil); if (owner.isBlank() || token.isBlank() || generation <= 0) throw new IllegalArgumentException("门禁租约无效"); }
     }
-    public static class SearchGateClosedException extends RuntimeException { }
+    public static class SearchGateClosedException extends RuntimeException {
+        public SearchGateClosedException() { }
+        public SearchGateClosedException(String message) { super(message); }
+    }
 }

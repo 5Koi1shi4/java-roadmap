@@ -74,6 +74,7 @@ public class SearchRebuildService {
                     if (!elasticsearch.renewRebuildTarget(target)) throw new IllegalStateException("目标索引租约已过期");
                     projector.projectDocumentInto(target, document, lease);
                 }
+                stageHook.accept("REFRESH_FILL");
                 elasticsearch.refreshIndex(target);
                 stageHook.accept("REPLAY");
                 List<OutboxChange> changes = transactions.execute(status -> jdbc.query(
@@ -84,6 +85,7 @@ public class SearchRebuildService {
                     if (!elasticsearch.renewRebuildTarget(target)) throw new IllegalStateException("目标索引租约已过期");
                     projector.projectInto(target, change.listingId(), change.aggregateVersion(), lease);
                 }
+                stageHook.accept("REFRESH_REPLAY");
                 elasticsearch.refreshIndex(target);
                 // Claim the durable intent in a short transaction, then do
                 // the potentially slow ES request without any DB lock.
@@ -94,7 +96,8 @@ public class SearchRebuildService {
                 }
                 if (!elasticsearch.renewRebuildTarget(target)) throw new IllegalStateException("目标索引租约已过期");
                 stageHook.accept("ALIAS_SWAP");
-                ElasticsearchProductSearch.AliasTransition transition = elasticsearch.switchAliasesToSingleLive(target);
+                ElasticsearchProductSearch.AliasTransition transition = elasticsearch.switchAliasesToSingleLive(target,
+                    new ElasticsearchProductSearch.AliasFence(owner, lease.token(), switchToken, lease.generation()));
                 // A late owner may have completed an ES request after its
                 // lease was taken over. Its DB CAS is rejected; subsequent
                 // reconciliation uses live aliases and the newest generation.

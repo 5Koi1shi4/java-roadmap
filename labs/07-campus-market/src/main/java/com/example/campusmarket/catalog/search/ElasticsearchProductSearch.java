@@ -14,6 +14,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -22,6 +26,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import javax.sql.DataSource;
 
 /** Elasticsearch 商品索引实现，所有写入均通过 external_gte 版本保护。 */
 @Component
@@ -29,14 +36,33 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     private static final String INITIAL_INDEX = "campus-listing-000001";
     private final ElasticsearchClient client;
     private final org.springframework.jdbc.core.JdbcTemplate jdbc;
+    private final DataSource dataSource;
+    private final Consumer<Set<String>> aliasMembersReadHook;
+    private final Consumer<String> cleanupDeleteHook;
     private volatile boolean initialized;
     private final String cleanupOwner = "search-cleanup-" + UUID.randomUUID();
     private static final Logger LOGGER = LoggerFactory.getLogger(ElasticsearchProductSearch.class);
 
     @Autowired
     public ElasticsearchProductSearch(ElasticsearchClient client, org.springframework.jdbc.core.JdbcTemplate jdbc) {
+        this(client, jdbc, ignored -> { });
+    }
+
+    /** Test seam fires while the cross-instance mutex is held, after the live
+     * aliases have been read and immediately before the ES aliases request. */
+    public ElasticsearchProductSearch(ElasticsearchClient client, org.springframework.jdbc.core.JdbcTemplate jdbc,
+                                      Consumer<Set<String>> aliasMembersReadHook) {
+        this(client, jdbc, aliasMembersReadHook, ignored -> { });
+    }
+
+    /** Full test seam for deterministic cleanup claim/lease takeover tests. */
+    public ElasticsearchProductSearch(ElasticsearchClient client, org.springframework.jdbc.core.JdbcTemplate jdbc,
+                                      Consumer<Set<String>> aliasMembersReadHook, Consumer<String> cleanupDeleteHook) {
         this.client = Objects.requireNonNull(client, "Elasticsearch 客户端不能为空");
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
+        this.dataSource = Objects.requireNonNull(jdbc.getDataSource(), "JDBC数据源不能为空");
+        this.aliasMembersReadHook = Objects.requireNonNull(aliasMembersReadHook, "别名读取 hook 不能为空");
+        this.cleanupDeleteHook = Objects.requireNonNull(cleanupDeleteHook, "清理 hook 不能为空");
     }
 
     @Override
@@ -159,24 +185,99 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
 
     /** Atomically reduces both aliases to exactly one concrete target. */
     public AliasTransition switchAliasesToSingleLive(String targetIndex) {
+        return switchAliasesToSingleLive(targetIndex, null);
+    }
+
+    /**
+     * Atomically changes aliases while holding a database-backed mutex.  The
+     * optional fence is checked after the mutex is acquired and immediately
+     * before the ES request, so a worker whose gate/intent lease was taken
+     * over cannot perform a late external side effect.
+     */
+    public AliasTransition switchAliasesToSingleLive(String targetIndex, AliasFence fence) {
         initializeIfNeeded();
         if (targetIndex == null || targetIndex.isBlank()) throw new IllegalArgumentException("目标索引不能为空");
-        Set<String> live = new LinkedHashSet<>();
+        return withAliasMutex(connection -> {
+            if (fence != null) assertAliasFence(fence);
+            Set<String> live = liveAliasMembers();
+            aliasMembersReadHook.accept(Set.copyOf(live));
+            // The hook represents an arbitrarily slow ES request. Re-check
+            // immediately before the external side effect as the lease may
+            // have been taken over while this worker was paused.
+            if (fence != null) assertAliasFence(fence);
+            try {
+                client.indices().updateAliases(a -> {
+                    for (String index : live) {
+                        a.actions(action -> action.remove(r -> r.index(index).alias(READ_ALIAS)));
+                        a.actions(action -> action.remove(r -> r.index(index).alias(WRITE_ALIAS)));
+                    }
+                    a.actions(action -> action.add(x -> x.index(targetIndex).alias(READ_ALIAS)));
+                    a.actions(action -> action.add(x -> x.index(targetIndex).alias(WRITE_ALIAS).isWriteIndex(true)));
+                    return a;
+                });
+                return new AliasTransition(live);
+            } catch (IOException e) {
+                throw new SearchUnavailableException("搜索别名切换失败", e);
+            }
+        });
+    }
+
+    public record AliasFence(String owner, String gateToken, String intentToken, long generation) {
+        public AliasFence {
+            Objects.requireNonNull(owner, "门禁 owner 不能为空");
+            Objects.requireNonNull(gateToken, "门禁 token 不能为空");
+            Objects.requireNonNull(intentToken, "意图 token 不能为空");
+            if (owner.isBlank() || gateToken.isBlank() || intentToken.isBlank() || generation <= 0) throw new IllegalArgumentException("别名门禁无效");
+        }
+    }
+
+    private void assertAliasFence(AliasFence fence) {
+        Integer gateRows = jdbc.query("""
+            SELECT generation FROM search_rebuild_gate
+            WHERE id=1 AND mode='REBUILDING' AND owner_id=? AND claim_token=?
+              AND generation=? AND lease_until > CURRENT_TIMESTAMP(6)
+            """, rs -> rs.next() ? 1 : 0, fence.owner(), fence.gateToken(), fence.generation());
+        Integer intentRows = jdbc.query("""
+            SELECT 1 FROM search_rebuild_intent
+            WHERE phase='SWITCHING' AND owner_id=? AND claim_token=?
+              AND generation=? AND lease_until > CURRENT_TIMESTAMP(6)
+            """, rs -> rs.next() ? 1 : 0, fence.owner(), fence.intentToken(), fence.generation());
+        if (gateRows == 0 || intentRows == 0) {
+            throw new SearchGateRepository.SearchGateClosedException("别名 fencing 失败 gateRows=" + gateRows + ", intentRows=" + intentRows);
+        }
+    }
+
+    private Set<String> liveAliasMembers() {
         try {
+            Set<String> live = new LinkedHashSet<>();
             live.addAll(aliasMembers(READ_ALIAS));
             live.addAll(aliasMembers(WRITE_ALIAS));
-            client.indices().updateAliases(a -> {
-                for (String index : live) {
-                    a.actions(action -> action.remove(r -> r.index(index).alias(READ_ALIAS)));
-                    a.actions(action -> action.remove(r -> r.index(index).alias(WRITE_ALIAS)));
-                }
-                a.actions(action -> action.add(x -> x.index(targetIndex).alias(READ_ALIAS)));
-                a.actions(action -> action.add(x -> x.index(targetIndex).alias(WRITE_ALIAS).isWriteIndex(true)));
-                return a;
-            });
-            return new AliasTransition(Set.copyOf(live));
+            return Set.copyOf(live);
         } catch (IOException e) {
-            throw new SearchUnavailableException("搜索别名切换失败", e);
+            throw new SearchUnavailableException("读取搜索别名成员失败", e);
+        }
+    }
+
+    private <T> T withAliasMutex(Function<Connection, T> operation) {
+        try (Connection connection = dataSource.getConnection()) {
+            connection.setAutoCommit(true);
+            try (PreparedStatement acquire = connection.prepareStatement("SELECT GET_LOCK(?, ?)") ) {
+                acquire.setString(1, "campus-market:search-alias-mutation");
+                acquire.setInt(2, 30);
+                try (ResultSet result = acquire.executeQuery()) {
+                    if (!result.next() || result.getInt(1) != 1) throw new SearchUnavailableException("搜索别名互斥锁获取超时");
+                }
+            }
+            try {
+                return operation.apply(connection);
+            } finally {
+                try (PreparedStatement release = connection.prepareStatement("SELECT RELEASE_LOCK(?)")) {
+                    release.setString(1, "campus-market:search-alias-mutation");
+                    release.execute();
+                }
+            }
+        } catch (SQLException e) {
+            throw new SearchUnavailableException("搜索别名互斥锁失败", e);
         }
     }
 
@@ -192,10 +293,15 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     }
 
     public String currentReadIndex() {
+        Set<String> members = currentReadIndexes();
+        return members.isEmpty() ? null : members.iterator().next();
+    }
+
+    public Set<String> currentReadIndexes() {
         initializeIfNeeded();
         try {
             var response = client.indices().getAlias(g -> g.name(READ_ALIAS));
-            return response.result().keySet().stream().findFirst().orElse(null);
+            return Set.copyOf(response.result().keySet());
         } catch (IOException e) {
             throw new SearchUnavailableException("读取搜索别名失败", e);
         }
@@ -309,9 +415,8 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         List<CleanupClaim> claims = jdbc.query("SELECT id,index_name,attempt_count,status FROM search_index_cleanup_task WHERE (status='NEW' AND available_at <= CURRENT_TIMESTAMP(6)) OR (status='RUNNING' AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count < 3) OR (status='BUILDING' AND lease_until <= CURRENT_TIMESTAMP(6)) ORDER BY created_at LIMIT 20", (rs, rowNum) -> new CleanupClaim(rs.getString(1), rs.getString(2), rs.getInt(3), rs.getString(4)));
         for (CleanupClaim claim : claims) {
             if ("BUILDING".equals(claim.status())) {
-                String liveRead = currentReadIndex();
-                String liveWrite = currentWriteIndex();
-                if (claim.indexName().equals(liveRead) || claim.indexName().equals(liveWrite)) {
+                Set<String> live = liveAliasMembers();
+                if (live.contains(claim.indexName())) {
                     jdbc.update("UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE id=? AND status='BUILDING' AND lease_until <= CURRENT_TIMESTAMP(6)", claim.id());
                     continue;
                 }
@@ -326,10 +431,11 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
             }
             try {
                 // Every ES read and delete is outside the short claim transaction.
-                if (claim.indexName().equals(currentReadIndex()) || claim.indexName().equals(currentWriteIndex())) {
+                if (liveAliasMembers().contains(claim.indexName())) {
                     jdbc.update("UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE id=? AND status='RUNNING' AND owner_id=? AND claim_token=?", claim.id(), cleanupOwner, token);
                     continue;
                 }
+                cleanupDeleteHook.accept(claim.indexName());
                 try { client.indices().delete(d -> d.index(claim.indexName())); }
                 catch (co.elastic.clients.elasticsearch._types.ElasticsearchException missing) { if (missing.status() != 404) throw missing; }
                 jdbc.update("UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL,last_error=NULL,failure_class=NULL WHERE id=? AND status='RUNNING' AND owner_id=? AND claim_token=? AND lease_until > CURRENT_TIMESTAMP(6)", claim.id(), cleanupOwner, token);
@@ -384,32 +490,67 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     }
 
     private void reconcileLatestSuccessfulGeneration() {
-        RebuildIntent latest = jdbc.query("""
-            SELECT i.target_index,i.previous_index,i.phase,i.generation
-            FROM search_rebuild_intent i
-            JOIN search_index_cleanup_task c ON c.index_name=i.target_index
-            WHERE i.generation > 0 AND i.phase IN ('SWITCHED','RECONCILED') AND c.status='DONE'
-            ORDER BY i.generation DESC LIMIT 1
-            """, (rs, rowNum) -> new RebuildIntent(rs.getString(1), rs.getString(2), rs.getString(3), rs.getLong(4)))
-            .stream().findFirst().orElse(null);
-        if (latest == null) return;
-        String liveRead = currentReadIndex();
-        String liveWrite = currentWriteIndex();
-        if (latest.target().equals(liveRead) && latest.target().equals(liveWrite)) return;
-        AliasTransition transition = switchAliasesToSingleLive(latest.target());
-        cancelCleanup(latest.target());
-        for (String oldIndex : transition.previousIndexes()) {
-            if (!oldIndex.equals(latest.target())) scheduleCleanup(oldIndex);
+        withAliasMutex(connection -> {
+            String mode = jdbc.queryForObject("SELECT mode FROM search_rebuild_gate WHERE id=1", String.class);
+            if (!"OPEN".equals(mode)) return null;
+            RebuildIntent latest = jdbc.query("""
+                SELECT i.target_index,i.previous_index,i.phase,i.generation
+                FROM search_rebuild_intent i
+                JOIN search_index_cleanup_task c ON c.index_name=i.target_index
+                WHERE i.generation > 0 AND i.phase IN ('SWITCHED','RECONCILED') AND c.status='DONE'
+                ORDER BY i.generation DESC LIMIT 1
+                """, (rs, rowNum) -> new RebuildIntent(rs.getString(1), rs.getString(2), rs.getString(3), rs.getLong(4)))
+                .stream().findFirst().orElse(null);
+            if (latest == null) return null;
+            // Any live SWITCHING intent means an external alias mutation may
+            // still be in flight. Waiting for all of them is conservative and
+            // prevents a cleanup worker from rolling back a newer generation
+            // whose generation row is not committed yet.
+            Integer activeSwitching = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM search_rebuild_intent
+                WHERE phase='SWITCHING' AND lease_until > CURRENT_TIMESTAMP(6)
+                """, Integer.class);
+            if (activeSwitching != null && activeSwitching > 0) return null;
+            Set<String> live = liveAliasMembers();
+            if (live.contains(latest.target()) && live.size() == 1) return null;
+            AliasTransition transition = updateAliasesToSingleLive(latest.target(), live);
+            cancelCleanup(latest.target());
+            for (String oldIndex : transition.previousIndexes()) {
+                if (!oldIndex.equals(latest.target())) scheduleCleanup(oldIndex);
+            }
+            return null;
+        });
+    }
+
+    private AliasTransition updateAliasesToSingleLive(String targetIndex, Set<String> live) {
+        try {
+            client.indices().updateAliases(a -> {
+                for (String index : live) {
+                    a.actions(action -> action.remove(r -> r.index(index).alias(READ_ALIAS)));
+                    a.actions(action -> action.remove(r -> r.index(index).alias(WRITE_ALIAS)));
+                }
+                a.actions(action -> action.add(x -> x.index(targetIndex).alias(READ_ALIAS)));
+                a.actions(action -> action.add(x -> x.index(targetIndex).alias(WRITE_ALIAS).isWriteIndex(true)));
+                return a;
+            });
+            return new AliasTransition(live);
+        } catch (IOException e) {
+            throw new SearchUnavailableException("搜索别名切换失败", e);
         }
     }
 
     private record RebuildIntent(String target, String previous, String phase, long generation) { }
 
     public String currentWriteIndex() {
+        Set<String> members = currentWriteIndexes();
+        return members.isEmpty() ? null : members.iterator().next();
+    }
+
+    public Set<String> currentWriteIndexes() {
         initializeIfNeeded();
         try {
             var response = client.indices().getAlias(g -> g.name(WRITE_ALIAS));
-            return response.result().keySet().stream().findFirst().orElse(null);
+            return Set.copyOf(response.result().keySet());
         } catch (IOException e) {
             throw new SearchUnavailableException("读取写别名失败", e);
         }
@@ -423,19 +564,22 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     }
 
     private void ensureInitialIndex() {
-        try {
-            boolean exists = client.indices().exists(e -> e.index(INITIAL_INDEX)).value();
-            if (!exists) {
-                createIndex(INITIAL_INDEX);
-                client.indices().updateAliases(a -> a.actions(x -> x.add(v -> v.index(INITIAL_INDEX).alias(READ_ALIAS)))
-                    .actions(x -> x.add(v -> v.index(INITIAL_INDEX).alias(WRITE_ALIAS).isWriteIndex(true))));
-            } else {
-                ensureAlias(INITIAL_INDEX, READ_ALIAS, false);
-                ensureAlias(INITIAL_INDEX, WRITE_ALIAS, true);
+        withAliasMutex(connection -> {
+            try {
+                boolean exists = client.indices().exists(e -> e.index(INITIAL_INDEX)).value();
+                if (!exists) {
+                    createIndex(INITIAL_INDEX);
+                    client.indices().updateAliases(a -> a.actions(x -> x.add(v -> v.index(INITIAL_INDEX).alias(READ_ALIAS)))
+                        .actions(x -> x.add(v -> v.index(INITIAL_INDEX).alias(WRITE_ALIAS).isWriteIndex(true))));
+                } else {
+                    ensureAlias(INITIAL_INDEX, READ_ALIAS, false);
+                    ensureAlias(INITIAL_INDEX, WRITE_ALIAS, true);
+                }
+            } catch (IOException e) {
+                throw new SearchUnavailableException("初始化搜索索引失败", e);
             }
-        } catch (IOException e) {
-            throw new SearchUnavailableException("初始化搜索索引失败", e);
-        }
+            return null;
+        });
     }
 
     private void initializeIfNeeded() {
