@@ -9,7 +9,6 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /** 在线重建：同一 RR 快照和序列高水位，之后按序列补放并用 MySQL 门禁切换。 */
 @Service
@@ -34,46 +33,64 @@ public class SearchRebuildService {
 
     public RebuildReport rebuild() {
         Snapshot snapshot = captureSnapshot();
-        String target = elasticsearch.createRebuildIndex();
-        // Register immediately so a process crash at any later stage leaves a
-        // durable, lease-protected cleanup record instead of an orphan index.
+        String target = elasticsearch.newRebuildIndexName();
+        // Record the intent before the first ES read so a crash or connection
+        // failure during target discovery is still reconciled durably.
+        elasticsearch.recordRebuildIntent(target, null);
+        String previous = elasticsearch.currentReadIndex();
+        elasticsearch.updateRebuildIntentPrevious(target, previous);
+        elasticsearch.createRebuildIndex(target);
+        elasticsearch.markRebuildIntentBuilding(target);
         elasticsearch.registerRebuildTarget(target);
-        AtomicBoolean aliasSwitched = new AtomicBoolean(false);
+        boolean aliasSwitched = false;
         try {
             SearchGateRepository.Lease lease = gate.acquire(owner, java.time.Duration.ofSeconds(30));
             try {
-                return transactions.execute(status -> {
-                    if (!gate.renew(lease, java.time.Duration.ofSeconds(30))) throw new IllegalStateException("重建门禁租约已过期");
-                    for (ProductSearchPort.ProductDocument document : snapshot.documents()) {
-                        if (!gate.renew(lease, java.time.Duration.ofSeconds(30))) throw new IllegalStateException("重建门禁租约已过期");
-                        projector.projectDocumentInto(target, document, lease);
-                    }
-                    elasticsearch.refreshIndex(target);
-                    List<OutboxChange> changes = jdbc.query(
-                        "SELECT listing_id, aggregate_version FROM search_outbox WHERE sequence_no > ? ORDER BY sequence_no",
-                        (rs, rowNum) -> new OutboxChange(UUID.fromString(rs.getString(1)), rs.getLong(2)), snapshot.highWater());
-                    for (OutboxChange change : changes) {
-                        if (!gate.renew(lease, java.time.Duration.ofSeconds(30))) throw new IllegalStateException("重建门禁租约已过期");
-                        projector.projectInto(target, change.listingId(), change.aggregateVersion(), lease);
-                    }
-                    elasticsearch.refreshIndex(target);
+                renewOrThrow(lease);
+                for (ProductSearchPort.ProductDocument document : snapshot.documents()) {
+                    renewOrThrow(lease);
+                    if (!elasticsearch.renewRebuildTarget(target)) throw new IllegalStateException("目标索引租约已过期");
+                    projector.projectDocumentInto(target, document, lease);
+                }
+                elasticsearch.refreshIndex(target);
+                List<OutboxChange> changes = transactions.execute(status -> jdbc.query(
+                    "SELECT listing_id, aggregate_version FROM search_outbox WHERE sequence_no > ? ORDER BY sequence_no",
+                    (rs, rowNum) -> new OutboxChange(UUID.fromString(rs.getString(1)), rs.getLong(2)), snapshot.highWater()));
+                for (OutboxChange change : changes) {
+                    renewOrThrow(lease);
+                    if (!elasticsearch.renewRebuildTarget(target)) throw new IllegalStateException("目标索引租约已过期");
+                    projector.projectInto(target, change.listingId(), change.aggregateVersion(), lease);
+                }
+                elasticsearch.refreshIndex(target);
+                // The final short transaction holds the row lock only over
+                // the single alias request, so a stale owner cannot be taken
+                // over between the final CAS and alias swap.
+                RebuildReport report = transactions.execute(status -> {
                     gate.assertLease(lease);
-                    String previous = elasticsearch.currentReadIndex();
+                    if (!elasticsearch.renewRebuildTarget(target)) throw new IllegalStateException("目标索引租约已过期");
                     elasticsearch.switchAliases(target, previous);
-                    aliasSwitched.set(true);
                     elasticsearch.cancelCleanup(target);
                     if (previous != null) elasticsearch.scheduleCleanup(previous);
+                    elasticsearch.markRebuildIntentSwitched(target);
                     return new RebuildReport(target, snapshot.highWater(), snapshot.documents().size(), changes.size());
                 });
+                aliasSwitched = true;
+                return report;
             } finally {
                 gate.release(lease);
             }
         } catch (RuntimeException failure) {
-            // The target was registered immediately after creation and remains
-            // a retryable cleanup candidate unless it became the live alias.
-            if (aliasSwitched.get()) elasticsearch.cancelCleanup(target);
+            // Reconciliation will compare the intent with current aliases if
+            // a process dies between the external alias request and DB commit.
+            if (aliasSwitched) elasticsearch.cancelCleanup(target);
             else elasticsearch.armCleanup(target);
             throw failure;
+        }
+    }
+
+    private void renewOrThrow(SearchGateRepository.Lease lease) {
+        if (!gate.renew(lease, java.time.Duration.ofSeconds(30))) {
+            throw new IllegalStateException("重建门禁租约已过期");
         }
     }
 

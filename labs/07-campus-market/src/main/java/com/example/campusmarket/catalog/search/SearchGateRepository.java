@@ -21,6 +21,16 @@ public class SearchGateRepository {
     }
 
     public void assertProjectionOpen() {
+        // Projection IO must not hold the gate row lock. The concrete write
+        // index is resolved by ElasticsearchProductSearch before the request,
+        // so a concurrent alias swap can only leave a stale write on the old
+        // (soon-to-be-cleaned) concrete index.
+        String mode = jdbc.queryForObject("SELECT mode FROM search_rebuild_gate WHERE id=1", String.class);
+        if (!"OPEN".equals(mode)) throw new SearchGateClosedException();
+    }
+
+    /** Claim-only fence: safe to hold for the short DB claim transaction. */
+    public void assertProjectionOpenForClaim() {
         String mode = jdbc.queryForObject("SELECT mode FROM search_rebuild_gate WHERE id=1 FOR UPDATE", String.class);
         if (!"OPEN".equals(mode)) throw new SearchGateClosedException();
     }
@@ -54,9 +64,9 @@ public class SearchGateRepository {
         if (!Objects.equals(validGeneration, lease.generation())) throw new SearchGateClosedException();
     }
 
-    public void release(Lease lease) {
+    public int release(Lease lease) {
         Objects.requireNonNull(lease, "门禁租约不能为空");
-        jdbc.update("UPDATE search_rebuild_gate SET mode='OPEN',owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=1 AND mode='REBUILDING' AND owner_id=? AND claim_token=? AND generation=? AND lease_until > CURRENT_TIMESTAMP(6)", lease.owner(), lease.token(), lease.generation());
+        return jdbc.update("UPDATE search_rebuild_gate SET mode='OPEN',owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=1 AND mode='REBUILDING' AND owner_id=? AND claim_token=? AND generation=? AND lease_until > CURRENT_TIMESTAMP(6)", lease.owner(), lease.token(), lease.generation());
     }
 
     public record Lease(String owner, String token, long generation, java.sql.Timestamp leaseUntil) {

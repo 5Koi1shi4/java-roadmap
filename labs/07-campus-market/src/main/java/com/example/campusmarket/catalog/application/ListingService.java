@@ -17,15 +17,11 @@ public class ListingService {
     private final ObjectUploadCoordinator uploads;
     private final SearchOutboxRepository searchOutbox;
 
-    public ListingService(ListingRepository listings, ObjectUploadCoordinator uploads) {
-        this(listings, uploads, null);
-    }
-
     @Autowired
     public ListingService(ListingRepository listings, ObjectUploadCoordinator uploads, SearchOutboxRepository searchOutbox) {
         this.listings = listings;
         this.uploads = uploads;
-        this.searchOutbox = searchOutbox;
+        this.searchOutbox = java.util.Objects.requireNonNull(searchOutbox, "搜索 Outbox 不能为空");
     }
 
     @Transactional
@@ -43,7 +39,7 @@ public class ListingService {
         if (!listings.hasMedia(listingId)) throw new IllegalStateException("商品至少需要一张媒体");
         listing.publish();
         Listing saved = listings.save(listing);
-        if (searchOutbox != null) searchOutbox.enqueue(saved, "LISTING_PUBLISHED");
+        searchOutbox.enqueue(saved, "LISTING_PUBLISHED");
         return saved;
     }
 
@@ -52,7 +48,7 @@ public class ListingService {
         Listing listing = owned(sellerId, listingId);
         listing.takeOffSale();
         listings.save(listing);
-        if (searchOutbox != null) searchOutbox.enqueue(listing, "LISTING_OFF_SALE");
+        searchOutbox.enqueue(listing, "LISTING_OFF_SALE");
     }
 
     public ListingRepository.MediaRecord addMedia(UUID sellerId, UUID listingId, String filename,

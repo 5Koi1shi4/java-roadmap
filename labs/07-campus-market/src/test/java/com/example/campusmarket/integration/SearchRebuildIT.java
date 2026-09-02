@@ -1,10 +1,12 @@
 package com.example.campusmarket.integration;
 
+import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import com.example.campusmarket.catalog.search.ProductSearchPort;
 import com.example.campusmarket.catalog.search.ElasticsearchProductSearch;
 import com.example.campusmarket.catalog.search.SearchRebuildService;
 import com.example.campusmarket.catalog.search.SearchProjector;
 import com.example.campusmarket.catalog.search.SearchOutboxDispatcher;
+import com.example.campusmarket.catalog.search.SearchOutboxRepository;
 import com.example.campusmarket.catalog.search.SearchGateRepository;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
@@ -12,9 +14,15 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.test.context.ActiveProfiles;
 
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import javax.sql.DataSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -22,11 +30,15 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 @ActiveProfiles("local")
 class SearchRebuildIT extends SharedContainers {
     @Autowired JdbcTemplate jdbc;
+    @Autowired DataSource dataSource;
     @Autowired ProductSearchPort search;
     @Autowired SearchProjector projector;
     @Autowired SearchRebuildService rebuild;
     @Autowired SearchOutboxDispatcher dispatcher;
+    @Autowired SearchOutboxRepository searchOutbox;
+    @Autowired PlatformTransactionManager transactionManager;
     @Autowired ElasticsearchProductSearch elasticsearch;
+    @Autowired ElasticsearchClient elasticsearchClient;
 
     @BeforeAll
     static void migrate() {
@@ -58,6 +70,8 @@ class SearchRebuildIT extends SharedContainers {
         jdbc.update("DELETE FROM external_identity");
         jdbc.update("DELETE FROM listing_media");
         jdbc.update("DELETE FROM search_outbox");
+        jdbc.update("DELETE FROM search_rebuild_intent");
+        jdbc.update("DELETE FROM search_index_cleanup_task");
         jdbc.update("DELETE FROM listing");
         jdbc.update("DELETE FROM campus_user");
         UUID seller = UUID.randomUUID();
@@ -72,13 +86,17 @@ class SearchRebuildIT extends SharedContainers {
 
     @Test
     void expiredLeaseCanBeTakenOverAndStaleOwnerCannotReleaseOrRenew() {
-        SearchGateRepository firstCoordinator = new SearchGateRepository(jdbc);
-        SearchGateRepository secondCoordinator = new SearchGateRepository(jdbc);
+        // Each repository obtains an independent pooled JDBC connection; the
+        // assertions below therefore cover committed heartbeat visibility,
+        // takeover, and stale-owner fencing rather than thread-local state.
+        SearchGateRepository firstCoordinator = new SearchGateRepository(new JdbcTemplate(dataSource));
+        SearchGateRepository secondCoordinator = new SearchGateRepository(new JdbcTemplate(dataSource));
         SearchGateRepository.Lease old = firstCoordinator.acquire("rebuild-old", java.time.Duration.ofMinutes(1));
+        assertThat(secondCoordinator.renew(old, java.time.Duration.ofMinutes(1))).isTrue();
         jdbc.update("UPDATE search_rebuild_gate SET lease_until=TIMESTAMPADD(MICROSECOND,-1,CURRENT_TIMESTAMP(6)) WHERE id=1");
 
         SearchGateRepository.Lease current = secondCoordinator.acquire("rebuild-current", java.time.Duration.ofMinutes(1));
-        firstCoordinator.release(old);
+        assertThat(firstCoordinator.release(old)).isZero();
 
         assertThat(jdbc.queryForObject("SELECT owner_id FROM search_rebuild_gate WHERE id=1", String.class))
             .isEqualTo("rebuild-current");
@@ -105,19 +123,38 @@ class SearchRebuildIT extends SharedContainers {
     }
 
     @Test
-    void restoresEsProxyAfterDisconnectAndRerunsWithoutChangingOldAliasOnFailure() {
+    void outboxInsertRollsBackWithItsFactTransaction() {
+        UUID listing = UUID.fromString(jdbc.queryForObject("SELECT id FROM listing LIMIT 1", String.class));
+        int before = jdbc.queryForObject("SELECT COUNT(*) FROM search_outbox WHERE listing_id=?", Integer.class, listing.toString());
+        new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+            searchOutbox.enqueue(listing, 1L, "LISTING_UPDATED");
+            status.setRollbackOnly();
+        });
+
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM search_outbox WHERE listing_id=?", Integer.class, listing.toString()))
+            .isEqualTo(before);
+    }
+
+    @Test
+    void rebuildCreateFailureKeepsOldAliasAndReconcilesAfterProxyRecovery() {
         search.refresh();
         String previous = elasticsearch.currentReadIndex();
         try {
             ELASTICSEARCH_PROXY.setConnectionCut(true);
-            assertThrows(RuntimeException.class, search::refresh);
+            assertThrows(RuntimeException.class, rebuild::rebuild);
+            assertThat(jdbc.queryForObject("SELECT mode FROM search_rebuild_gate WHERE id=1", String.class)).isEqualTo("OPEN");
         } finally {
             ELASTICSEARCH_PROXY.setConnectionCut(false);
         }
+        assertThat(elasticsearch.currentReadIndex()).isEqualTo(previous);
+        String failedTarget = jdbc.queryForObject("SELECT target_index FROM search_rebuild_intent WHERE phase='CREATED' LIMIT 1", String.class);
         SearchRebuildService.RebuildReport recovered = rebuild.rebuild();
+        elasticsearch.cleanupPending();
         search.refresh();
         assertThat(recovered.index()).isNotBlank();
         assertThat(elasticsearch.currentReadIndex()).isNotEqualTo(previous);
+        assertThat(jdbc.queryForObject("SELECT phase FROM search_rebuild_intent WHERE target_index=?", String.class, failedTarget))
+            .isEqualTo("RECONCILED");
     }
 
     @Test
@@ -137,6 +174,61 @@ class SearchRebuildIT extends SharedContainers {
         assertThat(finalPage.items()).extracting(ProductSearchPort.SearchItem::aggregateVersion)
             .containsExactly(1L);
         assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, third.index()))
+            .isEqualTo("DONE");
+    }
+
+    @Test
+    void cleanupRecoversExpiredBuildingTargetAndNeverCallsEsForAttemptThree() {
+        String building = "campus-listing-rebuild-building-" + UUID.randomUUID().toString().replace("-", "");
+        String exhausted = "campus-listing-rebuild-exhausted-" + UUID.randomUUID().toString().replace("-", "");
+        jdbc.update("INSERT INTO search_index_cleanup_task(id,index_name,status,owner_id,claim_token,lease_until,attempt_count,available_at,created_at) VALUES (?,?, 'BUILDING','dead-owner','dead-token',TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP(6)),0,TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP(6)),CURRENT_TIMESTAMP(6))", UUID.randomUUID().toString(), building);
+        jdbc.update("INSERT INTO search_index_cleanup_task(id,index_name,status,attempt_count,available_at,created_at,owner_id,claim_token,lease_until) VALUES (?,?, 'RUNNING',3,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),'dead-owner','dead-token',TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP(6)))", UUID.randomUUID().toString(), exhausted);
+
+        elasticsearch.cleanupPending();
+
+        assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, building))
+            .isEqualTo("DONE");
+        assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, exhausted))
+            .isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT attempt_count FROM search_index_cleanup_task WHERE index_name=?", Integer.class, exhausted))
+            .isEqualTo(3);
+    }
+
+    @Test
+    void reconciliationProtectsAliasTargetAfterSwitchBeforeIntentCommit() {
+        String previous = elasticsearch.currentReadIndex();
+        String target = elasticsearch.createRebuildIndex();
+        elasticsearch.recordRebuildIntent(target, previous);
+        elasticsearch.markRebuildIntentBuilding(target);
+        elasticsearch.registerRebuildTarget(target);
+
+        // Simulate the external alias request succeeding immediately before
+        // the DB phase update/commit is interrupted.
+        elasticsearch.switchAliases(target, previous);
+        elasticsearch.cleanupPending();
+
+        assertThat(elasticsearch.currentReadIndex()).isEqualTo(target);
+        assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, target))
+            .isEqualTo("DONE");
+        assertThat(jdbc.queryForObject("SELECT phase FROM search_rebuild_intent WHERE target_index=?", String.class, target))
+            .isEqualTo("RECONCILED");
+    }
+
+    @Test
+    void twoCleanupWorkersUseSkipLockedAndOwnerFencing() throws Exception {
+        String target = elasticsearch.createRebuildIndex();
+        elasticsearch.scheduleCleanup(target);
+        ElasticsearchProductSearch secondWorker = new ElasticsearchProductSearch(elasticsearchClient, new JdbcTemplate(dataSource));
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            var first = workers.submit(elasticsearch::cleanupPending);
+            var second = workers.submit(() -> new TransactionTemplate(transactionManager).executeWithoutResult(status -> secondWorker.cleanupPending()));
+            first.get(30, TimeUnit.SECONDS);
+            second.get(30, TimeUnit.SECONDS);
+        } finally {
+            workers.shutdownNow();
+        }
+        assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, target))
             .isEqualTo("DONE");
     }
 }

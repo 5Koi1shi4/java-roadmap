@@ -31,7 +31,9 @@ public class SearchOutboxClaimer {
         // Do not even claim while rebuild owns the gate. This makes a closed
         // gate a pause (rather than a delivery attempt) and serializes claim
         // with a rebuild boundary through the same MySQL row lock.
-        gate.assertProjectionOpen();
+        // The lock is held only while rows are claimed. Projector ES IO runs
+        // after this transaction commits and therefore cannot block takeover.
+        gate.assertProjectionOpenForClaim();
         jdbc.update("UPDATE search_outbox SET status='FAILED',owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE status='PUBLISHING' AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count >= 3");
         jdbc.query("SELECT id,listing_id,aggregate_version,event_type,payload,created_at,attempt_count FROM search_outbox WHERE ((status='NEW' AND available_at <= CURRENT_TIMESTAMP(6)) OR (status='PUBLISHING' AND lease_until <= CURRENT_TIMESTAMP(6))) AND attempt_count < 3 ORDER BY sequence_no LIMIT ? FOR UPDATE SKIP LOCKED", rs -> {
             String id = rs.getString("id");

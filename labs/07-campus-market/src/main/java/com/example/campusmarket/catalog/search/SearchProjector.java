@@ -58,6 +58,7 @@ public class SearchProjector {
         ProductSearchPort target = new TargetIndex(search, index);
         if ("ON_SALE".equals(document.status()) && document.availableQuantity() > 0) target.index(document);
         else target.tombstone(document.listingId(), document.aggregateVersion());
+        gate.assertLease(lease);
     }
 
     public ProductSearchPort.ProductDocument snapshot(UUID listingId) {

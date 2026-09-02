@@ -50,6 +50,9 @@ public interface ProductSearchPort {
         public SearchRequest {
             keyword = keyword == null ? "" : keyword.trim();
             category = category == null || category.isBlank() ? null : category.trim();
+            if (keyword.indexOf('\0') >= 0 || (category != null && category.indexOf('\0') >= 0)) {
+                throw new IllegalArgumentException("搜索条件包含非法字符");
+            }
             if (minPriceFen != null && minPriceFen < 0) throw new IllegalArgumentException("最低价格不能为负数");
             if (maxPriceFen != null && maxPriceFen < 0) throw new IllegalArgumentException("最高价格不能为负数");
             if (minPriceFen != null && maxPriceFen != null && minPriceFen > maxPriceFen) {

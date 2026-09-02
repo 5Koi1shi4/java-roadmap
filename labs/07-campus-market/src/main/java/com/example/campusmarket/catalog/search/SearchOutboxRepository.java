@@ -26,6 +26,7 @@ public class SearchOutboxRepository {
         this.gate = Objects.requireNonNull(gate, "搜索门禁不能为空");
     }
 
+    @Transactional
     public void enqueue(Listing listing, String eventType) {
         Objects.requireNonNull(listing, "商品不能为空");
         enqueue(listing.id(), listing.version(), eventType);

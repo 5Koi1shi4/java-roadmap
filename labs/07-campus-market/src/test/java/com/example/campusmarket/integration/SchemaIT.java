@@ -51,9 +51,9 @@ class SchemaIT extends SharedContainers {
             "handoff_record", "dispute_case", "dispute_evidence", "return_case", "warranty_case",
             "seller_obligation", "trade_review", "audit_event", "integration_outbox", "consumed_event",
             "object_upload_session", "storage_cleanup_task", "manual_failure", "search_rebuild_gate",
-            "search_index_cleanup_task");
+            "search_index_cleanup_task", "search_rebuild_intent");
         assertThat(tableNames()).containsExactlyInAnyOrderElementsOf(expected);
-        assertThat(expected).hasSize(30);
+        assertThat(expected).hasSize(31);
     }
 
     @Test
@@ -104,6 +104,15 @@ class SchemaIT extends SharedContainers {
             "uk_seller_obligation_warranty_case");
         assertThat(foreignKeyNames()).contains("fk_listing_seller", "fk_trade_order_listing", "fk_refund_order_order",
             "fk_warranty_case_order", "fk_seller_obligation_warranty_case");
+    }
+
+    @Test
+    void constrainsRebuildIntentAndCleanupClaimState() throws SQLException {
+        assertThat(indexNames("search_index_cleanup_task")).contains("idx_search_cleanup_claim");
+        assertThat(checkConstraintNames("search_index_cleanup_task")).contains("ck_search_cleanup_claim_fields");
+        assertThat(indexNames("search_rebuild_intent")).contains("uk_search_rebuild_intent_target",
+            "idx_search_rebuild_intent_phase");
+        assertThat(checkConstraintNames("search_rebuild_intent")).contains("ck_search_rebuild_intent_phase");
     }
 
     private Set<String> tableNames() throws SQLException {

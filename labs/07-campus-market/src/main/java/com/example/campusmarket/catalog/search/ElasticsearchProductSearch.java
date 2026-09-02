@@ -10,6 +10,8 @@ import co.elastic.clients.elasticsearch.core.search.Hit;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.transaction.annotation.Transactional;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -27,6 +29,7 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     private final org.springframework.jdbc.core.JdbcTemplate jdbc;
     private volatile boolean initialized;
     private final String cleanupOwner = "search-cleanup-" + UUID.randomUUID();
+    private static final Logger LOGGER = LoggerFactory.getLogger(ElasticsearchProductSearch.class);
 
     @Autowired
     public ElasticsearchProductSearch(ElasticsearchClient client, org.springframework.jdbc.core.JdbcTemplate jdbc) {
@@ -39,10 +42,12 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         initializeIfNeeded();
         Objects.requireNonNull(document, "商品文档不能为空");
         try {
-            client.index(i -> i.index(WRITE_ALIAS).id(document.listingId())
+            String writeIndex = currentWriteIndex();
+            client.index(i -> i.index(writeIndex == null ? WRITE_ALIAS : writeIndex).id(document.listingId())
                 .version(document.aggregateVersion()).versionType(VersionType.ExternalGte)
                 .document(toMap(document)));
         } catch (IOException e) {
+            if (isVersionConflict(e)) return;
             throw new SearchUnavailableException("商品索引写入失败", e);
         } catch (co.elastic.clients.elasticsearch._types.ElasticsearchException e) {
             if (!isVersionConflict(e)) throw e;
@@ -56,9 +61,11 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
             throw new IllegalArgumentException("删除版本无效");
         }
         try {
-            client.index(i -> i.index(WRITE_ALIAS).id(listingId).version(aggregateVersion)
+            String writeIndex = currentWriteIndex();
+            client.index(i -> i.index(writeIndex == null ? WRITE_ALIAS : writeIndex).id(listingId).version(aggregateVersion)
                 .versionType(VersionType.ExternalGte).document(toMap(ProductDocument.tombstone(listingId, aggregateVersion))));
         } catch (IOException e) {
+            if (isVersionConflict(e)) return;
             throw new SearchUnavailableException("商品索引删除失败", e);
         } catch (co.elastic.clients.elasticsearch._types.ElasticsearchException e) {
             if (!isVersionConflict(e)) throw e;
@@ -69,6 +76,7 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     public SearchPage search(SearchRequest request) {
         initializeIfNeeded();
         Objects.requireNonNull(request, "搜索请求不能为空");
+        String pit = null;
         try {
             Query query = query(request);
             ProductSearchPort.SearchCursor cursor = request.searchAfter() == null ? null : ProductSearchPort.decodeCursor(request.searchAfter());
@@ -76,9 +84,10 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
             if (cursor != null && (cursor.pitId().isBlank() || !fingerprint.equals(cursor.fingerprint()))) {
                 throw new IllegalArgumentException("搜索游标与查询条件不匹配");
             }
-            String pit = cursor == null ? client.openPointInTime(o -> o.index(READ_ALIAS).keepAlive(co.elastic.clients.elasticsearch._types.Time.of(t -> t.time("1m")))).id() : cursor.pitId();
+            pit = cursor == null ? client.openPointInTime(o -> o.index(READ_ALIAS).keepAlive(co.elastic.clients.elasticsearch._types.Time.of(t -> t.time("1m")))).id() : cursor.pitId();
+            String requestPit = pit;
             SearchResponse<Map> response = client.search(s -> {
-                s.pit(p -> p.id(pit).keepAlive(co.elastic.clients.elasticsearch._types.Time.of(t -> t.time("1m")))).query(query).size(request.size() + 1).trackTotalHits(t -> t.enabled(true))
+                s.pit(p -> p.id(requestPit).keepAlive(co.elastic.clients.elasticsearch._types.Time.of(t -> t.time("1m")))).query(query).size(request.size() + 1).trackTotalHits(t -> t.enabled(true))
                     // Score is ordered first; listing ID is a deterministic tie-breaker.
                     .sort(sort -> sort.score(sc -> sc.order(co.elastic.clients.elasticsearch._types.SortOrder.Desc)))
                     .sort(sort -> sort.field(f -> f.field("listingId")
@@ -86,6 +95,12 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
                 if (cursor != null) s.searchAfter(searchAfter(cursor));
                 return s;
             }, Map.class);
+            String responsePit = response.pitId();
+            String currentPit = responsePit == null || responsePit.isBlank() ? pit : responsePit;
+            // Elasticsearch may rotate the PIT id on every page. Keep the
+            // newest id so an exception while decoding hits can still close
+            // the controllable PIT rather than leaking the original one.
+            pit = currentPit;
             List<SearchItem> items = new ArrayList<>();
             String next = null;
             List<Hit<Map>> hits = response.hits().hits();
@@ -93,15 +108,20 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
             for (int i = 0; i < Math.min(request.size(), hits.size()); i++) {
                 Hit<Map> hit = hits.get(i);
                 items.add(fromMap(hit.source()));
-                if (hit.sort().size() >= 2) next = ProductSearchPort.encodeCursor(pit, fingerprint, hit.sort().get(0).doubleValue(), hit.sort().get(1).stringValue());
+                if (hit.sort().size() >= 2) next = ProductSearchPort.encodeCursor(currentPit, fingerprint, hit.sort().get(0).doubleValue(), hit.sort().get(1).stringValue());
             }
             long total = response.hits().total() == null ? items.size() : response.hits().total().value();
             if (!hasMore) {
                 next = null;
-                try { client.closePointInTime(c -> c.id(pit)); } catch (IOException ignored) { }
+                closePit(currentPit);
             }
             return new SearchPage(items, total, next);
-        } catch (IOException | ArithmeticException e) {
+        } catch (IOException | RuntimeException e) {
+            if (pit != null) {
+                closePit(pit);
+            }
+            if (e instanceof SearchUnavailableException unavailable) throw unavailable;
+            if (e instanceof IllegalArgumentException invalid) throw invalid;
             throw new SearchUnavailableException("商品搜索失败", e);
         }
     }
@@ -154,8 +174,16 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     }
 
     public String createRebuildIndex() {
+        return createRebuildIndex(newRebuildIndexName());
+    }
+
+    public String newRebuildIndexName() {
+        return "campus-listing-rebuild-" + UUID.randomUUID().toString().replace("-", "");
+    }
+
+    public String createRebuildIndex(String index) {
         initializeIfNeeded();
-        String index = "campus-listing-rebuild-" + UUID.randomUUID().toString().replace("-", "");
+        if (index == null || index.isBlank()) throw new IllegalArgumentException("目标索引不能为空");
         try {
             client.indices().create(c -> c.index(index).settings(s -> s.numberOfShards("1").numberOfReplicas("0"))
                 .mappings(ElasticsearchProductSearch::mapping));
@@ -170,6 +198,7 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
             client.index(i -> i.index(index).id(document.listingId()).version(document.aggregateVersion())
                 .versionType(VersionType.ExternalGte).document(toMap(document)));
         } catch (IOException e) {
+            if (isVersionConflict(e)) return;
             throw new SearchUnavailableException("重建索引写入失败", e);
         } catch (co.elastic.clients.elasticsearch._types.ElasticsearchException e) {
             if (!isVersionConflict(e)) throw e;
@@ -181,6 +210,7 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
             client.index(i -> i.index(index).id(listingId).version(aggregateVersion)
                 .versionType(VersionType.ExternalGte).document(toMap(ProductDocument.tombstone(listingId, aggregateVersion))));
         } catch (IOException e) {
+            if (isVersionConflict(e)) return;
             throw new SearchUnavailableException("重建索引删除失败", e);
         } catch (co.elastic.clients.elasticsearch._types.ElasticsearchException e) {
             if (!isVersionConflict(e)) throw e;
@@ -192,10 +222,32 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         jdbc.update("INSERT INTO search_index_cleanup_task(id,index_name,status,attempt_count,available_at,created_at) VALUES (?,?, 'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE status=IF(status='DONE',status,'NEW'),available_at=IF(status='DONE',available_at,CURRENT_TIMESTAMP(6))", UUID.randomUUID().toString(), index);
     }
 
+    public void recordRebuildIntent(String target, String previous) {
+        if (target == null || target.isBlank()) throw new IllegalArgumentException("目标索引不能为空");
+        jdbc.update("INSERT INTO search_rebuild_intent(id,target_index,previous_index,phase,created_at,updated_at) VALUES (?,?,?,?,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE previous_index=VALUES(previous_index),updated_at=CURRENT_TIMESTAMP(6)", UUID.randomUUID().toString(), target, previous, "CREATED");
+    }
+
+    public void markRebuildIntentSwitched(String target) {
+        jdbc.update("UPDATE search_rebuild_intent SET phase='SWITCHED',updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=?", target);
+    }
+
+    public void updateRebuildIntentPrevious(String target, String previous) {
+        jdbc.update("UPDATE search_rebuild_intent SET previous_index=?,updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=? AND phase='CREATED'", previous, target);
+    }
+
+    public void markRebuildIntentBuilding(String target) {
+        jdbc.update("UPDATE search_rebuild_intent SET phase='BUILDING',updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=? AND phase='CREATED'", target);
+    }
+
     /** Register an index while it may still be live or being populated. */
     public void registerRebuildTarget(String index) {
         if (index == null || index.isBlank() || index.startsWith("campus-listing-000001")) return;
-        jdbc.update("INSERT INTO search_index_cleanup_task(id,index_name,status,attempt_count,available_at,created_at) VALUES (?,?, 'BUILDING',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE status='BUILDING',owner_id=NULL,claim_token=NULL,lease_until=NULL", UUID.randomUUID().toString(), index);
+        jdbc.update("INSERT INTO search_index_cleanup_task(id,index_name,status,owner_id,claim_token,lease_until,attempt_count,available_at,created_at) VALUES (?,?, 'BUILDING',?,?,TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE status='BUILDING',owner_id=VALUES(owner_id),claim_token=VALUES(claim_token),lease_until=VALUES(lease_until)", UUID.randomUUID().toString(), index, cleanupOwner, UUID.randomUUID().toString());
+    }
+
+    public boolean renewRebuildTarget(String index) {
+        if (index == null || index.isBlank()) return false;
+        return jdbc.update("UPDATE search_index_cleanup_task SET lease_until=TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)) WHERE index_name=? AND status='BUILDING' AND owner_id=? AND lease_until > CURRENT_TIMESTAMP(6)", index, cleanupOwner) == 1;
     }
 
     /** Make a failed/unreferenced index eligible for the cleanup worker. */
@@ -212,15 +264,27 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
 
     @Transactional
     public void cleanupPending() {
-        // Cleanup must not run while a rebuild owns the gate.  Holding this
-        // row lock across the delete also closes the alias-switch/delete race.
-        String mode = jdbc.queryForObject("SELECT mode FROM search_rebuild_gate WHERE id=1 FOR UPDATE", String.class);
+        reconcileRebuildIntents();
+        String mode = jdbc.queryForObject("SELECT mode FROM search_rebuild_gate WHERE id=1", String.class);
         if (!"OPEN".equals(mode)) return;
-        List<CleanupClaim> claims = jdbc.query("SELECT id,index_name,attempt_count FROM search_index_cleanup_task WHERE (status='NEW' AND available_at <= CURRENT_TIMESTAMP(6)) OR (status='RUNNING' AND lease_until <= CURRENT_TIMESTAMP(6)) ORDER BY created_at LIMIT 20 FOR UPDATE SKIP LOCKED", (rs, rowNum) -> new CleanupClaim(rs.getString(1), rs.getString(2), rs.getInt(3)));
+        jdbc.update("UPDATE search_index_cleanup_task SET status='FAILED',owner_id=NULL,claim_token=NULL,lease_until=NULL,last_error='cleanup attempt limit exhausted',failure_class='TRANSIENT' WHERE status='RUNNING' AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count >= 3");
+        List<CleanupClaim> claims = jdbc.query("SELECT id,index_name,attempt_count,status FROM search_index_cleanup_task WHERE (status='NEW' AND available_at <= CURRENT_TIMESTAMP(6)) OR (status='RUNNING' AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count < 3) OR (status='BUILDING' AND lease_until <= CURRENT_TIMESTAMP(6)) ORDER BY created_at LIMIT 20 FOR UPDATE SKIP LOCKED", (rs, rowNum) -> new CleanupClaim(rs.getString(1), rs.getString(2), rs.getInt(3), rs.getString(4)));
         for (CleanupClaim claim : claims) {
+            if ("BUILDING".equals(claim.status())) {
+                String liveRead = currentReadIndex();
+                String liveWrite = currentWriteIndex();
+                if (claim.indexName().equals(liveRead) || claim.indexName().equals(liveWrite)) {
+                    jdbc.update("UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE id=? AND status='BUILDING' AND lease_until <= CURRENT_TIMESTAMP(6)", claim.id());
+                    continue;
+                }
+            }
             String token = UUID.randomUUID().toString();
-            if (jdbc.update("UPDATE search_index_cleanup_task SET status='RUNNING',owner_id=?,claim_token=?,lease_until=TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)),attempt_count=attempt_count+1 WHERE id=? AND ((status='NEW' AND available_at <= CURRENT_TIMESTAMP(6)) OR (status='RUNNING' AND lease_until <= CURRENT_TIMESTAMP(6)))", cleanupOwner, token, claim.id()) != 1) continue;
+            if (jdbc.update("UPDATE search_index_cleanup_task SET status='RUNNING',owner_id=?,claim_token=?,lease_until=TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)),attempt_count=attempt_count+1 WHERE id=? AND ((status='NEW' AND available_at <= CURRENT_TIMESTAMP(6)) OR (status='RUNNING' AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count < 3) OR (status='BUILDING' AND lease_until <= CURRENT_TIMESTAMP(6)))", cleanupOwner, token, claim.id()) != 1) continue;
             try {
+                if (claim.indexName().equals(currentReadIndex()) || claim.indexName().equals(currentWriteIndex())) {
+                    jdbc.update("UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE id=? AND status='RUNNING' AND owner_id=? AND claim_token=?", claim.id(), cleanupOwner, token);
+                    continue;
+                }
                 try { client.indices().delete(d -> d.index(claim.indexName())); }
                 catch (co.elastic.clients.elasticsearch._types.ElasticsearchException missing) { if (missing.status() != 404) throw missing; }
                 jdbc.update("UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL,last_error=NULL,failure_class=NULL WHERE id=? AND status='RUNNING' AND owner_id=? AND claim_token=? AND lease_until > CURRENT_TIMESTAMP(6)", claim.id(), cleanupOwner, token);
@@ -229,11 +293,49 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
                 String message = failure.getMessage() == null ? kind : failure.getMessage().substring(0, Math.min(500, failure.getMessage().length()));
                 String status = claim.attemptCount() + 1 >= 3 ? "FAILED" : "NEW";
                 jdbc.update("UPDATE search_index_cleanup_task SET status=?,owner_id=NULL,claim_token=NULL,lease_until=NULL,available_at=TIMESTAMPADD(SECOND,10,CURRENT_TIMESTAMP(6)),last_error=?,failure_class=? WHERE id=? AND status='RUNNING' AND owner_id=? AND claim_token=? AND lease_until > CURRENT_TIMESTAMP(6)", status, message, kind, claim.id(), cleanupOwner, token);
+                if ("FAILED".equals(status)) LOGGER.warn("搜索索引清理进入 FAILED，failureClass={}", kind);
             }
         }
     }
 
-    private record CleanupClaim(String id, String indexName, int attemptCount) { }
+    private record CleanupClaim(String id, String indexName, int attemptCount, String status) { }
+
+    private void reconcileRebuildIntents() {
+        List<RebuildIntent> intents = jdbc.query("SELECT target_index,previous_index,phase FROM search_rebuild_intent WHERE phase <> 'RECONCILED' ORDER BY created_at LIMIT 20", (rs, rowNum) -> new RebuildIntent(rs.getString(1), rs.getString(2), rs.getString(3)));
+        String liveRead = currentReadIndex();
+        String liveWrite = currentWriteIndex();
+        for (RebuildIntent intent : intents) {
+            if (intent.target().equals(liveRead) || intent.target().equals(liveWrite)) {
+                cancelCleanup(intent.target());
+                if (intent.previous() != null && !intent.previous().equals(liveRead) && !intent.previous().equals(liveWrite)) scheduleCleanup(intent.previous());
+                jdbc.update("UPDATE search_rebuild_intent SET phase='RECONCILED',updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=?", intent.target());
+            } else if ("BUILDING".equals(intent.phase()) || "SWITCHED".equals(intent.phase())) {
+                String taskStatus = jdbc.query("SELECT status FROM search_index_cleanup_task WHERE index_name=?", rs -> rs.next() ? rs.getString(1) : null, intent.target());
+                if (taskStatus == null || "BUILDING".equals(taskStatus)) {
+                    if (taskStatus == null) scheduleCleanup(intent.target());
+                    else continue;
+                } else {
+                    armCleanup(intent.target());
+                }
+                jdbc.update("UPDATE search_rebuild_intent SET phase='RECONCILED',updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=?", intent.target());
+            } else if ("CREATED".equals(intent.phase())) {
+                scheduleCleanup(intent.target());
+                jdbc.update("UPDATE search_rebuild_intent SET phase='RECONCILED',updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=?", intent.target());
+            }
+        }
+    }
+
+    private record RebuildIntent(String target, String previous, String phase) { }
+
+    public String currentWriteIndex() {
+        initializeIfNeeded();
+        try {
+            var response = client.indices().getAlias(g -> g.name(WRITE_ALIAS));
+            return response.result().keySet().stream().findFirst().orElse(null);
+        } catch (IOException e) {
+            throw new SearchUnavailableException("读取写别名失败", e);
+        }
+    }
 
     private static boolean permanentFailure(Throwable failure) {
         if (failure instanceof co.elastic.clients.elasticsearch._types.ElasticsearchException elastic) {
@@ -306,6 +408,10 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
             co.elastic.clients.elasticsearch._types.FieldValue.of(cursor.listingId()));
     }
 
+    private void closePit(String pit) {
+        try { client.closePointInTime(c -> c.id(pit)); } catch (IOException ignored) { }
+    }
+
     private static String fingerprint(ProductSearchPort.SearchRequest request) {
         return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
             (request.keyword() + "\u0000" + java.util.Objects.toString(request.category(), "") + "\u0000"
@@ -315,6 +421,11 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
 
     private static boolean isVersionConflict(co.elastic.clients.elasticsearch._types.ElasticsearchException e) {
         return e.status() == 409 || (e.getMessage() != null && e.getMessage().contains("version_conflict"));
+    }
+
+    private static boolean isVersionConflict(Throwable e) {
+        String message = e.getMessage();
+        return message != null && (message.contains("version_conflict") || message.contains("409 Conflict"));
     }
 
     private static Query query(SearchRequest request) {

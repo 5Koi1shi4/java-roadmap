@@ -21,18 +21,13 @@ public class JdbcInventoryRepository implements InventoryPort {
     private final TransactionTemplate transactions;
     private final SearchOutboxRepository searchOutbox;
 
-    public JdbcInventoryRepository(JdbcTemplate jdbc,
-                                   org.springframework.transaction.PlatformTransactionManager transactionManager) {
-        this(jdbc, transactionManager, null);
-    }
-
     @Autowired
     public JdbcInventoryRepository(JdbcTemplate jdbc,
                                    org.springframework.transaction.PlatformTransactionManager transactionManager,
                                    SearchOutboxRepository searchOutbox) {
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.transactions = new TransactionTemplate(Objects.requireNonNull(transactionManager, "事务管理器不能为空"));
-        this.searchOutbox = searchOutbox;
+        this.searchOutbox = Objects.requireNonNull(searchOutbox, "搜索 Outbox 不能为空");
     }
 
     @Override
@@ -113,10 +108,8 @@ public class JdbcInventoryRepository implements InventoryPort {
             jdbc.update("DELETE FROM inventory_movement WHERE business_key = ?", key);
             return false;
         }
-        if (searchOutbox != null) {
-            Long version = jdbc.queryForObject("SELECT version FROM listing WHERE id=?", Long.class, listingId.toString());
-            if (version != null && version > 0) searchOutbox.enqueue(listingId, version, "INVENTORY_CHANGED");
-        }
+        Long version = jdbc.queryForObject("SELECT version FROM listing WHERE id=?", Long.class, listingId.toString());
+        if (version != null && version > 0) searchOutbox.enqueue(listingId, version, "INVENTORY_CHANGED");
         return true;
     }
 

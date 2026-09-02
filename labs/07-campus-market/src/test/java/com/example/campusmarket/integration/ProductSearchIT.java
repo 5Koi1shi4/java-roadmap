@@ -19,6 +19,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @ActiveProfiles("local")
 class ProductSearchIT extends SharedContainers {
@@ -65,6 +66,9 @@ class ProductSearchIT extends SharedContainers {
         jdbc.update("DELETE FROM external_identity");
         jdbc.update("DELETE FROM listing_media");
         jdbc.update("DELETE FROM search_outbox");
+        jdbc.update("DELETE FROM search_rebuild_intent");
+        jdbc.update("DELETE FROM search_index_cleanup_task");
+        jdbc.update("UPDATE search_rebuild_gate SET mode='OPEN',owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE id=1");
         jdbc.update("DELETE FROM listing");
         jdbc.update("DELETE FROM campus_user");
         UUID seller = UUID.randomUUID();
@@ -113,6 +117,32 @@ class ProductSearchIT extends SharedContainers {
         assertThat(second.items()).hasSize(1);
         assertThat(second.items().get(0).listingId()).isNotEqualTo(first.items().get(0).listingId());
         assertThat(second.nextSearchAfter()).isNull();
+    }
+
+    @Test
+    void rejectsSearchAfterFromAnotherQueryFingerprint() {
+        String cursor = ProductSearchPort.encodeCursor("missing-pit", "different-query", 1.0d, onSale.toString());
+        assertThatThrownBy(() -> search.search(new ProductSearchPort.SearchRequest("其他查询", "教材", null, null, 0, 1, cursor)))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void outOfOrderTombstoneDoesNotResurrectAnOlderListingEvent() {
+        UUID temporarySeller = UUID.randomUUID();
+        UUID temporaryListing = UUID.randomUUID();
+        jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            temporarySeller.toString(), temporarySeller + "@stu.example.edu.cn", "hash");
+        insertListing(temporaryListing, temporarySeller, "临时并发编程商品", "并发编程", "教材", 10000, 1, "ON_SALE", 1);
+
+        projector.project(new DomainEvent(UUID.randomUUID(), "LISTING_OFF_SALE", temporaryListing.toString(), 2,
+            Instant.now(), 1, Map.of()));
+        projector.project(new DomainEvent(UUID.randomUUID(), "LISTING_UPDATED", temporaryListing.toString(), 1,
+            Instant.now(), 1, Map.of()));
+        search.refresh();
+
+        assertThat(search.search(new ProductSearchPort.SearchRequest("并发编程", "教材", null, null, 0, 20)).items())
+            .extracting(ProductSearchPort.SearchItem::listingId)
+            .doesNotContain(temporaryListing.toString());
     }
 
     private UUID insertListing(UUID id, UUID seller, String title, String description, String category, long price,
