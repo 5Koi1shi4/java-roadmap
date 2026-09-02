@@ -9,16 +9,18 @@ import co.elastic.clients.elasticsearch.core.SearchResponse;
 import co.elastic.clients.elasticsearch.core.search.Hit;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.dao.CannotAcquireLockException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 
 /** Elasticsearch 商品索引实现，所有写入均通过 external_gte 版本保护。 */
@@ -144,22 +146,48 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         }
     }
 
-    /** 重建服务使用的别名切换入口，动作在一个 aliases 请求中原子完成。 */
+    /**
+     * Rebuild service entry point. The supplied previous value is retained for
+     * source compatibility only; the live alias membership is always read at
+     * the instant immediately before the atomic request. This is the fencing
+     * boundary that prevents two concurrently prefilled rebuilds from leaving
+     * multiple read/write targets behind.
+     */
     public void switchAliases(String targetIndex, String previousIndex) {
+        switchAliasesToSingleLive(targetIndex);
+    }
+
+    /** Atomically reduces both aliases to exactly one concrete target. */
+    public AliasTransition switchAliasesToSingleLive(String targetIndex) {
         initializeIfNeeded();
         if (targetIndex == null || targetIndex.isBlank()) throw new IllegalArgumentException("目标索引不能为空");
+        Set<String> live = new LinkedHashSet<>();
         try {
+            live.addAll(aliasMembers(READ_ALIAS));
+            live.addAll(aliasMembers(WRITE_ALIAS));
             client.indices().updateAliases(a -> {
-                if (previousIndex != null && !previousIndex.isBlank()) {
-                    a.actions(action -> action.remove(r -> r.index(previousIndex).alias(READ_ALIAS)));
-                    a.actions(action -> action.remove(r -> r.index(previousIndex).alias(WRITE_ALIAS)));
+                for (String index : live) {
+                    a.actions(action -> action.remove(r -> r.index(index).alias(READ_ALIAS)));
+                    a.actions(action -> action.remove(r -> r.index(index).alias(WRITE_ALIAS)));
                 }
                 a.actions(action -> action.add(x -> x.index(targetIndex).alias(READ_ALIAS)));
                 a.actions(action -> action.add(x -> x.index(targetIndex).alias(WRITE_ALIAS).isWriteIndex(true)));
                 return a;
             });
+            return new AliasTransition(Set.copyOf(live));
         } catch (IOException e) {
             throw new SearchUnavailableException("搜索别名切换失败", e);
+        }
+    }
+
+    private Set<String> aliasMembers(String alias) throws IOException {
+        var response = client.indices().getAlias(g -> g.name(alias));
+        return response.result().keySet();
+    }
+
+    public record AliasTransition(Set<String> previousIndexes) {
+        public AliasTransition {
+            previousIndexes = Set.copyOf(Objects.requireNonNull(previousIndexes, "旧别名成员不能为空"));
         }
     }
 
@@ -228,7 +256,18 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     }
 
     public void markRebuildIntentSwitched(String target) {
-        jdbc.update("UPDATE search_rebuild_intent SET phase='SWITCHED',updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=?", target);
+        jdbc.update("UPDATE search_rebuild_intent SET phase='SWITCHED',owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=?", target);
+    }
+
+    /** Claim the final alias transition in a short, durable DB operation. */
+    public boolean claimRebuildIntentSwitch(String target, String owner, String token, long generation) {
+        if (target == null || target.isBlank() || owner == null || owner.isBlank()
+            || token == null || token.isBlank() || generation <= 0) throw new IllegalArgumentException("重建切换领取参数无效");
+        return jdbc.update("UPDATE search_rebuild_intent SET phase='SWITCHING',owner_id=?,claim_token=?,lease_until=TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)),generation=?,updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=? AND phase='BUILDING'", owner, token, generation, target) == 1;
+    }
+
+    public boolean markRebuildIntentSwitched(String target, String owner, String token) {
+        return jdbc.update("UPDATE search_rebuild_intent SET phase='SWITCHED',owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=? AND phase='SWITCHING' AND owner_id=? AND claim_token=? AND lease_until > CURRENT_TIMESTAMP(6)", target, owner, token) == 1;
     }
 
     public void updateRebuildIntentPrevious(String target, String previous) {
@@ -262,13 +301,12 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         jdbc.update("UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL,last_error=NULL,failure_class=NULL WHERE index_name=?", index);
     }
 
-    @Transactional
     public void cleanupPending() {
         reconcileRebuildIntents();
         String mode = jdbc.queryForObject("SELECT mode FROM search_rebuild_gate WHERE id=1", String.class);
         if (!"OPEN".equals(mode)) return;
         jdbc.update("UPDATE search_index_cleanup_task SET status='FAILED',owner_id=NULL,claim_token=NULL,lease_until=NULL,last_error='cleanup attempt limit exhausted',failure_class='TRANSIENT' WHERE status='RUNNING' AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count >= 3");
-        List<CleanupClaim> claims = jdbc.query("SELECT id,index_name,attempt_count,status FROM search_index_cleanup_task WHERE (status='NEW' AND available_at <= CURRENT_TIMESTAMP(6)) OR (status='RUNNING' AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count < 3) OR (status='BUILDING' AND lease_until <= CURRENT_TIMESTAMP(6)) ORDER BY created_at LIMIT 20 FOR UPDATE SKIP LOCKED", (rs, rowNum) -> new CleanupClaim(rs.getString(1), rs.getString(2), rs.getInt(3), rs.getString(4)));
+        List<CleanupClaim> claims = jdbc.query("SELECT id,index_name,attempt_count,status FROM search_index_cleanup_task WHERE (status='NEW' AND available_at <= CURRENT_TIMESTAMP(6)) OR (status='RUNNING' AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count < 3) OR (status='BUILDING' AND lease_until <= CURRENT_TIMESTAMP(6)) ORDER BY created_at LIMIT 20", (rs, rowNum) -> new CleanupClaim(rs.getString(1), rs.getString(2), rs.getInt(3), rs.getString(4)));
         for (CleanupClaim claim : claims) {
             if ("BUILDING".equals(claim.status())) {
                 String liveRead = currentReadIndex();
@@ -279,8 +317,15 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
                 }
             }
             String token = UUID.randomUUID().toString();
-            if (jdbc.update("UPDATE search_index_cleanup_task SET status='RUNNING',owner_id=?,claim_token=?,lease_until=TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)),attempt_count=attempt_count+1 WHERE id=? AND ((status='NEW' AND available_at <= CURRENT_TIMESTAMP(6)) OR (status='RUNNING' AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count < 3) OR (status='BUILDING' AND lease_until <= CURRENT_TIMESTAMP(6)))", cleanupOwner, token, claim.id()) != 1) continue;
             try {
+                if (jdbc.update("UPDATE search_index_cleanup_task SET status='RUNNING',owner_id=?,claim_token=?,lease_until=TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)),attempt_count=attempt_count+1 WHERE id=? AND ((status='NEW' AND available_at <= CURRENT_TIMESTAMP(6)) OR (status='RUNNING' AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count < 3) OR (status='BUILDING' AND lease_until <= CURRENT_TIMESTAMP(6)))", cleanupOwner, token, claim.id()) != 1) continue;
+            } catch (CannotAcquireLockException concurrentClaim) {
+                // A concurrent short claim owns the row; this worker simply
+                // moves on. Do not turn a normal race into a failed job.
+                continue;
+            }
+            try {
+                // Every ES read and delete is outside the short claim transaction.
                 if (claim.indexName().equals(currentReadIndex()) || claim.indexName().equals(currentWriteIndex())) {
                     jdbc.update("UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE id=? AND status='RUNNING' AND owner_id=? AND claim_token=?", claim.id(), cleanupOwner, token);
                     continue;
@@ -301,15 +346,28 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     private record CleanupClaim(String id, String indexName, int attemptCount, String status) { }
 
     private void reconcileRebuildIntents() {
-        List<RebuildIntent> intents = jdbc.query("SELECT target_index,previous_index,phase FROM search_rebuild_intent WHERE phase <> 'RECONCILED' ORDER BY created_at LIMIT 20", (rs, rowNum) -> new RebuildIntent(rs.getString(1), rs.getString(2), rs.getString(3)));
-        String liveRead = currentReadIndex();
-        String liveWrite = currentWriteIndex();
-        for (RebuildIntent intent : intents) {
+        // A late ES response from an expired owner can arrive after the
+        // successor has committed SWITCHED/RECONCILED. The highest durable
+        // successful generation is authoritative; re-apply it from the live
+        // alias membership so the old response cannot leave the system rolled
+        // back to an older target.
+        reconcileLatestSuccessfulGeneration();
+        List<String> candidates = jdbc.query("SELECT target_index FROM search_rebuild_intent WHERE phase <> 'RECONCILED' AND (owner_id IS NULL OR lease_until <= CURRENT_TIMESTAMP(6)) ORDER BY generation DESC, created_at LIMIT 20", (rs, rowNum) -> rs.getString(1));
+        for (String target : candidates) {
+            String token = UUID.randomUUID().toString();
+            if (jdbc.update("UPDATE search_rebuild_intent SET owner_id=?,claim_token=?,lease_until=TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)) WHERE target_index=? AND phase <> 'RECONCILED' AND (owner_id IS NULL OR lease_until <= CURRENT_TIMESTAMP(6))", cleanupOwner, token, target) != 1) continue;
+            RebuildIntent intent = jdbc.query("SELECT target_index,previous_index,phase,generation FROM search_rebuild_intent WHERE target_index=? AND owner_id=? AND claim_token=?", (rs, rowNum) -> new RebuildIntent(rs.getString(1), rs.getString(2), rs.getString(3), rs.getLong(4)), target, cleanupOwner, token)
+                .stream().findFirst().orElse(null);
+            if (intent == null) continue;
+            // Alias state is intentionally read once per claimed intent. A
+            // stale snapshot can therefore never drive another intent's CAS.
+            String liveRead = currentReadIndex();
+            String liveWrite = currentWriteIndex();
             if (intent.target().equals(liveRead) || intent.target().equals(liveWrite)) {
                 cancelCleanup(intent.target());
                 if (intent.previous() != null && !intent.previous().equals(liveRead) && !intent.previous().equals(liveWrite)) scheduleCleanup(intent.previous());
-                jdbc.update("UPDATE search_rebuild_intent SET phase='RECONCILED',updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=?", intent.target());
-            } else if ("BUILDING".equals(intent.phase()) || "SWITCHED".equals(intent.phase())) {
+                jdbc.update("UPDATE search_rebuild_intent SET phase='RECONCILED',owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=? AND phase <> 'RECONCILED' AND owner_id=? AND claim_token=? AND lease_until > CURRENT_TIMESTAMP(6)", intent.target(), cleanupOwner, token);
+            } else if ("BUILDING".equals(intent.phase()) || "SWITCHING".equals(intent.phase()) || "SWITCHED".equals(intent.phase())) {
                 String taskStatus = jdbc.query("SELECT status FROM search_index_cleanup_task WHERE index_name=?", rs -> rs.next() ? rs.getString(1) : null, intent.target());
                 if (taskStatus == null || "BUILDING".equals(taskStatus)) {
                     if (taskStatus == null) scheduleCleanup(intent.target());
@@ -317,15 +375,35 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
                 } else {
                     armCleanup(intent.target());
                 }
-                jdbc.update("UPDATE search_rebuild_intent SET phase='RECONCILED',updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=?", intent.target());
+                jdbc.update("UPDATE search_rebuild_intent SET phase='RECONCILED',owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=? AND phase <> 'RECONCILED' AND owner_id=? AND claim_token=? AND lease_until > CURRENT_TIMESTAMP(6)", intent.target(), cleanupOwner, token);
             } else if ("CREATED".equals(intent.phase())) {
                 scheduleCleanup(intent.target());
-                jdbc.update("UPDATE search_rebuild_intent SET phase='RECONCILED',updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=?", intent.target());
+                jdbc.update("UPDATE search_rebuild_intent SET phase='RECONCILED',owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=? AND phase <> 'RECONCILED' AND owner_id=? AND claim_token=? AND lease_until > CURRENT_TIMESTAMP(6)", intent.target(), cleanupOwner, token);
             }
         }
     }
 
-    private record RebuildIntent(String target, String previous, String phase) { }
+    private void reconcileLatestSuccessfulGeneration() {
+        RebuildIntent latest = jdbc.query("""
+            SELECT i.target_index,i.previous_index,i.phase,i.generation
+            FROM search_rebuild_intent i
+            JOIN search_index_cleanup_task c ON c.index_name=i.target_index
+            WHERE i.generation > 0 AND i.phase IN ('SWITCHED','RECONCILED') AND c.status='DONE'
+            ORDER BY i.generation DESC LIMIT 1
+            """, (rs, rowNum) -> new RebuildIntent(rs.getString(1), rs.getString(2), rs.getString(3), rs.getLong(4)))
+            .stream().findFirst().orElse(null);
+        if (latest == null) return;
+        String liveRead = currentReadIndex();
+        String liveWrite = currentWriteIndex();
+        if (latest.target().equals(liveRead) && latest.target().equals(liveWrite)) return;
+        AliasTransition transition = switchAliasesToSingleLive(latest.target());
+        cancelCleanup(latest.target());
+        for (String oldIndex : transition.previousIndexes()) {
+            if (!oldIndex.equals(latest.target())) scheduleCleanup(oldIndex);
+        }
+    }
+
+    private record RebuildIntent(String target, String previous, String phase, long generation) { }
 
     public String currentWriteIndex() {
         initializeIfNeeded();

@@ -21,7 +21,10 @@ import org.springframework.test.context.ActiveProfiles;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import javax.sql.DataSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -175,6 +178,73 @@ class SearchRebuildIT extends SharedContainers {
             .containsExactly(1L);
         assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, third.index()))
             .isEqualTo("DONE");
+    }
+
+    @Test
+    void concurrentPrefilledRebuildsUseLiveAliasesAtEachAtomicCutover() throws Exception {
+        CountDownLatch firstReady = new CountDownLatch(1);
+        CountDownLatch secondReady = new CountDownLatch(1);
+        CountDownLatch firstRelease = new CountDownLatch(1);
+        CountDownLatch secondRelease = new CountDownLatch(1);
+        Runnable firstBarrier = () -> awaitBarrier(firstReady, firstRelease);
+        Runnable secondBarrier = () -> awaitBarrier(secondReady, secondRelease);
+        SearchRebuildService first = new SearchRebuildService(jdbc, projector, elasticsearch, transactionManager,
+            new SearchGateRepository(new JdbcTemplate(dataSource)), firstBarrier);
+        SearchRebuildService second = new SearchRebuildService(jdbc, projector, elasticsearch, transactionManager,
+            new SearchGateRepository(new JdbcTemplate(dataSource)), secondBarrier);
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<SearchRebuildService.RebuildReport> firstResult = workers.submit(first::rebuild);
+            Future<SearchRebuildService.RebuildReport> secondResult = workers.submit(second::rebuild);
+            assertThat(firstReady.await(30, TimeUnit.SECONDS)).isTrue();
+            assertThat(secondReady.await(30, TimeUnit.SECONDS)).isTrue();
+            firstRelease.countDown();
+            SearchRebuildService.RebuildReport firstReport = firstResult.get(30, TimeUnit.SECONDS);
+            secondRelease.countDown();
+            SearchRebuildService.RebuildReport secondReport = secondResult.get(30, TimeUnit.SECONDS);
+
+            assertThat(secondReport.index()).isNotEqualTo(firstReport.index());
+            assertThat(elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.READ_ALIAS)).result()).hasSize(1).containsKey(secondReport.index());
+            assertThat(elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.WRITE_ALIAS)).result()).hasSize(1).containsKey(secondReport.index());
+            assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, firstReport.index()))
+                .isEqualTo("DONE");
+        } finally {
+            workers.shutdownNow();
+        }
+    }
+
+    @Test
+    void stageFailureLeavesOldAliasAndRecoveryConverges() {
+        for (String failedStage : java.util.List.of("FILL", "REPLAY", "ALIAS_SWAP")) {
+            jdbc.update("UPDATE search_rebuild_gate SET mode='OPEN',owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE id=1");
+            String previous = elasticsearch.currentReadIndex();
+            AtomicBoolean tripped = new AtomicBoolean();
+            SearchRebuildService failing = new SearchRebuildService(jdbc, projector, elasticsearch, transactionManager,
+                new SearchGateRepository(new JdbcTemplate(dataSource)), () -> { }, stage -> {
+                    if (failedStage.equals(stage) && tripped.compareAndSet(false, true)) ELASTICSEARCH_PROXY.setConnectionCut(true);
+                });
+            try {
+                assertThrows(RuntimeException.class, failing::rebuild);
+            } finally {
+                ELASTICSEARCH_PROXY.setConnectionCut(false);
+            }
+            assertThat(tripped).as("stage hook %s", failedStage).isTrue();
+            assertThat(elasticsearch.currentReadIndex()).isEqualTo(previous);
+            elasticsearch.cleanupPending();
+            SearchRebuildService.RebuildReport recovered = rebuild.rebuild();
+            assertThat(recovered.index()).isNotEqualTo(previous);
+            assertThat(elasticsearch.currentReadIndex()).isEqualTo(recovered.index());
+        }
+    }
+
+    private static void awaitBarrier(CountDownLatch ready, CountDownLatch release) {
+        ready.countDown();
+        try {
+            if (!release.await(30, TimeUnit.SECONDS)) throw new IllegalStateException("测试 barrier 超时");
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("测试 barrier 被中断", interrupted);
+        }
     }
 
     @Test

@@ -4,7 +4,6 @@ import com.example.campusmarket.shared.DomainEvent;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Objects;
 import java.util.UUID;
@@ -24,7 +23,6 @@ public class SearchProjector {
     }
 
     /** 处理商品事件；旧事件即使重放也不会覆盖更新版本。 */
-    @Transactional
     public void project(DomainEvent event) {
         Objects.requireNonNull(event, "商品事件不能为空");
         SearchSchema.requireEventType(event.eventType());
