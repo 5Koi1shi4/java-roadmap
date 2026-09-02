@@ -8,6 +8,7 @@ import com.example.campusmarket.catalog.search.SearchProjector;
 import com.example.campusmarket.catalog.search.SearchOutboxDispatcher;
 import com.example.campusmarket.catalog.search.SearchOutboxRepository;
 import com.example.campusmarket.catalog.search.SearchGateRepository;
+import com.example.campusmarket.catalog.search.SearchAliasCoordinator;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -17,7 +18,14 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.test.context.ActiveProfiles;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -108,6 +116,56 @@ class SearchRebuildIT extends SharedContainers {
         assertThat(secondCoordinator.renew(current, java.time.Duration.ofMinutes(1))).isTrue();
         secondCoordinator.release(current);
         assertThat(jdbc.queryForObject("SELECT mode FROM search_rebuild_gate WHERE id=1", String.class)).isEqualTo("OPEN");
+    }
+
+    @Test
+    void aliasCoordinatorSerializesWorkers() throws Exception {
+        SearchAliasCoordinator first = new SearchAliasCoordinator(dataSource);
+        SearchAliasCoordinator second = new SearchAliasCoordinator(dataSource);
+        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch waiterEntered = new CountDownLatch(1);
+        CountDownLatch waiterCallback = new CountDownLatch(1);
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<Void> owner = workers.submit(() -> first.execute(Duration.ofSeconds(5), connection -> {
+                locked.countDown();
+                awaitBarrier(locked, release);
+                return null;
+            }));
+            assertThat(locked.await(30, TimeUnit.SECONDS)).isTrue();
+            Future<Integer> waiter = workers.submit(() -> {
+                waiterEntered.countDown();
+                return second.execute(Duration.ofSeconds(5), connection -> {
+                    waiterCallback.countDown();
+                    return queryInt(connection, "SELECT 1");
+                });
+            });
+            assertThat(waiterEntered.await(30, TimeUnit.SECONDS)).isTrue();
+            assertThat(waiter.isDone()).isFalse();
+            assertThat(waiterCallback.await(200, TimeUnit.MILLISECONDS)).isFalse();
+            release.countDown();
+            owner.get(30, TimeUnit.SECONDS);
+            assertThat(waiter.get(30, TimeUnit.SECONDS)).isEqualTo(1);
+            assertThat(waiterCallback.await(30, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            release.countDown();
+            workers.shutdownNow();
+        }
+    }
+
+    @Test
+    void aliasCoordinatorWorksWithPoolSizeOne() throws Exception {
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl(MYSQL.getJdbcUrl());
+        config.setUsername(MYSQL.getUsername());
+        config.setPassword(MYSQL.getPassword());
+        config.setMaximumPoolSize(1);
+        try (HikariDataSource oneConnection = new HikariDataSource(config)) {
+            SearchAliasCoordinator coordinator = new SearchAliasCoordinator(oneConnection);
+            assertThat(coordinator.<Integer>execute(Duration.ofSeconds(5), connection -> queryInt(connection, "SELECT 1")))
+                .isEqualTo(1);
+        }
     }
 
     @Test
@@ -333,6 +391,14 @@ class SearchRebuildIT extends SharedContainers {
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("测试 barrier 被中断", interrupted);
+        }
+    }
+
+    private static int queryInt(Connection connection, String sql) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(sql);
+             ResultSet result = statement.executeQuery()) {
+            if (!result.next()) throw new SQLException("查询未返回结果");
+            return result.getInt(1);
         }
     }
 
