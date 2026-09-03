@@ -238,11 +238,8 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
             update(connection, """
                 INSERT INTO search_index_cleanup_task(id,index_name,status,owner_id,claim_token,lease_until,attempt_count,available_at,created_at)
                 VALUES (?,?, 'BUILDING',?,?,TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
-                ON DUPLICATE KEY UPDATE status=IF(search_index_cleanup_task.status='DONE','DONE','BUILDING'),
-                  owner_id=IF(search_index_cleanup_task.status='DONE',NULL,VALUES(owner_id)),
-                  claim_token=IF(search_index_cleanup_task.status='DONE',NULL,VALUES(claim_token)),
-                  lease_until=IF(search_index_cleanup_task.status='DONE',NULL,VALUES(lease_until)),
-                  available_at=IF(search_index_cleanup_task.status='DONE',search_index_cleanup_task.available_at,CURRENT_TIMESTAMP(6))
+                ON DUPLICATE KEY UPDATE status='BUILDING',owner_id=VALUES(owner_id),claim_token=VALUES(claim_token),
+                  lease_until=VALUES(lease_until),available_at=CURRENT_TIMESTAMP(6)
                 """, UUID.randomUUID().toString(), index, owner, token);
         }
     }
@@ -404,6 +401,12 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     public void recordRebuildIntent(String target, String previous) {
         if (target == null || target.isBlank()) throw new IllegalArgumentException("目标索引不能为空");
         jdbc.update("INSERT INTO search_rebuild_intent(id,target_index,previous_index,phase,created_at,updated_at) VALUES (?,?,?,?,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE previous_index=VALUES(previous_index),updated_at=CURRENT_TIMESTAMP(6)", UUID.randomUUID().toString(), target, previous, "CREATED");
+    }
+
+    void recordRebuildIntent(Connection connection, String target, String previous) {
+        Objects.requireNonNull(connection, "连接不能为空");
+        if (target == null || target.isBlank()) throw new IllegalArgumentException("目标索引不能为空");
+        update(connection, "INSERT INTO search_rebuild_intent(id,target_index,previous_index,phase,created_at,updated_at) VALUES (?,?,?,?,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE previous_index=VALUES(previous_index),updated_at=CURRENT_TIMESTAMP(6)", UUID.randomUUID().toString(), target, previous, "CREATED");
     }
 
     public void markRebuildIntentSwitched(String target) {

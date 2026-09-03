@@ -290,9 +290,10 @@ class SearchRebuildIT extends SharedContainers {
             assertThat(elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.READ_ALIAS)).result()).hasSize(1).containsKey(secondReport.index());
             assertThat(elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.WRITE_ALIAS)).result()).hasSize(1).containsKey(secondReport.index());
             assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, firstReport.index()))
-                .isEqualTo("DONE");
+                .isEqualTo("NEW");
         } finally {
             workers.shutdownNow();
+            assertThat(workers.awaitTermination(30, TimeUnit.SECONDS)).isTrue();
         }
     }
 
@@ -450,6 +451,7 @@ class SearchRebuildIT extends SharedContainers {
         } finally {
             releaseDelete.countDown();
             workers.shutdownNow();
+            assertThat(workers.awaitTermination(30, TimeUnit.SECONDS)).isTrue();
         }
         assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, target))
             .isEqualTo("DONE");
@@ -481,6 +483,7 @@ class SearchRebuildIT extends SharedContainers {
         } finally {
             finishRepair.countDown();
             workers.shutdownNow();
+            assertThat(workers.awaitTermination(30, TimeUnit.SECONDS)).isTrue();
         }
     }
 
@@ -632,6 +635,43 @@ class SearchRebuildIT extends SharedContainers {
             jdbc.update("UPDATE search_rebuild_gate SET mode='OPEN',owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE id=1");
             coldSearch.currentReadIndexes();
         }
+    }
+
+    @Test
+    void reconcilerCannotStealFreshRebuildBeforeGateAcquire() throws Exception {
+        CountDownLatch reachedGateBarrier = new CountDownLatch(1);
+        CountDownLatch releaseGateBarrier = new CountDownLatch(1);
+        SearchRebuildService guarded = new SearchRebuildService(jdbc, projector, elasticsearch, transactionManager,
+            new SearchGateRepository(new JdbcTemplate(dataSource)), () -> {
+                reachedGateBarrier.countDown();
+                awaitBarrier(reachedGateBarrier, releaseGateBarrier);
+            });
+        SearchRebuildReconciler reconciler = new SearchRebuildReconciler(
+            new SearchGateRepository(new JdbcTemplate(dataSource)), new SearchAliasCoordinator(dataSource), elasticsearch);
+        ExecutorService workers = Executors.newSingleThreadExecutor();
+        try {
+            Future<SearchRebuildService.RebuildReport> rebuilding = workers.submit(guarded::rebuild);
+            assertThat(reachedGateBarrier.await(30, TimeUnit.SECONDS)).isTrue();
+            assertThat(reconciler.runOnce()).isEqualTo(SearchRebuildReconciler.ReconcileResult.UNCHANGED);
+            releaseGateBarrier.countDown();
+            assertThat(rebuilding.get(30, TimeUnit.SECONDS).index()).isNotBlank();
+        } finally {
+            releaseGateBarrier.countDown();
+            workers.shutdownNow();
+            assertThat(workers.awaitTermination(30, TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    @Test
+    void doneCleanupRowIsRestagedForNextCutover() {
+        SearchRebuildService.RebuildReport first = rebuild.rebuild();
+        assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, first.index()))
+            .isEqualTo("DONE");
+
+        SearchRebuildService.RebuildReport second = rebuild.rebuild();
+        assertThat(second.index()).isNotEqualTo(first.index());
+        assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, first.index()))
+            .isEqualTo("NEW");
     }
 
     private Object newReconcilerOrNull() {

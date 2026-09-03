@@ -68,9 +68,6 @@ public class SearchRebuildService {
     public RebuildReport rebuild() {
         Snapshot snapshot = captureSnapshot();
         String target = elasticsearch.newRebuildIndexName();
-        // Record the intent before the first ES read so a crash or connection
-        // failure during target discovery is still reconciled durably.
-        elasticsearch.recordRebuildIntent(target, null);
         boolean aliasSwitched = false;
         try {
             beforeGateAcquire.run();
@@ -78,6 +75,10 @@ public class SearchRebuildService {
             try {
                 coordinator.execute(java.time.Duration.ofSeconds(30), connection -> {
                     gate.assertLease(connection, lease);
+                    // Create and populate the intent only after this worker
+                    // owns the gate, so reconciliation cannot claim a fresh
+                    // ownerless CREATED row during the pre-gate window.
+                    elasticsearch.recordRebuildIntent(connection, target, null);
                     elasticsearch.ensureInitializedForAliasRead(connection);
                     String current = elasticsearch.readCurrentReadIndex();
                     elasticsearch.updateRebuildIntentPrevious(connection, target, current);
