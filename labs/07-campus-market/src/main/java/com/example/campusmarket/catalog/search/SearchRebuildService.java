@@ -71,16 +71,21 @@ public class SearchRebuildService {
         // Record the intent before the first ES read so a crash or connection
         // failure during target discovery is still reconciled durably.
         elasticsearch.recordRebuildIntent(target, null);
-        String previous = elasticsearch.currentReadIndex();
-        elasticsearch.updateRebuildIntentPrevious(target, previous);
-        elasticsearch.createRebuildIndex(target);
-        elasticsearch.markRebuildIntentBuilding(target);
-        elasticsearch.registerRebuildTarget(target);
         boolean aliasSwitched = false;
         try {
             beforeGateAcquire.run();
             SearchGateRepository.Lease lease = gate.acquire(owner, java.time.Duration.ofSeconds(30));
             try {
+                coordinator.execute(java.time.Duration.ofSeconds(30), connection -> {
+                    gate.assertLease(connection, lease);
+                    elasticsearch.ensureInitializedForAliasRead(connection);
+                    String current = elasticsearch.readCurrentReadIndex();
+                    elasticsearch.updateRebuildIntentPrevious(connection, target, current);
+                    return null;
+                });
+                elasticsearch.createRebuildIndex(target);
+                elasticsearch.markRebuildIntentBuilding(target);
+                elasticsearch.registerRebuildTarget(target);
                 renewOrThrow(lease);
                 stageHook.accept("FILL");
                 for (ProductSearchPort.ProductDocument document : snapshot.documents()) {

@@ -128,7 +128,10 @@ public class SearchGateRepository {
     int release(Connection connection, Lease lease) {
         Objects.requireNonNull(connection, "连接不能为空");
         Objects.requireNonNull(lease, "门禁租约不能为空");
-        try (PreparedStatement statement = connection.prepareStatement("UPDATE search_rebuild_gate SET mode='OPEN',owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=1 AND mode='REBUILDING' AND owner_id=? AND claim_token=? AND generation=? AND lease_until > CURRENT_TIMESTAMP(6)")) {
+        // Releasing an expired lease is safe when the complete owner/token/generation
+        // identity still matches. A takeover changes that identity, so a stale owner
+        // cannot clear the new owner's lease.
+        try (PreparedStatement statement = connection.prepareStatement("UPDATE search_rebuild_gate SET mode='OPEN',owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=1 AND mode='REBUILDING' AND owner_id=? AND claim_token=? AND generation=?")) {
             statement.setString(1, lease.owner());
             statement.setString(2, lease.token());
             statement.setLong(3, lease.generation());

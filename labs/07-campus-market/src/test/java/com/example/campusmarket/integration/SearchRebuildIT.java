@@ -564,6 +564,34 @@ class SearchRebuildIT extends SharedContainers {
         assertThat(writeMembers).containsExactlyElementsOf(readMembers);
     }
 
+    @Test
+    void rebuildDoesNotInitializeAliasesBeforeAcquiringGate() throws Exception {
+        Set<String> liveMembers = new java.util.LinkedHashSet<>(elasticsearch.currentReadIndexes());
+        liveMembers.addAll(elasticsearch.currentWriteIndexes());
+        elasticsearchClient.indices().updateAliases(a -> {
+            for (String member : liveMembers) {
+                a.actions(x -> x.remove(v -> v.index(member).alias(ProductSearchPort.READ_ALIAS)));
+                a.actions(x -> x.remove(v -> v.index(member).alias(ProductSearchPort.WRITE_ALIAS)));
+            }
+            return a;
+        });
+
+        SearchGateRepository existingOwner = new SearchGateRepository(new JdbcTemplate(dataSource));
+        SearchGateRepository.Lease existingLease = existingOwner.acquire("existing-rebuild-owner", Duration.ofSeconds(30));
+        ElasticsearchProductSearch coldSearch = new ElasticsearchProductSearch(elasticsearchClient, jdbc);
+        SearchRebuildService blockedRebuild = new SearchRebuildService(jdbc, projector, coldSearch, transactionManager,
+            new SearchGateRepository(new JdbcTemplate(dataSource)));
+        try {
+            assertThrows(RuntimeException.class, blockedRebuild::rebuild);
+            assertThrows(RuntimeException.class, () -> elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.READ_ALIAS)));
+            assertThrows(RuntimeException.class, () -> elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.WRITE_ALIAS)));
+        } finally {
+            existingOwner.release(existingLease);
+            jdbc.update("UPDATE search_rebuild_gate SET mode='OPEN',owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE id=1");
+            coldSearch.currentReadIndexes();
+        }
+    }
+
     private Object newReconcilerOrNull() {
         try {
             Class<?> type = Class.forName("com.example.campusmarket.catalog.search.SearchRebuildReconciler");

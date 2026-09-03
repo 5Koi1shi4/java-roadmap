@@ -265,12 +265,21 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
 
     public Set<String> currentReadIndexes() {
         initializeIfNeeded();
+        return readCurrentReadIndexes();
+    }
+
+    Set<String> readCurrentReadIndexes() {
         try {
             var response = client.indices().getAlias(g -> g.name(READ_ALIAS));
             return Set.copyOf(response.result().keySet());
         } catch (IOException e) {
             throw new SearchUnavailableException("读取搜索别名失败", e);
         }
+    }
+
+    String readCurrentReadIndex() {
+        Set<String> members = readCurrentReadIndexes();
+        return members.isEmpty() ? null : members.iterator().next();
     }
 
     public String createRebuildIndex() {
@@ -344,6 +353,18 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
 
     public void updateRebuildIntentPrevious(String target, String previous) {
         jdbc.update("UPDATE search_rebuild_intent SET previous_index=?,updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=? AND phase='CREATED'", previous, target);
+    }
+
+    void updateRebuildIntentPrevious(Connection connection, String target, String previous) {
+        Objects.requireNonNull(connection, "连接不能为空");
+        try (PreparedStatement statement = connection.prepareStatement(
+            "UPDATE search_rebuild_intent SET previous_index=?,updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=? AND phase='CREATED'")) {
+            statement.setString(1, previous);
+            statement.setString(2, target);
+            statement.executeUpdate();
+        } catch (SQLException failure) {
+            throw new IllegalStateException("更新重建意图旧索引失败", failure);
+        }
     }
 
     public void markRebuildIntentBuilding(String target) {
