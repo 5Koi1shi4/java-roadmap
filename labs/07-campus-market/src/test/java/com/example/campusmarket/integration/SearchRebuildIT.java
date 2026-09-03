@@ -33,10 +33,14 @@ import java.util.concurrent.Future;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.lang.reflect.Method;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
+import java.util.Arrays;
+import java.util.Set;
 import javax.sql.DataSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @ActiveProfiles("local")
@@ -229,6 +233,7 @@ class SearchRebuildIT extends SharedContainers {
         assertThat(elasticsearch.currentReadIndex()).isEqualTo(previous);
         String failedTarget = jdbc.queryForObject("SELECT target_index FROM search_rebuild_intent WHERE phase='CREATED' LIMIT 1", String.class);
         SearchRebuildService.RebuildReport recovered = rebuild.rebuild();
+        invokeReconcilerHook(newReconcilerOrNull(), () -> { });
         elasticsearch.cleanupPending();
         search.refresh();
         assertThat(recovered.index()).isNotBlank();
@@ -291,78 +296,7 @@ class SearchRebuildIT extends SharedContainers {
     }
 
     @Test
-    void staleAliasWorkerIsFencedAfterReadingMembersBeforeUpdate() throws Exception {
-        String previous = elasticsearch.currentReadIndex();
-        String targetA = elasticsearch.createRebuildIndex();
-        elasticsearch.recordRebuildIntent(targetA, previous);
-        elasticsearch.markRebuildIntentBuilding(targetA);
-        elasticsearch.registerRebuildTarget(targetA);
-        SearchGateRepository oldGate = new SearchGateRepository(new JdbcTemplate(dataSource));
-        SearchGateRepository.Lease oldLease = oldGate.acquire("alias-old", java.time.Duration.ofSeconds(30));
-        String oldToken = UUID.randomUUID().toString();
-        assertThat(elasticsearch.claimRebuildIntentSwitch(targetA, oldLease.owner(), oldToken, oldLease.generation())).isTrue();
-
-        CountDownLatch readMembers = new CountDownLatch(1);
-        CountDownLatch releaseAliasRequest = new CountDownLatch(1);
-        ElasticsearchProductSearch oldWorker = new ElasticsearchProductSearch(elasticsearchClient, new JdbcTemplate(dataSource), members -> {
-            readMembers.countDown();
-            awaitBarrier(readMembers, releaseAliasRequest);
-        });
-        ExecutorService workers = Executors.newFixedThreadPool(2);
-        try {
-            Future<ElasticsearchProductSearch.AliasTransition> stale = workers.submit(() -> oldWorker.switchAliasesToSingleLive(
-                targetA, new ElasticsearchProductSearch.AliasFence(oldLease.owner(), oldLease.token(), oldToken, oldLease.generation())));
-            assertThat(readMembers.await(30, TimeUnit.SECONDS)).isTrue();
-
-            // The first worker is paused while still holding the named lock.
-            // Expire and replace the MySQL gate, then queue B behind that
-            // same lock. A's second fence check must reject its late request.
-            jdbc.update("UPDATE search_rebuild_gate SET lease_until=TIMESTAMPADD(MICROSECOND,-1,CURRENT_TIMESTAMP(6)) WHERE id=1");
-            SearchGateRepository newGate = new SearchGateRepository(new JdbcTemplate(dataSource));
-            SearchGateRepository.Lease newLease = newGate.acquire("alias-new", java.time.Duration.ofSeconds(30));
-            String targetB = elasticsearch.createRebuildIndex();
-            elasticsearch.recordRebuildIntent(targetB, previous);
-            elasticsearch.markRebuildIntentBuilding(targetB);
-            elasticsearch.registerRebuildTarget(targetB);
-            String newToken = UUID.randomUUID().toString();
-            assertThat(elasticsearch.claimRebuildIntentSwitch(targetB, newLease.owner(), newToken, newLease.generation())).isTrue();
-            Future<ElasticsearchProductSearch.AliasTransition> current = workers.submit(() -> elasticsearch.switchAliasesToSingleLive(
-                targetB, new ElasticsearchProductSearch.AliasFence(newLease.owner(), newLease.token(), newToken, newLease.generation())));
-            assertThat(current.isDone()).isFalse();
-            releaseAliasRequest.countDown();
-
-            assertThatThrownBy(stale::get).hasCauseInstanceOf(SearchGateRepository.SearchGateClosedException.class);
-            current.get(30, TimeUnit.SECONDS);
-            assertThat(elasticsearch.currentReadIndexes()).containsExactly(targetB);
-            assertThat(elasticsearch.currentWriteIndexes()).containsExactly(targetB);
-        } finally {
-            releaseAliasRequest.countDown();
-            workers.shutdownNow();
-        }
-    }
-
-    @Test
-    void aliasReconciliationRemovesAllDriftedMembersAndCleanupProtectsAnyLiveMember() throws Exception {
-        String first = elasticsearch.createRebuildIndex();
-        String authoritative = elasticsearch.createRebuildIndex();
-        elasticsearchClient.indices().updateAliases(a -> a
-            .actions(x -> x.add(v -> v.index(first).alias(ProductSearchPort.READ_ALIAS)))
-            .actions(x -> x.add(v -> v.index(first).alias(ProductSearchPort.WRITE_ALIAS)))
-            .actions(x -> x.add(v -> v.index(authoritative).alias(ProductSearchPort.READ_ALIAS)))
-            .actions(x -> x.add(v -> v.index(authoritative).alias(ProductSearchPort.WRITE_ALIAS))));
-
-        elasticsearch.scheduleCleanup(first);
-        elasticsearch.cleanupPending();
-        assertThat(elasticsearchClient.indices().exists(e -> e.index(first)).value()).isTrue();
-        assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, first))
-            .isEqualTo("DONE");
-        elasticsearch.switchAliasesToSingleLive(authoritative);
-        assertThat(elasticsearch.currentReadIndexes()).containsExactly(authoritative);
-        assertThat(elasticsearch.currentWriteIndexes()).containsExactly(authoritative);
-    }
-
-    @Test
-    void reconciliationCannotRollbackWhileHigherGenerationIsSwitching() {
+    void reconciliationCannotRollbackWhileHigherGenerationIsSwitching() throws Exception {
         SearchRebuildService.RebuildReport old = rebuild.rebuild();
         String target = elasticsearch.createRebuildIndex();
         elasticsearch.recordRebuildIntent(target, old.index());
@@ -370,7 +304,18 @@ class SearchRebuildIT extends SharedContainers {
         elasticsearch.registerRebuildTarget(target);
         long activeGeneration = jdbc.queryForObject("SELECT generation FROM search_rebuild_gate WHERE id=1", Long.class) + 1;
         jdbc.update("UPDATE search_rebuild_intent SET phase='SWITCHING',generation=?,owner_id='new-owner',claim_token='new-token',lease_until=TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)) WHERE target_index=?", activeGeneration, target);
-        elasticsearch.switchAliasesToSingleLive(target);
+        Set<String> liveMembers = new java.util.LinkedHashSet<>(elasticsearch.currentReadIndexes());
+        liveMembers.addAll(elasticsearch.currentWriteIndexes());
+        elasticsearchClient.indices().updateAliases(a -> {
+            for (String member : liveMembers) {
+                a.actions(x -> x.remove(v -> v.index(member).alias(ProductSearchPort.READ_ALIAS)));
+                a.actions(x -> x.remove(v -> v.index(member).alias(ProductSearchPort.WRITE_ALIAS)));
+            }
+            return a;
+        });
+        elasticsearchClient.indices().updateAliases(a -> a
+            .actions(x -> x.add(v -> v.index(target).alias(ProductSearchPort.READ_ALIAS)))
+            .actions(x -> x.add(v -> v.index(target).alias(ProductSearchPort.WRITE_ALIAS))));
 
         elasticsearch.cleanupPending();
 
@@ -395,6 +340,7 @@ class SearchRebuildIT extends SharedContainers {
             }
             assertThat(tripped).as("stage hook %s", failedStage).isTrue();
             assertThat(elasticsearch.currentReadIndex()).isEqualTo(previous);
+            invokeReconcilerHook(newReconcilerOrNull(), () -> { });
             elasticsearch.cleanupPending();
             SearchRebuildService.RebuildReport recovered = rebuild.rebuild();
             assertThat(recovered.index()).isNotEqualTo(previous);
@@ -438,7 +384,7 @@ class SearchRebuildIT extends SharedContainers {
     }
 
     @Test
-    void reconciliationProtectsAliasTargetAfterSwitchBeforeIntentCommit() {
+    void reconciliationProtectsAliasTargetAfterSwitchBeforeIntentCommit() throws Exception {
         String previous = elasticsearch.currentReadIndex();
         String target = elasticsearch.createRebuildIndex();
         elasticsearch.recordRebuildIntent(target, previous);
@@ -447,7 +393,10 @@ class SearchRebuildIT extends SharedContainers {
 
         // Simulate the external alias request succeeding immediately before
         // the DB phase update/commit is interrupted.
-        elasticsearch.switchAliases(target, previous);
+        elasticsearchClient.indices().updateAliases(a -> a
+            .actions(x -> x.add(v -> v.index(target).alias(ProductSearchPort.READ_ALIAS)))
+            .actions(x -> x.add(v -> v.index(target).alias(ProductSearchPort.WRITE_ALIAS))));
+        invokeReconcilerHook(newReconcilerOrNull(), () -> { });
         elasticsearch.cleanupPending();
 
         assertThat(elasticsearch.currentReadIndex()).isEqualTo(target);
@@ -490,5 +439,106 @@ class SearchRebuildIT extends SharedContainers {
         }
         assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, target))
             .isEqualTo("DONE");
+    }
+
+    @Test
+    void reconciliationAndGateAcquireShareOneLinearizationPoint() throws Exception {
+        Object reconciler = newReconcilerOrNull();
+        assertThat(reconciler).as("SearchRebuildReconciler must be available").isNotNull();
+
+        CountDownLatch gateObservedOpen = new CountDownLatch(1);
+        CountDownLatch finishRepair = new CountDownLatch(1);
+        SearchGateRepository secondGate = new SearchGateRepository(new JdbcTemplate(dataSource));
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<Void> repairing = workers.submit(() -> {
+                invokeReconcilerHook(reconciler, () -> awaitBarrier(gateObservedOpen, finishRepair));
+                return null;
+            });
+            assertThat(gateObservedOpen.await(30, TimeUnit.SECONDS)).isTrue();
+            Future<SearchGateRepository.Lease> acquiring = workers.submit(() ->
+                secondGate.acquire("new-rebuild", Duration.ofSeconds(30)));
+            assertThat(acquiring.isDone()).isFalse();
+            finishRepair.countDown();
+            repairing.get(30, TimeUnit.SECONDS);
+            SearchGateRepository.Lease lease = acquiring.get(30, TimeUnit.SECONDS);
+            assertThat(lease.generation()).isPositive();
+            secondGate.release(lease);
+        } finally {
+            finishRepair.countDown();
+            workers.shutdownNow();
+        }
+    }
+
+    @Test
+    void driftedAliasesUseCompleteMemberSets() throws Exception {
+        Object reconciler = newReconcilerOrNull();
+        assertThat(reconciler).as("SearchRebuildReconciler must be available").isNotNull();
+        SearchRebuildService.RebuildReport authoritative = rebuild.rebuild();
+        String drift = elasticsearch.createRebuildIndex();
+
+        // Build drift using only the test-owned raw client. The authoritative
+        // target is deliberately not assumed to be the first map key.
+        elasticsearchClient.indices().updateAliases(a -> a
+            .actions(x -> x.add(v -> v.index(drift).alias(ProductSearchPort.READ_ALIAS)))
+            .actions(x -> x.add(v -> v.index(drift).alias(ProductSearchPort.WRITE_ALIAS))));
+        assertThat(elasticsearch.currentReadIndexes()).contains(drift, authoritative.index());
+        assertThat(elasticsearch.currentWriteIndexes()).contains(drift, authoritative.index());
+
+        invokeReconcilerHook(reconciler, () -> { });
+        assertThat(elasticsearch.currentReadIndexes()).containsExactly(authoritative.index());
+        assertThat(elasticsearch.currentWriteIndexes()).containsExactly(authoritative.index());
+    }
+
+    @Test
+    void productionAliasApiHasNoUnfencedBypass() throws Exception {
+        Class<?> type = Class.forName("com.example.campusmarket.catalog.search.ElasticsearchProductSearch");
+        assertThat(Arrays.stream(type.getMethods())
+            .noneMatch(method -> method.getName().equals("switchAliases") && method.getParameterCount() == 2))
+            .as("legacy two-argument switchAliases must be removed").isTrue();
+        assertThat(Arrays.stream(type.getMethods())
+            .noneMatch(method -> method.getName().equals("switchAliasesToSingleLive") && method.getParameterCount() == 1))
+            .as("unfenced single-target switchAliasesToSingleLive must be removed").isTrue();
+    }
+
+    private Object newReconcilerOrNull() {
+        try {
+            Class<?> type = Class.forName("com.example.campusmarket.catalog.search.SearchRebuildReconciler");
+            SearchAliasCoordinator coordinator = new SearchAliasCoordinator(dataSource);
+            Object[] available = { jdbc, new SearchGateRepository(new JdbcTemplate(dataSource)), coordinator, elasticsearch };
+            for (Constructor<?> constructor : type.getDeclaredConstructors()) {
+                Class<?>[] parameterTypes = constructor.getParameterTypes();
+                Object[] arguments = new Object[parameterTypes.length];
+                boolean matched = true;
+                for (int i = 0; i < parameterTypes.length; i++) {
+                    Class<?> parameterType = parameterTypes[i];
+                    arguments[i] = Arrays.stream(available).filter(candidate -> parameterType.isInstance(candidate)).findFirst().orElse(null);
+                    if (arguments[i] == null) matched = false;
+                }
+                if (matched) {
+                    constructor.setAccessible(true);
+                    return constructor.newInstance(arguments);
+                }
+            }
+            return null;
+        } catch (ReflectiveOperationException failure) {
+            return null;
+        }
+    }
+
+    private static void invokeReconcilerHook(Object reconciler, Runnable hook) {
+        try {
+            Method method = Arrays.stream(reconciler.getClass().getDeclaredMethods())
+                .filter(candidate -> candidate.getName().equals("runOnce") && candidate.getParameterCount() == 1)
+                .findFirst().orElseThrow();
+            method.setAccessible(true);
+            method.invoke(reconciler, hook);
+        } catch (InvocationTargetException failure) {
+            Throwable cause = failure.getCause();
+            if (cause instanceof RuntimeException runtime) throw runtime;
+            throw new IllegalStateException(cause);
+        } catch (ReflectiveOperationException failure) {
+            throw new IllegalStateException(failure);
+        }
     }
 }

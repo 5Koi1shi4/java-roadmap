@@ -20,33 +20,47 @@ public class SearchRebuildService {
     private final ElasticsearchProductSearch elasticsearch;
     private final TransactionTemplate transactions;
     private final SearchGateRepository gate;
+    private final SearchAliasCoordinator coordinator;
     private final String owner = "search-rebuild-" + UUID.randomUUID();
     private final Runnable beforeGateAcquire;
     private final Consumer<String> stageHook;
 
-    @Autowired
     public SearchRebuildService(JdbcTemplate jdbc, SearchProjector projector, ElasticsearchProductSearch elasticsearch,
                                 PlatformTransactionManager transactionManager, SearchGateRepository gate) {
-        this(jdbc, projector, elasticsearch, transactionManager, gate, () -> { });
+        this(jdbc, projector, elasticsearch, transactionManager, gate, new SearchAliasCoordinator(jdbc.getDataSource()), () -> { }, stage -> { });
+    }
+
+    @Autowired
+    public SearchRebuildService(JdbcTemplate jdbc, SearchProjector projector, ElasticsearchProductSearch elasticsearch,
+                                PlatformTransactionManager transactionManager, SearchGateRepository gate,
+                                SearchAliasCoordinator coordinator) {
+        this(jdbc, projector, elasticsearch, transactionManager, gate, coordinator, () -> { }, stage -> { });
     }
 
     /** Test seam used to make the pre-gate concurrent rebuild window deterministic. */
     public SearchRebuildService(JdbcTemplate jdbc, SearchProjector projector, ElasticsearchProductSearch elasticsearch,
                                 PlatformTransactionManager transactionManager, SearchGateRepository gate,
                                 Runnable beforeGateAcquire) {
-        this(jdbc, projector, elasticsearch, transactionManager, gate, beforeGateAcquire, stage -> { });
+        this(jdbc, projector, elasticsearch, transactionManager, gate, new SearchAliasCoordinator(jdbc.getDataSource()), beforeGateAcquire, stage -> { });
     }
 
     /** Full test seam for deterministic fill/replay/alias failure injection. */
     public SearchRebuildService(JdbcTemplate jdbc, SearchProjector projector, ElasticsearchProductSearch elasticsearch,
                                 PlatformTransactionManager transactionManager, SearchGateRepository gate,
                                 Runnable beforeGateAcquire, Consumer<String> stageHook) {
+        this(jdbc, projector, elasticsearch, transactionManager, gate, new SearchAliasCoordinator(jdbc.getDataSource()), beforeGateAcquire, stageHook);
+    }
+
+    SearchRebuildService(JdbcTemplate jdbc, SearchProjector projector, ElasticsearchProductSearch elasticsearch,
+                         PlatformTransactionManager transactionManager, SearchGateRepository gate,
+                         SearchAliasCoordinator coordinator, Runnable beforeGateAcquire, Consumer<String> stageHook) {
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.projector = Objects.requireNonNull(projector, "投影器不能为空");
         this.elasticsearch = Objects.requireNonNull(elasticsearch, "Elasticsearch不能为空");
         this.transactions = new TransactionTemplate(Objects.requireNonNull(transactionManager, "事务管理器不能为空"));
         this.transactions.setIsolationLevelName("ISOLATION_REPEATABLE_READ");
         this.gate = Objects.requireNonNull(gate, "搜索门禁不能为空");
+        this.coordinator = Objects.requireNonNull(coordinator, "别名协调器不能为空");
         this.beforeGateAcquire = Objects.requireNonNull(beforeGateAcquire, "切换前 barrier 不能为空");
         this.stageHook = Objects.requireNonNull(stageHook, "重建阶段 hook 不能为空");
     }
@@ -96,12 +110,12 @@ public class SearchRebuildService {
                 }
                 if (!elasticsearch.renewRebuildTarget(target)) throw new IllegalStateException("目标索引租约已过期");
                 stageHook.accept("ALIAS_SWAP");
-                ElasticsearchProductSearch.AliasTransition transition = elasticsearch.switchAliasesToSingleLive(target,
-                    new ElasticsearchProductSearch.AliasFence(owner, lease.token(), switchToken, lease.generation()));
-                // A late owner may have completed an ES request after its
-                // lease was taken over. Its DB CAS is rejected; subsequent
-                // reconciliation uses live aliases and the newest generation.
-                gate.assertLease(lease);
+                ElasticsearchProductSearch.AliasTransition transition = coordinator.execute(java.time.Duration.ofSeconds(30), connection -> {
+                    gate.assertLease(connection, lease);
+                    elasticsearch.assertSwitchingIntent(connection, target, owner, switchToken, lease.generation());
+                    Set<String> live = elasticsearch.readAllAliasMembers();
+                    return elasticsearch.replaceAliasesWithSingleTarget(target, live);
+                });
                 elasticsearch.cancelCleanup(target);
                 Set<String> previousIndexes = transition.previousIndexes();
                 for (String oldIndex : previousIndexes) {
