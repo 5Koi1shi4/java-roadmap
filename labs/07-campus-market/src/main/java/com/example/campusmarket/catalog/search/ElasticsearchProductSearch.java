@@ -190,6 +190,16 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         initializeIfNeeded();
     }
 
+    void ensureInitializedForAliasRead(Connection connection) {
+        Objects.requireNonNull(connection, "连接不能为空");
+        if (initialized) return;
+        synchronized (this) {
+            if (initialized) return;
+            ensureInitialIndex(connection);
+            initialized = true;
+        }
+    }
+
     /**
      * Replace both aliases with one target. This package-private operation is
      * only callable by the coordinator-held rebuild/reconciliation sections.
@@ -430,21 +440,26 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
 
     private void ensureInitialIndex() {
         withAliasCoordinator(connection -> {
-            try {
-                boolean exists = client.indices().exists(e -> e.index(INITIAL_INDEX)).value();
-                if (!exists) {
-                    createIndex(INITIAL_INDEX);
-                    client.indices().updateAliases(a -> a.actions(x -> x.add(v -> v.index(INITIAL_INDEX).alias(READ_ALIAS)))
-                        .actions(x -> x.add(v -> v.index(INITIAL_INDEX).alias(WRITE_ALIAS).isWriteIndex(true))));
-                } else {
-                    ensureAlias(INITIAL_INDEX, READ_ALIAS, false);
-                    ensureAlias(INITIAL_INDEX, WRITE_ALIAS, true);
-                }
-            } catch (IOException e) {
-                throw new SearchUnavailableException("初始化搜索索引失败", e);
-            }
+            ensureInitialIndex(connection);
             return null;
         });
+    }
+
+    private void ensureInitialIndex(Connection connection) {
+        Objects.requireNonNull(connection, "连接不能为空");
+        try {
+            boolean exists = client.indices().exists(e -> e.index(INITIAL_INDEX)).value();
+            if (!exists) {
+                createIndex(INITIAL_INDEX);
+                client.indices().updateAliases(a -> a.actions(x -> x.add(v -> v.index(INITIAL_INDEX).alias(READ_ALIAS)))
+                    .actions(x -> x.add(v -> v.index(INITIAL_INDEX).alias(WRITE_ALIAS).isWriteIndex(true))));
+            } else {
+                ensureAlias(INITIAL_INDEX, READ_ALIAS, false);
+                ensureAlias(INITIAL_INDEX, WRITE_ALIAS, true);
+            }
+        } catch (IOException e) {
+            throw new SearchUnavailableException("初始化搜索索引失败", e);
+        }
     }
 
     private void initializeIfNeeded() {

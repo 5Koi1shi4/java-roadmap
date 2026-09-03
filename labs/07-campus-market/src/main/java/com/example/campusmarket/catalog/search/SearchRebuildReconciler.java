@@ -43,21 +43,25 @@ public final class SearchRebuildReconciler {
             afterGateRead.run();
             if (!state.isOpen()) return ReconcileResult.SKIPPED_GATE;
             if (hasLiveSwitching(connection)) return ReconcileResult.SKIPPED_SWITCHING;
-            elasticsearch.ensureInitializedForAliasRead();
+            elasticsearch.ensureInitializedForAliasRead(connection);
 
+            Set<String> live = elasticsearch.readAllAliasMembers();
+            RebuildIntent liveIntent = latestRecoverableLiveIntent(connection, live);
             RebuildIntent authoritative = latestSuccessful(connection);
             ReconcileResult result = ReconcileResult.UNCHANGED;
-            if (authoritative != null) {
-                Set<String> live = elasticsearch.readAllAliasMembers();
-                if (!live.equals(Set.of(authoritative.target()))) {
-                    ElasticsearchProductSearch.AliasTransition transition =
-                        elasticsearch.replaceAliasesWithSingleTarget(authoritative.target(), live);
-                    cancelCleanup(connection, authoritative.target());
-                    for (String oldIndex : transition.previousIndexes()) {
-                        if (!oldIndex.equals(authoritative.target())) scheduleCleanup(connection, oldIndex);
-                    }
-                    result = ReconcileResult.REPAIRED;
+            // A live target from an unreconciled intent is evidence that an
+            // external alias request completed before its DB phase update.
+            // It takes precedence over an older durable successful target;
+            // otherwise reconciliation could roll the aliases back.
+            RebuildIntent target = liveIntent != null ? liveIntent : authoritative;
+            if (target != null && !live.equals(Set.of(target.target()))) {
+                ElasticsearchProductSearch.AliasTransition transition =
+                    elasticsearch.replaceAliasesWithSingleTarget(target.target(), live);
+                cancelCleanup(connection, target.target());
+                for (String oldIndex : transition.previousIndexes()) {
+                    if (!oldIndex.equals(target.target())) scheduleCleanup(connection, oldIndex);
                 }
+                result = ReconcileResult.REPAIRED;
             }
             reconcileRebuildIntents(connection);
             return result;
@@ -86,6 +90,24 @@ public final class SearchRebuildReconciler {
             try (ResultSet result = statement.executeQuery()) {
                 return result.next() ? new RebuildIntent(result.getString(1), result.getString(2),
                     result.getString(3), result.getLong(4)) : null;
+            }
+        }
+    }
+
+    private RebuildIntent latestRecoverableLiveIntent(Connection connection, Set<String> live) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+            SELECT target_index,previous_index,phase,generation
+            FROM search_rebuild_intent
+            WHERE phase <> 'RECONCILED' AND (owner_id IS NULL OR lease_until <= CURRENT_TIMESTAMP(6))
+            ORDER BY generation DESC, created_at LIMIT 20
+            """)) {
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    RebuildIntent intent = new RebuildIntent(result.getString(1), result.getString(2),
+                        result.getString(3), result.getLong(4));
+                    if (live.contains(intent.target())) return intent;
+                }
+                return null;
             }
         }
     }

@@ -398,6 +398,15 @@ class SearchRebuildIT extends SharedContainers {
 
         // Simulate the external alias request succeeding immediately before
         // the DB phase update/commit is interrupted.
+        Set<String> liveMembers = new java.util.LinkedHashSet<>(elasticsearch.currentReadIndexes());
+        liveMembers.addAll(elasticsearch.currentWriteIndexes());
+        elasticsearchClient.indices().updateAliases(a -> {
+            for (String member : liveMembers) {
+                a.actions(x -> x.remove(v -> v.index(member).alias(ProductSearchPort.READ_ALIAS)));
+                a.actions(x -> x.remove(v -> v.index(member).alias(ProductSearchPort.WRITE_ALIAS)));
+            }
+            return a;
+        });
         elasticsearchClient.indices().updateAliases(a -> a
             .actions(x -> x.add(v -> v.index(target).alias(ProductSearchPort.READ_ALIAS)))
             .actions(x -> x.add(v -> v.index(target).alias(ProductSearchPort.WRITE_ALIAS))));
@@ -530,6 +539,29 @@ class SearchRebuildIT extends SharedContainers {
             jdbc.update("UPDATE search_rebuild_gate SET mode='OPEN',owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE id=1");
             coldSearch.currentReadIndexes();
         }
+    }
+
+    @Test
+    void reconciliationInitializesMissingAliasesOnOpenGateWithoutNestedCoordination() throws Exception {
+        Set<String> liveMembers = new java.util.LinkedHashSet<>(elasticsearch.currentReadIndexes());
+        liveMembers.addAll(elasticsearch.currentWriteIndexes());
+        elasticsearchClient.indices().updateAliases(a -> {
+            for (String member : liveMembers) {
+                a.actions(x -> x.remove(v -> v.index(member).alias(ProductSearchPort.READ_ALIAS)));
+                a.actions(x -> x.remove(v -> v.index(member).alias(ProductSearchPort.WRITE_ALIAS)));
+            }
+            return a;
+        });
+        jdbc.update("UPDATE search_rebuild_gate SET mode='OPEN',owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE id=1");
+
+        ElasticsearchProductSearch coldSearch = new ElasticsearchProductSearch(elasticsearchClient, jdbc);
+        SearchRebuildReconciler coldReconciler = new SearchRebuildReconciler(
+            new SearchGateRepository(new JdbcTemplate(dataSource)), new SearchAliasCoordinator(dataSource), coldSearch);
+        assertThat(coldReconciler.runOnce()).isEqualTo(SearchRebuildReconciler.ReconcileResult.UNCHANGED);
+        Set<String> readMembers = elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.READ_ALIAS)).result().keySet();
+        Set<String> writeMembers = elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.WRITE_ALIAS)).result().keySet();
+        assertThat(readMembers).hasSize(1);
+        assertThat(writeMembers).containsExactlyElementsOf(readMembers);
     }
 
     private Object newReconcilerOrNull() {
