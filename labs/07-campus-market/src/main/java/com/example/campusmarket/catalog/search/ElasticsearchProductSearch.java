@@ -224,6 +224,76 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         }
     }
 
+    /**
+     * Protect every former live member before an external alias request. The
+     * row owner/token identify the cutover intent so reconciliation can recover
+     * the staged set if the process stops after ES succeeds.
+     */
+    void stageCleanup(Connection connection, Set<String> live, String target, String owner, String token) {
+        Objects.requireNonNull(connection, "连接不能为空");
+        Objects.requireNonNull(live, "当前别名成员不能为空");
+        requireLeaseIdentity(owner, token);
+        for (String index : live) {
+            if (index == null || index.isBlank() || index.equals(target) || index.equals(INITIAL_INDEX)) continue;
+            update(connection, """
+                INSERT INTO search_index_cleanup_task(id,index_name,status,owner_id,claim_token,lease_until,attempt_count,available_at,created_at)
+                VALUES (?,?, 'BUILDING',?,?,TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
+                ON DUPLICATE KEY UPDATE status=IF(search_index_cleanup_task.status='DONE','DONE','BUILDING'),
+                  owner_id=IF(search_index_cleanup_task.status='DONE',NULL,VALUES(owner_id)),
+                  claim_token=IF(search_index_cleanup_task.status='DONE',NULL,VALUES(claim_token)),
+                  lease_until=IF(search_index_cleanup_task.status='DONE',NULL,VALUES(lease_until)),
+                  available_at=IF(search_index_cleanup_task.status='DONE',search_index_cleanup_task.available_at,CURRENT_TIMESTAMP(6))
+                """, UUID.randomUUID().toString(), index, owner, token);
+        }
+    }
+
+    /** Arm staged members only after the alias request has completed. */
+    void armStagedCleanup(Connection connection, Set<String> staged, Set<String> stillLive, String owner, String token) {
+        Objects.requireNonNull(connection, "连接不能为空");
+        Objects.requireNonNull(staged, "待清理索引不能为空");
+        Objects.requireNonNull(stillLive, "当前别名成员不能为空");
+        requireLeaseIdentity(owner, token);
+        for (String index : staged) {
+            if (index == null || index.isBlank() || stillLive.contains(index)) continue;
+            update(connection, """
+                UPDATE search_index_cleanup_task SET status='NEW',available_at=CURRENT_TIMESTAMP(6),
+                  owner_id=NULL,claim_token=NULL,lease_until=NULL
+                WHERE index_name=? AND status='BUILDING' AND owner_id=? AND claim_token=?
+                """, index, owner, token);
+        }
+    }
+
+    /** Recover rows staged by an interrupted switching intent. */
+    void recoverStagedCleanup(Connection connection, Set<String> stillLive, String owner, String token) {
+        Objects.requireNonNull(connection, "连接不能为空");
+        Objects.requireNonNull(stillLive, "当前别名成员不能为空");
+        requireLeaseIdentity(owner, token);
+        Set<String> staged = new LinkedHashSet<>();
+        try (PreparedStatement statement = connection.prepareStatement(
+            "SELECT index_name FROM search_index_cleanup_task WHERE status='BUILDING' AND owner_id=? AND claim_token=?")) {
+            statement.setString(1, owner);
+            statement.setString(2, token);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) staged.add(result.getString(1));
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("读取中断切换清理状态失败", failure);
+        }
+        armStagedCleanup(connection, staged, stillLive, owner, token);
+    }
+
+    void cancelCleanup(Connection connection, String index) {
+        Objects.requireNonNull(connection, "连接不能为空");
+        if (index == null || index.isBlank()) return;
+        update(connection, "UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL,last_error=NULL,failure_class=NULL WHERE index_name=?", index);
+    }
+
+    private static void requireLeaseIdentity(String owner, String token) {
+        if (owner == null || owner.isBlank() || token == null || token.isBlank()) {
+            throw new IllegalArgumentException("清理租约身份不能为空");
+        }
+    }
+
     void assertSwitchingIntent(Connection connection, String target, String owner, String token, long generation) {
         Objects.requireNonNull(connection, "连接不能为空");
         try (PreparedStatement statement = connection.prepareStatement("""
@@ -392,6 +462,15 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     public void cancelCleanup(String index) {
         if (index == null || index.isBlank()) return;
         jdbc.update("UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL,last_error=NULL,failure_class=NULL WHERE index_name=?", index);
+    }
+
+    private static void update(Connection connection, String sql, Object... values) {
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            for (int i = 0; i < values.length; i++) statement.setObject(i + 1, values[i]);
+            statement.executeUpdate();
+        } catch (SQLException failure) {
+            throw new IllegalStateException("更新索引清理状态失败", failure);
+        }
     }
 
     public void cleanupPending() {

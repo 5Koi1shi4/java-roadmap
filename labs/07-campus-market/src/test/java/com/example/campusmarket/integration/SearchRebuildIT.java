@@ -505,6 +505,48 @@ class SearchRebuildIT extends SharedContainers {
     }
 
     @Test
+    void cutoverFailureAfterAliasMutationRetainsCleanupMetadataForEveryFormerMember() throws Exception {
+        SearchRebuildService.RebuildReport authoritative = rebuild.rebuild();
+        String drift = elasticsearch.createRebuildIndex();
+        elasticsearchClient.indices().updateAliases(a -> a
+            .actions(x -> x.add(v -> v.index(drift).alias(ProductSearchPort.READ_ALIAS)))
+            .actions(x -> x.add(v -> v.index(drift).alias(ProductSearchPort.WRITE_ALIAS))));
+        Set<String> formerMembers = new java.util.LinkedHashSet<>(elasticsearch.currentReadIndexes());
+        formerMembers.addAll(elasticsearch.currentWriteIndexes());
+
+        AtomicBoolean tripped = new AtomicBoolean();
+        SearchRebuildService failing = new SearchRebuildService(jdbc, projector, elasticsearch, transactionManager,
+            new SearchGateRepository(new JdbcTemplate(dataSource)), () -> { }, stage -> {
+                if ("AFTER_ALIAS_SWAP".equals(stage) && tripped.compareAndSet(false, true)) {
+                    throw new IllegalStateException("simulated post-alias failure");
+                }
+            });
+        assertThrows(RuntimeException.class, failing::rebuild);
+        assertThat(tripped).isTrue();
+
+        String target = jdbc.queryForObject("SELECT target_index FROM search_rebuild_intent WHERE phase='SWITCHING' LIMIT 1", String.class);
+        assertThat(elasticsearch.currentReadIndexes()).containsExactly(target);
+        assertThat(elasticsearch.currentWriteIndexes()).containsExactly(target);
+        for (String former : formerMembers) {
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM search_index_cleanup_task WHERE index_name=?", Integer.class, former))
+                .as("cleanup row for former alias member %s", former).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, former))
+                .as("former alias member remains protected before reconciliation: %s", former)
+                .isIn("BUILDING", "DONE");
+        }
+
+        jdbc.update("UPDATE search_rebuild_intent SET lease_until=TIMESTAMPADD(MICROSECOND,-1,CURRENT_TIMESTAMP(6)) WHERE target_index=?", target);
+        invokeReconcilerHook(newReconcilerOrNull(), () -> { });
+        for (String former : formerMembers) {
+            assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, former))
+                .as("former alias member is durably protected/eligible after reconciliation: %s", former)
+                .isIn("NEW", "DONE");
+        }
+        elasticsearch.cleanupPending();
+        assertThat(elasticsearch.currentReadIndexes()).containsExactly(target);
+    }
+
+    @Test
     void productionAliasApiHasNoUnfencedBypass() throws Exception {
         Class<?> type = Class.forName("com.example.campusmarket.catalog.search.ElasticsearchProductSearch");
         assertThat(Arrays.stream(type.getMethods())

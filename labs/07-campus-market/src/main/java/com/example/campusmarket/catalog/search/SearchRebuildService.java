@@ -115,17 +115,17 @@ public class SearchRebuildService {
                 }
                 if (!elasticsearch.renewRebuildTarget(target)) throw new IllegalStateException("目标索引租约已过期");
                 stageHook.accept("ALIAS_SWAP");
-                ElasticsearchProductSearch.AliasTransition transition = coordinator.execute(java.time.Duration.ofSeconds(30), connection -> {
+                coordinator.execute(java.time.Duration.ofSeconds(30), connection -> {
                     gate.assertLease(connection, lease);
                     elasticsearch.assertSwitchingIntent(connection, target, owner, switchToken, lease.generation());
                     Set<String> live = elasticsearch.readAllAliasMembers();
-                    return elasticsearch.replaceAliasesWithSingleTarget(target, live);
+                    elasticsearch.stageCleanup(connection, live, target, owner, switchToken);
+                    ElasticsearchProductSearch.AliasTransition result = elasticsearch.replaceAliasesWithSingleTarget(target, live);
+                    stageHook.accept("AFTER_ALIAS_SWAP");
+                    elasticsearch.armStagedCleanup(connection, result.previousIndexes(), Set.of(target), owner, switchToken);
+                    elasticsearch.cancelCleanup(connection, target);
+                    return result;
                 });
-                elasticsearch.cancelCleanup(target);
-                Set<String> previousIndexes = transition.previousIndexes();
-                for (String oldIndex : previousIndexes) {
-                    if (!oldIndex.equals(target)) elasticsearch.scheduleCleanup(oldIndex);
-                }
                 elasticsearch.markRebuildIntentSwitched(target, owner, switchToken);
                 RebuildReport report = new RebuildReport(target, snapshot.highWater(), snapshot.documents().size(), changes.size());
                 aliasSwitched = true;

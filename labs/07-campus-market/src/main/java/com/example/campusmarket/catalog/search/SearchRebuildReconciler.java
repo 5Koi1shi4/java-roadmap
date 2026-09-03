@@ -54,13 +54,16 @@ public final class SearchRebuildReconciler {
             // It takes precedence over an older durable successful target;
             // otherwise reconciliation could roll the aliases back.
             RebuildIntent target = liveIntent != null ? liveIntent : authoritative;
+            if (liveIntent != null && liveIntent.owner() != null && liveIntent.token() != null) {
+                elasticsearch.recoverStagedCleanup(connection, live, liveIntent.owner(), liveIntent.token());
+            }
             if (target != null && !live.equals(Set.of(target.target()))) {
+                String repairToken = UUID.randomUUID().toString();
+                elasticsearch.stageCleanup(connection, live, target.target(), owner, repairToken);
                 ElasticsearchProductSearch.AliasTransition transition =
                     elasticsearch.replaceAliasesWithSingleTarget(target.target(), live);
-                cancelCleanup(connection, target.target());
-                for (String oldIndex : transition.previousIndexes()) {
-                    if (!oldIndex.equals(target.target())) scheduleCleanup(connection, oldIndex);
-                }
+                elasticsearch.armStagedCleanup(connection, transition.previousIndexes(), Set.of(target.target()), owner, repairToken);
+                elasticsearch.cancelCleanup(connection, target.target());
                 result = ReconcileResult.REPAIRED;
             }
             reconcileRebuildIntents(connection);
@@ -81,7 +84,7 @@ public final class SearchRebuildReconciler {
 
     private RebuildIntent latestSuccessful(Connection connection) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
-            SELECT i.target_index,i.previous_index,i.phase,i.generation
+            SELECT i.target_index,i.previous_index,i.phase,i.generation,i.owner_id,i.claim_token
             FROM search_rebuild_intent i
             JOIN search_index_cleanup_task c ON c.index_name=i.target_index
             WHERE i.generation > 0 AND i.phase IN ('SWITCHED','RECONCILED') AND c.status='DONE'
@@ -89,14 +92,14 @@ public final class SearchRebuildReconciler {
             """)) {
             try (ResultSet result = statement.executeQuery()) {
                 return result.next() ? new RebuildIntent(result.getString(1), result.getString(2),
-                    result.getString(3), result.getLong(4)) : null;
+                    result.getString(3), result.getLong(4), result.getString(5), result.getString(6)) : null;
             }
         }
     }
 
     private RebuildIntent latestRecoverableLiveIntent(Connection connection, Set<String> live) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
-            SELECT target_index,previous_index,phase,generation
+            SELECT target_index,previous_index,phase,generation,owner_id,claim_token
             FROM search_rebuild_intent
             WHERE phase <> 'RECONCILED' AND (owner_id IS NULL OR lease_until <= CURRENT_TIMESTAMP(6))
             ORDER BY generation DESC, created_at LIMIT 20
@@ -104,7 +107,7 @@ public final class SearchRebuildReconciler {
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {
                     RebuildIntent intent = new RebuildIntent(result.getString(1), result.getString(2),
-                        result.getString(3), result.getLong(4));
+                        result.getString(3), result.getLong(4), result.getString(5), result.getString(6));
                     if (live.contains(intent.target())) return intent;
                 }
                 return null;
@@ -165,7 +168,7 @@ public final class SearchRebuildReconciler {
 
     private RebuildIntent readClaimed(Connection connection, String target, String token) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement("""
-            SELECT target_index,previous_index,phase,generation FROM search_rebuild_intent
+            SELECT target_index,previous_index,phase,generation,owner_id,claim_token FROM search_rebuild_intent
             WHERE target_index=? AND owner_id=? AND claim_token=?
             """)) {
             statement.setString(1, target);
@@ -173,7 +176,7 @@ public final class SearchRebuildReconciler {
             statement.setString(3, token);
             try (ResultSet result = statement.executeQuery()) {
                 return result.next() ? new RebuildIntent(result.getString(1), result.getString(2),
-                    result.getString(3), result.getLong(4)) : null;
+                    result.getString(3), result.getLong(4), result.getString(5), result.getString(6)) : null;
             }
         }
     }
@@ -219,7 +222,7 @@ public final class SearchRebuildReconciler {
         }
     }
 
-    private record RebuildIntent(String target, String previous, String phase, long generation) { }
+    private record RebuildIntent(String target, String previous, String phase, long generation, String owner, String token) { }
 
     public enum ReconcileResult { SKIPPED_GATE, SKIPPED_SWITCHING, UNCHANGED, REPAIRED }
 }
