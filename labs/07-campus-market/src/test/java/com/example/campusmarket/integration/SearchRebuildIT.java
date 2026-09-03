@@ -151,6 +151,7 @@ class SearchRebuildIT extends SharedContainers {
         } finally {
             release.countDown();
             workers.shutdownNow();
+            assertThat(workers.awaitTermination(30, TimeUnit.SECONDS)).isTrue();
         }
     }
 
@@ -166,6 +167,23 @@ class SearchRebuildIT extends SharedContainers {
             assertThat(coordinator.<Integer>execute(Duration.ofSeconds(5), connection -> queryInt(connection, "SELECT 1")))
                 .isEqualTo(1);
         }
+    }
+
+    @Test
+    void aliasCoordinatorWrapsCheckedFailureAndRetainsReleaseFailure() {
+        Exception callbackFailure = new Exception("checked callback failure");
+        SearchAliasCoordinator coordinator = new SearchAliasCoordinator(dataSource);
+
+        SearchAliasCoordinator.SearchCoordinationException thrown = assertThrows(
+            SearchAliasCoordinator.SearchCoordinationException.class,
+            () -> coordinator.execute(Duration.ofSeconds(5), connection -> {
+                connection.close();
+                throw callbackFailure;
+            }));
+
+        assertThat(thrown.getCause()).isSameAs(callbackFailure);
+        assertThat(thrown.getSuppressed())
+            .anySatisfy(suppressed -> assertThat(suppressed).isInstanceOf(SearchAliasCoordinator.SearchCoordinationException.class));
     }
 
     @Test

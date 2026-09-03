@@ -11,6 +11,7 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Duration;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 
 /** MySQL 协调的跨实例搜索写入门禁和 generation fencing。 */
@@ -18,16 +19,17 @@ import java.util.UUID;
 public class SearchGateRepository {
     private static final Duration COORDINATION_TIMEOUT = Duration.ofSeconds(30);
     private final JdbcTemplate jdbc;
-    private final SearchAliasCoordinator coordinator;
+    private final Optional<SearchAliasCoordinator> coordinator;
 
     public SearchGateRepository(JdbcTemplate jdbc) {
-        this(jdbc, jdbc.getDataSource() == null ? null : new SearchAliasCoordinator(jdbc.getDataSource()));
+        this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
+        this.coordinator = Optional.ofNullable(jdbc.getDataSource()).map(SearchAliasCoordinator::new);
     }
 
     @Autowired
     public SearchGateRepository(JdbcTemplate jdbc, SearchAliasCoordinator coordinator) {
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
-        this.coordinator = coordinator;
+        this.coordinator = Optional.of(Objects.requireNonNull(coordinator, "协调器不能为空"));
     }
 
     /** 在商品事实事务内加行锁，门禁开启后才允许写 search outbox。 */
@@ -52,7 +54,7 @@ public class SearchGateRepository {
     }
 
     public Lease acquire(String owner, Duration leaseDuration) {
-        return coordinator.execute(COORDINATION_TIMEOUT, connection -> acquire(connection, owner, leaseDuration));
+        return coordinator().execute(COORDINATION_TIMEOUT, connection -> acquire(connection, owner, leaseDuration));
     }
 
     public boolean renew(Lease lease, Duration extension) {
@@ -75,7 +77,11 @@ public class SearchGateRepository {
     }
 
     public int release(Lease lease) {
-        return coordinator.execute(COORDINATION_TIMEOUT, connection -> release(connection, lease));
+        return coordinator().execute(COORDINATION_TIMEOUT, connection -> release(connection, lease));
+    }
+
+    private SearchAliasCoordinator coordinator() {
+        return coordinator.orElseThrow(() -> new IllegalStateException("门禁协调操作需要配置数据源"));
     }
 
     Lease acquire(Connection connection, String owner, Duration leaseDuration) {

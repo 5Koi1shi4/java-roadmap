@@ -39,12 +39,14 @@ public final class SearchAliasCoordinator {
                 return section.run(connection);
             } catch (Throwable failure) {
                 primary = failure;
-                return SearchAliasCoordinator.<T, RuntimeException>rethrow(failure);
+                RuntimeException normalized = toRuntime(failure, "搜索别名临界区执行失败");
+                primary = normalized;
+                return SearchAliasCoordinator.<T, RuntimeException>rethrow(normalized);
             } finally {
                 release(connection, primary);
             }
         } catch (Throwable failure) {
-            return SearchAliasCoordinator.rethrow(failure);
+            return SearchAliasCoordinator.<T, RuntimeException>rethrow(toRuntime(failure, "搜索别名协调失败"));
         }
     }
 
@@ -74,6 +76,7 @@ public final class SearchAliasCoordinator {
                 }
             }
         } catch (Throwable releaseFailure) {
+            releaseFailure = toRuntime(releaseFailure, "释放搜索别名协调锁失败");
             if (primary != null) {
                 primary.addSuppressed(releaseFailure);
                 return;
@@ -89,6 +92,13 @@ public final class SearchAliasCoordinator {
 
     public static class SearchCoordinationException extends RuntimeException {
         public SearchCoordinationException(String message) { super(message); }
+        public SearchCoordinationException(String message, Throwable cause) { super(message, cause); }
+    }
+
+    private static RuntimeException toRuntime(Throwable failure, String message) {
+        if (failure instanceof RuntimeException runtime) return runtime;
+        if (failure instanceof Error error) throw error;
+        return new SearchCoordinationException(message, failure);
     }
 
     @SuppressWarnings("unchecked")
