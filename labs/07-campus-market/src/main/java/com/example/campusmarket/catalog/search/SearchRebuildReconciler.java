@@ -1,7 +1,6 @@
 package com.example.campusmarket.catalog.search;
 
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 
 import java.sql.Connection;
@@ -25,9 +24,8 @@ public final class SearchRebuildReconciler {
     private final String owner = "search-reconcile-" + UUID.randomUUID();
 
     @Autowired
-    public SearchRebuildReconciler(JdbcTemplate jdbc, SearchGateRepository gate,
+    public SearchRebuildReconciler(SearchGateRepository gate,
                                    SearchAliasCoordinator coordinator, ElasticsearchProductSearch elasticsearch) {
-        Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.gate = Objects.requireNonNull(gate, "搜索门禁不能为空");
         this.coordinator = Objects.requireNonNull(coordinator, "别名协调器不能为空");
         this.elasticsearch = Objects.requireNonNull(elasticsearch, "Elasticsearch不能为空");
@@ -40,12 +38,12 @@ public final class SearchRebuildReconciler {
     /** Test seam invoked after gate state is read while the coordinator is held. */
     ReconcileResult runOnce(Runnable afterGateRead) {
         Objects.requireNonNull(afterGateRead, "门禁读取 hook 不能为空");
-        elasticsearch.ensureInitializedForAliasRead();
         return coordinator.execute(COORDINATION_TIMEOUT, connection -> {
             SearchGateRepository.GateState state = gate.readState(connection);
             afterGateRead.run();
             if (!state.isOpen()) return ReconcileResult.SKIPPED_GATE;
             if (hasLiveSwitching(connection)) return ReconcileResult.SKIPPED_SWITCHING;
+            elasticsearch.ensureInitializedForAliasRead();
 
             RebuildIntent authoritative = latestSuccessful(connection);
             ReconcileResult result = ReconcileResult.UNCHANGED;

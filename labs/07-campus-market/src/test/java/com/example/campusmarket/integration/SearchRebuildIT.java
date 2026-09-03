@@ -9,6 +9,7 @@ import com.example.campusmarket.catalog.search.SearchOutboxDispatcher;
 import com.example.campusmarket.catalog.search.SearchOutboxRepository;
 import com.example.campusmarket.catalog.search.SearchGateRepository;
 import com.example.campusmarket.catalog.search.SearchAliasCoordinator;
+import com.example.campusmarket.catalog.search.SearchRebuildReconciler;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -317,10 +318,14 @@ class SearchRebuildIT extends SharedContainers {
             .actions(x -> x.add(v -> v.index(target).alias(ProductSearchPort.READ_ALIAS)))
             .actions(x -> x.add(v -> v.index(target).alias(ProductSearchPort.WRITE_ALIAS))));
 
-        elasticsearch.cleanupPending();
+        Set<String> beforeRead = elasticsearch.currentReadIndexes();
+        Set<String> beforeWrite = elasticsearch.currentWriteIndexes();
+        SearchRebuildReconciler reconciler = new SearchRebuildReconciler(
+            new SearchGateRepository(new JdbcTemplate(dataSource)), new SearchAliasCoordinator(dataSource), elasticsearch);
+        assertThat(reconciler.runOnce()).isEqualTo(SearchRebuildReconciler.ReconcileResult.SKIPPED_SWITCHING);
 
-        assertThat(elasticsearch.currentReadIndexes()).containsExactly(target);
-        assertThat(elasticsearch.currentWriteIndexes()).containsExactly(target);
+        assertThat(elasticsearch.currentReadIndexes()).containsExactlyElementsOf(beforeRead);
+        assertThat(elasticsearch.currentWriteIndexes()).containsExactlyElementsOf(beforeWrite);
     }
 
     @Test
@@ -499,6 +504,32 @@ class SearchRebuildIT extends SharedContainers {
         assertThat(Arrays.stream(type.getMethods())
             .noneMatch(method -> method.getName().equals("switchAliasesToSingleLive") && method.getParameterCount() == 1))
             .as("unfenced single-target switchAliasesToSingleLive must be removed").isTrue();
+    }
+
+    @Test
+    void reconciliationDoesNotInitializeAliasesWhileGateIsRebuilding() throws Exception {
+        Set<String> liveMembers = new java.util.LinkedHashSet<>(elasticsearch.currentReadIndexes());
+        liveMembers.addAll(elasticsearch.currentWriteIndexes());
+        elasticsearchClient.indices().updateAliases(a -> {
+            for (String member : liveMembers) {
+                a.actions(x -> x.remove(v -> v.index(member).alias(ProductSearchPort.READ_ALIAS)));
+                a.actions(x -> x.remove(v -> v.index(member).alias(ProductSearchPort.WRITE_ALIAS)));
+            }
+            return a;
+        });
+        jdbc.update("UPDATE search_rebuild_gate SET mode='REBUILDING',owner_id='quality-test',claim_token='quality-token',lease_until=TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)) WHERE id=1");
+
+        ElasticsearchProductSearch coldSearch = new ElasticsearchProductSearch(elasticsearchClient, jdbc);
+        SearchRebuildReconciler coldReconciler = new SearchRebuildReconciler(
+            new SearchGateRepository(new JdbcTemplate(dataSource)), new SearchAliasCoordinator(dataSource), coldSearch);
+        try {
+            assertThat(coldReconciler.runOnce()).isEqualTo(SearchRebuildReconciler.ReconcileResult.SKIPPED_GATE);
+            assertThrows(RuntimeException.class, () -> elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.READ_ALIAS)));
+            assertThrows(RuntimeException.class, () -> elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.WRITE_ALIAS)));
+        } finally {
+            jdbc.update("UPDATE search_rebuild_gate SET mode='OPEN',owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE id=1");
+            coldSearch.currentReadIndexes();
+        }
     }
 
     private Object newReconcilerOrNull() {
