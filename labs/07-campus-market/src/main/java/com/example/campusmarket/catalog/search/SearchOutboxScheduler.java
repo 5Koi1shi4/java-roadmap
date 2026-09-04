@@ -14,14 +14,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @ConditionalOnProperty(prefix = "campus.market.search.dispatcher", name = "enabled", havingValue = "true")
 public final class SearchOutboxScheduler {
     private final SearchOutboxDispatcher dispatcher;
-    private final ElasticsearchProductSearch search;
+    private final SearchIndexCleanupWorker cleanupWorker;
     private final SearchRebuildReconciler reconciler;
     private final AtomicBoolean running = new AtomicBoolean(true);
 
-    public SearchOutboxScheduler(SearchOutboxDispatcher dispatcher, ElasticsearchProductSearch search,
+    public SearchOutboxScheduler(SearchOutboxDispatcher dispatcher, SearchIndexCleanupWorker cleanupWorker,
                                  SearchRebuildReconciler reconciler) {
         this.dispatcher = dispatcher;
-        this.search = search;
+        this.cleanupWorker = cleanupWorker;
         this.reconciler = reconciler;
     }
 
@@ -34,7 +34,7 @@ public final class SearchOutboxScheduler {
     public void cleanup() {
         if (running.get()) {
             reconciler.runOnce();
-            search.cleanupPending();
+            cleanupWorker.runOnce();
         }
     }
 

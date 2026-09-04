@@ -9,9 +9,6 @@ import co.elastic.clients.elasticsearch.core.SearchResponse;
 import co.elastic.clients.elasticsearch.core.search.Hit;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.dao.CannotAcquireLockException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.sql.Connection;
@@ -39,10 +36,8 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     private final DataSource dataSource;
     private final SearchAliasCoordinator coordinator;
     private final Consumer<Set<String>> aliasMembersReadHook;
-    private final Consumer<String> cleanupDeleteHook;
     private volatile boolean initialized;
     private final String cleanupOwner = "search-cleanup-" + UUID.randomUUID();
-    private static final Logger LOGGER = LoggerFactory.getLogger(ElasticsearchProductSearch.class);
 
     @Autowired
     public ElasticsearchProductSearch(ElasticsearchClient client, org.springframework.jdbc.core.JdbcTemplate jdbc) {
@@ -53,18 +48,11 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
      * aliases have been read and immediately before the ES aliases request. */
     public ElasticsearchProductSearch(ElasticsearchClient client, org.springframework.jdbc.core.JdbcTemplate jdbc,
                                       Consumer<Set<String>> aliasMembersReadHook) {
-        this(client, jdbc, aliasMembersReadHook, ignored -> { });
-    }
-
-    /** Full test seam for deterministic cleanup claim/lease takeover tests. */
-    public ElasticsearchProductSearch(ElasticsearchClient client, org.springframework.jdbc.core.JdbcTemplate jdbc,
-                                      Consumer<Set<String>> aliasMembersReadHook, Consumer<String> cleanupDeleteHook) {
         this.client = Objects.requireNonNull(client, "Elasticsearch 客户端不能为空");
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.dataSource = Objects.requireNonNull(jdbc.getDataSource(), "JDBC数据源不能为空");
         this.coordinator = new SearchAliasCoordinator(this.dataSource);
         this.aliasMembersReadHook = Objects.requireNonNull(aliasMembersReadHook, "别名读取 hook 不能为空");
-        this.cleanupDeleteHook = Objects.requireNonNull(cleanupDeleteHook, "清理 hook 不能为空");
     }
 
     @Override
@@ -476,48 +464,17 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         }
     }
 
-    public void cleanupPending() {
-        String mode = jdbc.queryForObject("SELECT mode FROM search_rebuild_gate WHERE id=1", String.class);
-        if (!"OPEN".equals(mode)) return;
-        jdbc.update("UPDATE search_index_cleanup_task SET status='FAILED',owner_id=NULL,claim_token=NULL,lease_until=NULL,last_error='cleanup attempt limit exhausted',failure_class='TRANSIENT' WHERE status='RUNNING' AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count >= 3");
-        List<CleanupClaim> claims = jdbc.query("SELECT id,index_name,attempt_count,status FROM search_index_cleanup_task WHERE (status='NEW' AND available_at <= CURRENT_TIMESTAMP(6)) OR (status='RUNNING' AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count < 3) OR (status='BUILDING' AND lease_until <= CURRENT_TIMESTAMP(6)) ORDER BY created_at LIMIT 20", (rs, rowNum) -> new CleanupClaim(rs.getString(1), rs.getString(2), rs.getInt(3), rs.getString(4)));
-        for (CleanupClaim claim : claims) {
-            if ("BUILDING".equals(claim.status())) {
-                Set<String> live = readAllAliasMembers();
-                if (live.contains(claim.indexName())) {
-                    jdbc.update("UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE id=? AND status='BUILDING' AND lease_until <= CURRENT_TIMESTAMP(6)", claim.id());
-                    continue;
-                }
-            }
-            String token = UUID.randomUUID().toString();
-            try {
-                if (jdbc.update("UPDATE search_index_cleanup_task SET status='RUNNING',owner_id=?,claim_token=?,lease_until=TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)),attempt_count=attempt_count+1 WHERE id=? AND ((status='NEW' AND available_at <= CURRENT_TIMESTAMP(6)) OR (status='RUNNING' AND lease_until <= CURRENT_TIMESTAMP(6) AND attempt_count < 3) OR (status='BUILDING' AND lease_until <= CURRENT_TIMESTAMP(6)))", cleanupOwner, token, claim.id()) != 1) continue;
-            } catch (CannotAcquireLockException concurrentClaim) {
-                // A concurrent short claim owns the row; this worker simply
-                // moves on. Do not turn a normal race into a failed job.
-                continue;
-            }
-            try {
-                // Every ES read and delete is outside the short claim transaction.
-                if (readAllAliasMembers().contains(claim.indexName())) {
-                    jdbc.update("UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE id=? AND status='RUNNING' AND owner_id=? AND claim_token=?", claim.id(), cleanupOwner, token);
-                    continue;
-                }
-                cleanupDeleteHook.accept(claim.indexName());
-                try { client.indices().delete(d -> d.index(claim.indexName())); }
-                catch (co.elastic.clients.elasticsearch._types.ElasticsearchException missing) { if (missing.status() != 404) throw missing; }
-                jdbc.update("UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL,last_error=NULL,failure_class=NULL WHERE id=? AND status='RUNNING' AND owner_id=? AND claim_token=? AND lease_until > CURRENT_TIMESTAMP(6)", claim.id(), cleanupOwner, token);
-            } catch (RuntimeException | IOException failure) {
-                String kind = permanentFailure(failure) ? "PERMANENT" : "TRANSIENT";
-                String message = failure.getMessage() == null ? kind : failure.getMessage().substring(0, Math.min(500, failure.getMessage().length()));
-                String status = claim.attemptCount() + 1 >= 3 ? "FAILED" : "NEW";
-                jdbc.update("UPDATE search_index_cleanup_task SET status=?,owner_id=NULL,claim_token=NULL,lease_until=NULL,available_at=TIMESTAMPADD(SECOND,10,CURRENT_TIMESTAMP(6)),last_error=?,failure_class=? WHERE id=? AND status='RUNNING' AND owner_id=? AND claim_token=? AND lease_until > CURRENT_TIMESTAMP(6)", status, message, kind, claim.id(), cleanupOwner, token);
-                if ("FAILED".equals(status)) LOGGER.warn("搜索索引清理进入 FAILED，failureClass={}", kind);
-            }
+    /** Delete an index as an ES primitive; ownership and fencing belong to the worker. */
+    void deleteIndex(String index) {
+        if (index == null || index.isBlank()) throw new IllegalArgumentException("待删除索引不能为空");
+        try {
+            client.indices().delete(d -> d.index(index));
+        } catch (co.elastic.clients.elasticsearch._types.ElasticsearchException missing) {
+            if (missing.status() != 404) throw missing;
+        } catch (IOException failure) {
+            throw new SearchUnavailableException("搜索索引删除失败", failure);
         }
     }
-
-    private record CleanupClaim(String id, String indexName, int attemptCount, String status) { }
 
     public String currentWriteIndex() {
         Set<String> members = currentWriteIndexes();
@@ -534,12 +491,6 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         }
     }
 
-    private static boolean permanentFailure(Throwable failure) {
-        if (failure instanceof co.elastic.clients.elasticsearch._types.ElasticsearchException elastic) {
-            return elastic.status() == 400 || elastic.status() == 403 || elastic.status() == 409;
-        }
-        return false;
-    }
 
     private void ensureInitialIndex() {
         withAliasCoordinator(connection -> {

@@ -162,7 +162,6 @@ public class SearchRebuildService {
         return Objects.requireNonNull(transactions.execute(status -> read.get()));
     }
 
-    public void cleanupPending() { elasticsearch.cleanupPending(); }
     private record Snapshot(long highWater, List<ProductSearchPort.ProductDocument> documents) { }
     private record OutboxChange(UUID listingId, long aggregateVersion) { }
     public record RebuildReport(String index, long highWater, int snapshotCount, int replayCount) {

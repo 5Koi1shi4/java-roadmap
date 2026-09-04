@@ -9,6 +9,8 @@ import com.example.campusmarket.catalog.search.SearchOutboxDispatcher;
 import com.example.campusmarket.catalog.search.SearchOutboxRepository;
 import com.example.campusmarket.catalog.search.SearchGateRepository;
 import com.example.campusmarket.catalog.search.SearchAliasCoordinator;
+import com.example.campusmarket.catalog.search.SearchIndexCleanupRepository;
+import com.example.campusmarket.catalog.search.SearchIndexCleanupWorker;
 import com.example.campusmarket.catalog.search.SearchRebuildReconciler;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
@@ -18,6 +20,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.test.context.ActiveProfiles;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -37,12 +40,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.lang.reflect.Method;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.util.Arrays;
 import java.util.Set;
 import javax.sql.DataSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.awaitility.Awaitility.await;
 
 @ActiveProfiles("local")
 class SearchRebuildIT extends SharedContainers {
@@ -56,6 +61,7 @@ class SearchRebuildIT extends SharedContainers {
     @Autowired PlatformTransactionManager transactionManager;
     @Autowired ElasticsearchProductSearch elasticsearch;
     @Autowired ElasticsearchClient elasticsearchClient;
+    @Autowired SearchIndexCleanupWorker cleanupWorker;
 
     @BeforeAll
     static void migrate() {
@@ -177,7 +183,7 @@ class SearchRebuildIT extends SharedContainers {
     @Test
     void aliasCoordinatorWrapsCheckedFailureAndRetainsReleaseFailure() {
         Exception callbackFailure = new Exception("checked callback failure");
-        SearchAliasCoordinator coordinator = new SearchAliasCoordinator(dataSource);
+        SearchAliasCoordinator coordinator = new SearchAliasCoordinator(failingNamedLockDataSource());
 
         SearchAliasCoordinator.SearchCoordinationException thrown = assertThrows(
             SearchAliasCoordinator.SearchCoordinationException.class,
@@ -189,6 +195,67 @@ class SearchRebuildIT extends SharedContainers {
         assertThat(thrown.getCause()).isSameAs(callbackFailure);
         assertThat(thrown.getSuppressed())
             .anySatisfy(suppressed -> assertThat(suppressed).isInstanceOf(SearchAliasCoordinator.SearchCoordinationException.class));
+    }
+
+    private static DataSource failingNamedLockDataSource() {
+        Connection connection = (Connection) Proxy.newProxyInstance(
+            SearchRebuildIT.class.getClassLoader(), new Class<?>[] { Connection.class }, new java.lang.reflect.InvocationHandler() {
+                private boolean closed;
+                @Override
+                public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+                    return switch (method.getName()) {
+                        case "close" -> { closed = true; yield null; }
+                        case "isClosed" -> closed;
+                        case "setAutoCommit" -> null;
+                        case "prepareStatement" -> {
+                            if (closed) throw new SQLException("Connection is closed");
+                            yield failingLockStatement();
+                        }
+                        case "toString" -> "failing-named-lock-connection";
+                        default -> defaultValue(method.getReturnType());
+                    };
+                }
+            });
+        return (DataSource) Proxy.newProxyInstance(
+            SearchRebuildIT.class.getClassLoader(), new Class<?>[] { DataSource.class }, (proxy, method, args) ->
+                method.getName().equals("getConnection") ? connection : defaultValue(method.getReturnType()));
+    }
+
+    private static PreparedStatement failingLockStatement() {
+        ResultSet result = (ResultSet) Proxy.newProxyInstance(
+            SearchRebuildIT.class.getClassLoader(), new Class<?>[] { ResultSet.class }, new java.lang.reflect.InvocationHandler() {
+                private boolean returned;
+                @Override
+                public Object invoke(Object proxy, Method method, Object[] args) {
+                    return switch (method.getName()) {
+                        case "next" -> {
+                            boolean result = !returned;
+                            returned = true;
+                            yield result;
+                        }
+                        case "getInt" -> 1;
+                        default -> defaultValue(method.getReturnType());
+                    };
+                }
+            });
+        return (PreparedStatement) Proxy.newProxyInstance(
+            SearchRebuildIT.class.getClassLoader(), new Class<?>[] { PreparedStatement.class }, (proxy, method, args) -> switch (method.getName()) {
+                case "executeQuery" -> result;
+                default -> defaultValue(method.getReturnType());
+            });
+    }
+
+    private static Object defaultValue(Class<?> type) {
+        if (!type.isPrimitive()) return null;
+        if (type == boolean.class) return false;
+        if (type == byte.class) return (byte) 0;
+        if (type == short.class) return (short) 0;
+        if (type == int.class) return 0;
+        if (type == long.class) return 0L;
+        if (type == float.class) return 0F;
+        if (type == double.class) return 0D;
+        if (type == char.class) return '\0';
+        return null;
     }
 
     @Test
@@ -235,7 +302,7 @@ class SearchRebuildIT extends SharedContainers {
         String failedTarget = jdbc.queryForObject("SELECT target_index FROM search_rebuild_intent WHERE phase='CREATED' LIMIT 1", String.class);
         SearchRebuildService.RebuildReport recovered = rebuild.rebuild();
         invokeReconcilerHook(newReconcilerOrNull(), () -> { });
-        elasticsearch.cleanupPending();
+        cleanupWorker.runOnce();
         search.refresh();
         assertThat(recovered.index()).isNotBlank();
         assertThat(elasticsearch.currentReadIndex()).isNotEqualTo(previous);
@@ -347,7 +414,7 @@ class SearchRebuildIT extends SharedContainers {
             assertThat(tripped).as("stage hook %s", failedStage).isTrue();
             assertThat(elasticsearch.currentReadIndex()).isEqualTo(previous);
             invokeReconcilerHook(newReconcilerOrNull(), () -> { });
-            elasticsearch.cleanupPending();
+            cleanupWorker.runOnce();
             SearchRebuildService.RebuildReport recovered = rebuild.rebuild();
             assertThat(recovered.index()).isNotEqualTo(previous);
             assertThat(elasticsearch.currentReadIndex()).isEqualTo(recovered.index());
@@ -379,7 +446,7 @@ class SearchRebuildIT extends SharedContainers {
         jdbc.update("INSERT INTO search_index_cleanup_task(id,index_name,status,owner_id,claim_token,lease_until,attempt_count,available_at,created_at) VALUES (?,?, 'BUILDING','dead-owner','dead-token',TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP(6)),0,TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP(6)),CURRENT_TIMESTAMP(6))", UUID.randomUUID().toString(), building);
         jdbc.update("INSERT INTO search_index_cleanup_task(id,index_name,status,attempt_count,available_at,created_at,owner_id,claim_token,lease_until) VALUES (?,?, 'RUNNING',3,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),'dead-owner','dead-token',TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP(6)))", UUID.randomUUID().toString(), exhausted);
 
-        elasticsearch.cleanupPending();
+        cleanupWorker.runOnce();
 
         assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, building))
             .isEqualTo("DONE");
@@ -412,7 +479,7 @@ class SearchRebuildIT extends SharedContainers {
             .actions(x -> x.add(v -> v.index(target).alias(ProductSearchPort.READ_ALIAS)))
             .actions(x -> x.add(v -> v.index(target).alias(ProductSearchPort.WRITE_ALIAS))));
         invokeReconcilerHook(newReconcilerOrNull(), () -> { });
-        elasticsearch.cleanupPending();
+        cleanupWorker.runOnce();
 
         assertThat(elasticsearch.currentReadIndex()).isEqualTo(target);
         assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, target))
@@ -427,34 +494,117 @@ class SearchRebuildIT extends SharedContainers {
         elasticsearch.scheduleCleanup(target);
         CountDownLatch claimCommitted = new CountDownLatch(1);
         CountDownLatch releaseDelete = new CountDownLatch(1);
-        ElasticsearchProductSearch firstWorker = new ElasticsearchProductSearch(elasticsearchClient, new JdbcTemplate(dataSource),
-            ignored -> { }, index -> {
+        SearchIndexCleanupRepository firstRepository = new SearchIndexCleanupRepository(new JdbcTemplate(dataSource));
+        SearchIndexCleanupRepository secondRepository = new SearchIndexCleanupRepository(new JdbcTemplate(dataSource));
+        SearchIndexCleanupWorker firstWorker = new SearchIndexCleanupWorker(firstRepository,
+            new SearchAliasCoordinator(dataSource), elasticsearch);
+        firstWorker.setCleanupDeleteHook(index -> {
                 claimCommitted.countDown();
                 awaitBarrier(claimCommitted, releaseDelete);
             });
-        ElasticsearchProductSearch secondWorker = new ElasticsearchProductSearch(elasticsearchClient, new JdbcTemplate(dataSource));
+        SearchIndexCleanupWorker secondWorker = new SearchIndexCleanupWorker(secondRepository,
+            new SearchAliasCoordinator(dataSource), elasticsearch);
         ExecutorService workers = Executors.newFixedThreadPool(2);
         try {
-            var first = workers.submit(firstWorker::cleanupPending);
+            var first = workers.submit(firstWorker::runOnce);
             assertThat(claimCommitted.await(30, TimeUnit.SECONDS)).isTrue();
             assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, target))
                 .isEqualTo("RUNNING");
+            SearchIndexCleanupRepository.CleanupClaim stale = jdbc.queryForObject(
+                "SELECT id,index_name,attempt_count,owner_id,claim_token,lease_until FROM search_index_cleanup_task WHERE index_name=?",
+                (rs, rowNum) -> new SearchIndexCleanupRepository.CleanupClaim(rs.getString(1), rs.getString(2),
+                    rs.getInt(3), rs.getString(4), rs.getString(5), rs.getTimestamp(6)), target);
             // The claim transaction has committed before the first worker
             // enters ES delete. A second independent worker can observe it.
-            var observer = workers.submit(secondWorker::cleanupPending);
+            var observer = workers.submit(secondWorker::runOnce);
             observer.get(30, TimeUnit.SECONDS);
             jdbc.update("UPDATE search_index_cleanup_task SET lease_until=TIMESTAMPADD(MICROSECOND,-1,CURRENT_TIMESTAMP(6)) WHERE index_name=?", target);
-            var takeover = workers.submit(secondWorker::cleanupPending);
-            takeover.get(30, TimeUnit.SECONDS);
+            var takeover = workers.submit(secondWorker::runOnce);
+            await().atMost(30, TimeUnit.SECONDS).untilAsserted(() ->
+                assertThat(jdbc.queryForObject("SELECT owner_id FROM search_index_cleanup_task WHERE index_name=?", String.class, target))
+                    .isNotEqualTo(stale.owner()));
+            assertThat(firstRepository.complete(stale)).isZero();
             releaseDelete.countDown();
             first.get(30, TimeUnit.SECONDS);
+            takeover.get(30, TimeUnit.SECONDS);
         } finally {
             releaseDelete.countDown();
+            firstWorker.setCleanupDeleteHook(null);
             workers.shutdownNow();
             assertThat(workers.awaitTermination(30, TimeUnit.SECONDS)).isTrue();
         }
         assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, target))
             .isEqualTo("DONE");
+    }
+
+    @Test
+    void cleanupAndCutoverShareCoordinator() throws Exception {
+        String target = elasticsearch.createRebuildIndex();
+        elasticsearch.scheduleCleanup(target);
+        CountDownLatch cleanupRead = new CountDownLatch(1);
+        CountDownLatch releaseCleanup = new CountDownLatch(1);
+        cleanupWorker.setCleanupDeleteHook(index -> {
+            cleanupRead.countDown();
+            awaitBarrier(cleanupRead, releaseCleanup);
+        });
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<Integer> cleanup = workers.submit(cleanupWorker::runOnce);
+            assertThat(cleanupRead.await(30, TimeUnit.SECONDS)).isTrue();
+
+            CountDownLatch cutoverEntered = new CountDownLatch(1);
+            Future<Void> cutover = workers.submit(() -> {
+                new SearchAliasCoordinator(dataSource).execute(Duration.ofSeconds(30), connection -> {
+                    cutoverEntered.countDown();
+                    return null;
+                });
+                return null;
+            });
+            assertThat(cutoverEntered.await(200, TimeUnit.MILLISECONDS)).isFalse();
+            releaseCleanup.countDown();
+            cleanup.get(30, TimeUnit.SECONDS);
+            cutover.get(30, TimeUnit.SECONDS);
+            assertThat(cutoverEntered.await(30, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            releaseCleanup.countDown();
+            cleanupWorker.setCleanupDeleteHook(null);
+            workers.shutdownNow();
+            assertThat(workers.awaitTermination(30, TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    @Test
+    void cleanupSuspendsCallerTransaction() {
+        String target = elasticsearch.createRebuildIndex();
+        elasticsearch.scheduleCleanup(target);
+        AtomicBoolean observedSuspended = new AtomicBoolean();
+        cleanupWorker.setCleanupDeleteHook(index -> observedSuspended.set(!TransactionSynchronizationManager.isActualTransactionActive()));
+        try {
+            new TransactionTemplate(transactionManager).executeWithoutResult(status -> {
+                assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isTrue();
+                cleanupWorker.runOnce();
+            });
+        } finally {
+            cleanupWorker.setCleanupDeleteHook(null);
+        }
+        assertThat(observedSuspended).isTrue();
+    }
+
+    @Test
+    void cleanupClaimIsVisibleAndStaleCompletionIsFenced() {
+        String target = elasticsearch.createRebuildIndex();
+        elasticsearch.scheduleCleanup(target);
+        SearchIndexCleanupRepository first = new SearchIndexCleanupRepository(jdbc);
+        SearchIndexCleanupRepository second = new SearchIndexCleanupRepository(new JdbcTemplate(dataSource));
+        SearchIndexCleanupRepository.CleanupClaim oldClaim = first.claimBatch(20).get(0);
+        jdbc.update("UPDATE search_index_cleanup_task SET lease_until=TIMESTAMPADD(MICROSECOND,-1,CURRENT_TIMESTAMP(6)) WHERE id=?", oldClaim.id());
+        SearchIndexCleanupRepository.CleanupClaim currentClaim = second.claimBatch(20).get(0);
+
+        assertThat(currentClaim.owner()).isNotEqualTo(oldClaim.owner());
+        assertThat(first.complete(oldClaim)).isZero();
+        assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE id=?", String.class, oldClaim.id()))
+            .isEqualTo("RUNNING");
+        assertThat(second.complete(currentClaim)).isEqualTo(1);
     }
 
     @Test
@@ -545,7 +695,7 @@ class SearchRebuildIT extends SharedContainers {
                 .as("former alias member is durably protected/eligible after reconciliation: %s", former)
                 .isIn("NEW", "DONE");
         }
-        elasticsearch.cleanupPending();
+        cleanupWorker.runOnce();
         assertThat(elasticsearch.currentReadIndexes()).containsExactly(target);
     }
 
