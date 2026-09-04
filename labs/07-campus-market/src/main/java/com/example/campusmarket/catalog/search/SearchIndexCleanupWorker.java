@@ -11,7 +11,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
 
-/** Performs cleanup claims outside caller transactions and serializes ES deletion with cutover. */
+/** 在调用方事务之外领取清理任务，并与别名切换串行化删除。 */
 @Service
 public class SearchIndexCleanupWorker {
     private static final Duration COORDINATION_TIMEOUT = Duration.ofSeconds(30);
@@ -30,7 +30,7 @@ public class SearchIndexCleanupWorker {
         this.elasticsearch = Objects.requireNonNull(elasticsearch, "Elasticsearch不能为空");
     }
 
-    /** Test seam invoked after the live check and before the external delete. */
+    /** 在 live 检查后、外部删除前调用的测试接缝。 */
     public void setCleanupDeleteHook(Consumer<String> hook) {
         cleanupDeleteHook = hook == null ? ignored -> { } : hook;
     }
@@ -44,7 +44,7 @@ public class SearchIndexCleanupWorker {
 
     private void cleanupOne(SearchIndexCleanupRepository.CleanupClaim claim) {
         try {
-            coordinator.execute(COORDINATION_TIMEOUT, connection -> {
+            coordinator.execute(COORDINATION_TIMEOUT, "cleanup-delete", claim.owner(), connection -> {
                 if (!repository.owned(connection, claim)) return null;
                 Set<String> live = elasticsearch.readAllAliasMembers();
                 if (live.contains(claim.indexName())) {
@@ -56,6 +56,8 @@ public class SearchIndexCleanupWorker {
                 repository.complete(connection, claim);
                 return null;
             });
+        } catch (SearchAliasCoordinator.SearchCoordinationTimeoutException timeout) {
+            repository.retryAfterCoordinationFailure(claim, timeout);
         } catch (RuntimeException failure) {
             repository.fail(claim, failure);
         }

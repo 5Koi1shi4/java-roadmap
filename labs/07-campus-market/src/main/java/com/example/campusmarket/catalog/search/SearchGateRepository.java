@@ -39,22 +39,21 @@ public class SearchGateRepository {
     }
 
     public void assertProjectionOpen() {
-        // Projection IO must not hold the gate row lock. The concrete write
-        // index is resolved by ElasticsearchProductSearch before the request,
-        // so a concurrent alias swap can only leave a stale write on the old
-        // (soon-to-be-cleaned) concrete index.
+        // 投影 IO 不得持有门禁行锁。请求前由 ElasticsearchProductSearch 解析具体写索引，
+        // 因此并发别名切换最多只会在即将清理的旧具体索引上留下过期写入。
         String mode = jdbc.queryForObject("SELECT mode FROM search_rebuild_gate WHERE id=1", String.class);
         if (!"OPEN".equals(mode)) throw new SearchGateClosedException();
     }
 
-    /** Claim-only fence: safe to hold for the short DB claim transaction. */
+    /** 仅领取阶段的 fence：可在短数据库领取事务中持有。 */
     public void assertProjectionOpenForClaim() {
         String mode = jdbc.queryForObject("SELECT mode FROM search_rebuild_gate WHERE id=1 FOR UPDATE", String.class);
         if (!"OPEN".equals(mode)) throw new SearchGateClosedException();
     }
 
     public Lease acquire(String owner, Duration leaseDuration) {
-        return coordinator().execute(COORDINATION_TIMEOUT, connection -> acquire(connection, owner, leaseDuration));
+        return coordinator().execute(COORDINATION_TIMEOUT, "gate-acquire", owner,
+            connection -> acquire(connection, owner, leaseDuration));
     }
 
     public boolean renew(Lease lease, Duration extension) {
@@ -64,7 +63,7 @@ public class SearchGateRepository {
         return jdbc.update("UPDATE search_rebuild_gate SET lease_until=TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6)),updated_at=CURRENT_TIMESTAMP(6) WHERE id=1 AND mode='REBUILDING' AND owner_id=? AND claim_token=? AND generation=? AND lease_until > CURRENT_TIMESTAMP(6)", micros, lease.owner(), lease.token(), lease.generation()) == 1;
     }
 
-    /** Check the complete lease identity immediately before an external write. */
+    /** 外部写入前立即检查完整租约身份。 */
     public void assertLease(Lease lease) {
         Objects.requireNonNull(lease, "门禁租约不能为空");
         Long validGeneration = jdbc.query("""
@@ -77,7 +76,8 @@ public class SearchGateRepository {
     }
 
     public int release(Lease lease) {
-        return coordinator().execute(COORDINATION_TIMEOUT, connection -> release(connection, lease));
+        return coordinator().execute(COORDINATION_TIMEOUT, "gate-release", lease.owner(),
+            connection -> release(connection, lease));
     }
 
     private SearchAliasCoordinator coordinator() {
@@ -128,9 +128,8 @@ public class SearchGateRepository {
     int release(Connection connection, Lease lease) {
         Objects.requireNonNull(connection, "连接不能为空");
         Objects.requireNonNull(lease, "门禁租约不能为空");
-        // Releasing an expired lease is safe when the complete owner/token/generation
-        // identity still matches. A takeover changes that identity, so a stale owner
-        // cannot clear the new owner's lease.
+        // 只要完整 owner/token/generation 身份仍匹配，释放过期租约也是安全的。
+        // 接管会改变该身份，因此旧 owner 不能清除新 owner 的租约。
         try (PreparedStatement statement = connection.prepareStatement("UPDATE search_rebuild_gate SET mode='OPEN',owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=1 AND mode='REBUILDING' AND owner_id=? AND claim_token=? AND generation=?")) {
             statement.setString(1, lease.owner());
             statement.setString(2, lease.token());

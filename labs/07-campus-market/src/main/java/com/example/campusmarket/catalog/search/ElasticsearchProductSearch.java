@@ -44,8 +44,7 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         this(client, jdbc, ignored -> { });
     }
 
-    /** Test seam fires while the cross-instance mutex is held, after the live
-     * aliases have been read and immediately before the ES aliases request. */
+    /** 跨实例互斥锁持有期间、读取 live 别名后且 ES 别名请求前触发的测试接缝。 */
     public ElasticsearchProductSearch(ElasticsearchClient client, org.springframework.jdbc.core.JdbcTemplate jdbc,
                                       Consumer<Set<String>> aliasMembersReadHook) {
         this.client = Objects.requireNonNull(client, "Elasticsearch 客户端不能为空");
@@ -106,7 +105,7 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
             String requestPit = pit;
             SearchResponse<Map> response = client.search(s -> {
                 s.pit(p -> p.id(requestPit).keepAlive(co.elastic.clients.elasticsearch._types.Time.of(t -> t.time("1m")))).query(query).size(request.size() + 1).trackTotalHits(t -> t.enabled(true))
-                    // Score is ordered first; listing ID is a deterministic tie-breaker.
+                    // 先按得分排序，商品 ID 作为确定性的平局决胜字段。
                     .sort(sort -> sort.score(sc -> sc.order(co.elastic.clients.elasticsearch._types.SortOrder.Desc)))
                     .sort(sort -> sort.field(f -> f.field("listingId")
                         .order(co.elastic.clients.elasticsearch._types.SortOrder.Asc)));
@@ -115,9 +114,8 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
             }, Map.class);
             String responsePit = response.pitId();
             String currentPit = responsePit == null || responsePit.isBlank() ? pit : responsePit;
-            // Elasticsearch may rotate the PIT id on every page. Keep the
-            // newest id so an exception while decoding hits can still close
-            // the controllable PIT rather than leaking the original one.
+            // Elasticsearch 可能在每页轮换 PIT ID。保留最新 ID，确保解码命中结果异常时
+            // 仍能关闭可控的 PIT，而不会泄露原始 PIT。
             pit = currentPit;
             List<SearchItem> items = new ArrayList<>();
             String next = null;
@@ -162,7 +160,7 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         }
     }
 
-    /** Read the complete union of concrete read/write alias members. */
+    /** 读取具体 read/write 别名成员的完整并集。 */
     Set<String> readAllAliasMembers() {
         try {
             Set<String> live = new LinkedHashSet<>();
@@ -189,12 +187,18 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     }
 
     /**
-     * Replace both aliases with one target. This package-private operation is
-     * only callable by the coordinator-held rebuild/reconciliation sections.
+     * 将两个别名替换为单一 target。该包级操作只能由持有协调锁的重建/协调临界区调用。
      */
     AliasTransition replaceAliasesWithSingleTarget(String targetIndex, Set<String> live) {
         if (targetIndex == null || targetIndex.isBlank()) throw new IllegalArgumentException("目标索引不能为空");
         Objects.requireNonNull(live, "当前别名成员不能为空");
+        try {
+            if (!client.indices().exists(e -> e.index(targetIndex)).value()) {
+                throw new SearchUnavailableException("目标索引不存在，别名切换可重试");
+            }
+        } catch (IOException e) {
+            throw new SearchUnavailableException("校验目标索引失败", e);
+        }
         aliasMembersReadHook.accept(Set.copyOf(live));
         try {
             client.indices().updateAliases(a -> {
@@ -213,9 +217,8 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     }
 
     /**
-     * Protect every former live member before an external alias request. The
-     * row owner/token identify the cutover intent so reconciliation can recover
-     * the staged set if the process stops after ES succeeds.
+     * 在外部别名请求前保护所有原 live 成员。行 owner/token 标识切换意图，
+     * 这样进程在 ES 成功后停止时，协调仍可恢复暂存集合。
      */
     void stageCleanup(Connection connection, Set<String> live, String target, String owner, String token) {
         Objects.requireNonNull(connection, "连接不能为空");
@@ -232,7 +235,7 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         }
     }
 
-    /** Arm staged members only after the alias request has completed. */
+    /** 只有别名请求完成后才将暂存成员置为可清理。 */
     void armStagedCleanup(Connection connection, Set<String> staged, Set<String> stillLive, String owner, String token) {
         Objects.requireNonNull(connection, "连接不能为空");
         Objects.requireNonNull(staged, "待清理索引不能为空");
@@ -248,7 +251,7 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         }
     }
 
-    /** Recover rows staged by an interrupted switching intent. */
+    /** 恢复被中断切换意图暂存的行。 */
     void recoverStagedCleanup(Connection connection, Set<String> stillLive, String owner, String token) {
         Objects.requireNonNull(connection, "连接不能为空");
         Objects.requireNonNull(stillLive, "当前别名成员不能为空");
@@ -299,7 +302,7 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     }
 
     private <T> T withAliasCoordinator(Function<Connection, T> operation) {
-        return coordinator.execute(java.time.Duration.ofSeconds(30), operation::apply);
+        return coordinator.execute(java.time.Duration.ofSeconds(30), "initialize-alias", cleanupOwner, operation::apply);
     }
 
     private Set<String> aliasMembers(String alias) throws IOException {
@@ -401,7 +404,7 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         jdbc.update("UPDATE search_rebuild_intent SET phase='SWITCHED',owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=?", target);
     }
 
-    /** Claim the final alias transition in a short, durable DB operation. */
+    /** 在短小且持久的数据库操作中领取最终别名切换。 */
     public boolean claimRebuildIntentSwitch(String target, String owner, String token, long generation) {
         if (target == null || target.isBlank() || owner == null || owner.isBlank()
             || token == null || token.isBlank() || generation <= 0) throw new IllegalArgumentException("重建切换领取参数无效");
@@ -432,7 +435,7 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         jdbc.update("UPDATE search_rebuild_intent SET phase='BUILDING',updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=? AND phase='CREATED'", target);
     }
 
-    /** Register an index while it may still be live or being populated. */
+    /** 在索引可能仍 live 或仍在填充时登记索引。 */
     public void registerRebuildTarget(String index) {
         if (index == null || index.isBlank() || index.startsWith("campus-listing-000001")) return;
         jdbc.update("INSERT INTO search_index_cleanup_task(id,index_name,status,owner_id,claim_token,lease_until,attempt_count,available_at,created_at) VALUES (?,?, 'BUILDING',?,?,TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE status='BUILDING',owner_id=VALUES(owner_id),claim_token=VALUES(claim_token),lease_until=VALUES(lease_until)", UUID.randomUUID().toString(), index, cleanupOwner, UUID.randomUUID().toString());
@@ -443,13 +446,13 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         return jdbc.update("UPDATE search_index_cleanup_task SET lease_until=TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)) WHERE index_name=? AND status='BUILDING' AND owner_id=? AND lease_until > CURRENT_TIMESTAMP(6)", index, cleanupOwner) == 1;
     }
 
-    /** Make a failed/unreferenced index eligible for the cleanup worker. */
+    /** 让失败或无引用索引进入清理 worker 的候选范围。 */
     public void armCleanup(String index) {
         if (index == null || index.isBlank()) return;
         jdbc.update("UPDATE search_index_cleanup_task SET status='NEW',available_at=CURRENT_TIMESTAMP(6),owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE index_name=? AND status='BUILDING'", index);
     }
 
-    /** Mark a protected BUILDING target as live before cleanup workers can see it. */
+    /** 在清理 worker 可见前，将受保护的 BUILDING target 标记为 live。 */
     public void cancelCleanup(String index) {
         if (index == null || index.isBlank()) return;
         jdbc.update("UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL,last_error=NULL,failure_class=NULL WHERE index_name=?", index);
@@ -464,7 +467,7 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         }
     }
 
-    /** Delete an index as an ES primitive; ownership and fencing belong to the worker. */
+    /** 作为 ES 原语删除索引；所有权和 fencing 由 worker 负责。 */
     void deleteIndex(String index) {
         if (index == null || index.isBlank()) throw new IllegalArgumentException("待删除索引不能为空");
         try {

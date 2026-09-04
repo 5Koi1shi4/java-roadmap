@@ -15,7 +15,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 
-/** Short transactional claims and owner/token-fenced cleanup state changes. */
+/** 短事务领取和 owner/token fencing 的清理状态变更。 */
 @Repository
 public class SearchIndexCleanupRepository {
     private final JdbcTemplate jdbc;
@@ -99,7 +99,24 @@ public class SearchIndexCleanupRepository {
             """, status, message, kind, claim.id(), claim.owner(), claim.token());
     }
 
-    /** Owner/token check used inside the coordinator-held critical section. */
+    /** 协调锁等待超时时退回待处理，且不消耗清理业务尝试次数。 */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public int retryAfterCoordinationFailure(CleanupClaim claim,
+                                              SearchAliasCoordinator.SearchCoordinationTimeoutException failure) {
+        Objects.requireNonNull(claim, "清理领取不能为空");
+        Objects.requireNonNull(failure, "协调锁超时不能为空");
+        String message = failure.getMessage() == null ? "alias coordination timeout" :
+            failure.getMessage().substring(0, Math.min(500, failure.getMessage().length()));
+        return jdbc.update("""
+            UPDATE search_index_cleanup_task
+            SET status='NEW',owner_id=NULL,claim_token=NULL,lease_until=NULL,
+                attempt_count=GREATEST(attempt_count-1,0),
+                available_at=TIMESTAMPADD(SECOND,10,CURRENT_TIMESTAMP(6)),last_error=?,failure_class='TRANSIENT'
+            WHERE id=? AND status='RUNNING' AND owner_id=? AND claim_token=?
+            """, message, claim.id(), claim.owner(), claim.token());
+    }
+
+    /** 在协调器持锁临界区中使用的 owner/token 检查。 */
     boolean owned(Connection connection, CleanupClaim claim) {
         Objects.requireNonNull(connection, "连接不能为空");
         Objects.requireNonNull(claim, "清理领取不能为空");
@@ -117,12 +134,12 @@ public class SearchIndexCleanupRepository {
         }
     }
 
-    /** Complete a live protected target while still holding the coordinator. */
+    /** 仍持有协调器时完成受保护 live target 的处理。 */
     int completeProtected(Connection connection, CleanupClaim claim) {
         return complete(connection, claim);
     }
 
-    /** Owner/token/lease CAS used after an external delete. */
+    /** 外部删除后使用的 owner/token/lease CAS。 */
     int complete(Connection connection, CleanupClaim claim) {
         return update(connection, """
             UPDATE search_index_cleanup_task

@@ -8,7 +8,7 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** Production entry point for the outbox worker; disabled unless explicitly enabled. */
+/** outbox worker 的生产入口；除非显式启用，否则保持禁用。 */
 @Component
 @EnableScheduling
 @ConditionalOnProperty(prefix = "campus.market.search.dispatcher", name = "enabled", havingValue = "true")
@@ -38,7 +38,7 @@ public final class SearchOutboxScheduler {
         }
     }
 
-    /** Allows an operator or lifecycle hook to pause/resume dispatch without a JVM lock. */
+    /** 允许运维或生命周期接缝在不使用 JVM 锁的情况下暂停/恢复调度。 */
     public void stop() { running.set(false); }
     public void start() { running.set(true); }
 }

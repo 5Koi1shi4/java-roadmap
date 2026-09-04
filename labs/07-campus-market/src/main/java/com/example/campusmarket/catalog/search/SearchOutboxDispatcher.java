@@ -36,8 +36,7 @@ public class SearchOutboxDispatcher {
         try {
             claims = claimer.claim(owner, limit, lease);
         } catch (SearchGateRepository.SearchGateClosedException paused) {
-            // Rebuild is an expected pause. No row was claimed, so no
-            // delivery attempt is consumed while the gate is closed.
+            // 重建是预期的暂停。没有领取行，因此门禁关闭期间不消耗投递尝试次数。
             return 0;
         }
         int completed = 0;
@@ -71,7 +70,7 @@ public class SearchOutboxDispatcher {
             """, claim.id(), owner, claim.claimToken());
     }
 
-    /** A rebuild gate is an expected temporary condition, not a delivery failure. */
+    /** 重建门禁是预期的临时状态，不属于投递失败。 */
     private int defer(Claim claim) {
         return jdbc.update("""
             UPDATE search_outbox SET status='NEW',owner_id=NULL,claim_token=NULL,lease_until=NULL,

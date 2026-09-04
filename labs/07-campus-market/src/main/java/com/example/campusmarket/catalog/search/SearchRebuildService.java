@@ -37,14 +37,14 @@ public class SearchRebuildService {
         this(jdbc, projector, elasticsearch, transactionManager, gate, coordinator, () -> { }, stage -> { });
     }
 
-    /** Test seam used to make the pre-gate concurrent rebuild window deterministic. */
+    /** 使门禁前并发重建窗口具有确定性的测试接缝。 */
     public SearchRebuildService(JdbcTemplate jdbc, SearchProjector projector, ElasticsearchProductSearch elasticsearch,
                                 PlatformTransactionManager transactionManager, SearchGateRepository gate,
                                 Runnable beforeGateAcquire) {
         this(jdbc, projector, elasticsearch, transactionManager, gate, new SearchAliasCoordinator(jdbc.getDataSource()), beforeGateAcquire, stage -> { });
     }
 
-    /** Full test seam for deterministic fill/replay/alias failure injection. */
+    /** 用于确定性注入填充、补放和别名故障的完整测试接缝。 */
     public SearchRebuildService(JdbcTemplate jdbc, SearchProjector projector, ElasticsearchProductSearch elasticsearch,
                                 PlatformTransactionManager transactionManager, SearchGateRepository gate,
                                 Runnable beforeGateAcquire, Consumer<String> stageHook) {
@@ -73,11 +73,9 @@ public class SearchRebuildService {
             beforeGateAcquire.run();
             SearchGateRepository.Lease lease = gate.acquire(owner, java.time.Duration.ofSeconds(30));
             try {
-                coordinator.execute(java.time.Duration.ofSeconds(30), connection -> {
+                coordinator.execute(java.time.Duration.ofSeconds(30), "rebuild-initialize", owner, connection -> {
                     gate.assertLease(connection, lease);
-                    // Create and populate the intent only after this worker
-                    // owns the gate, so reconciliation cannot claim a fresh
-                    // ownerless CREATED row during the pre-gate window.
+                    // 只有本 worker 持有门禁后才创建并填充意图，避免协调在门禁前窗口领取无 owner 的 CREATED 行。
                     elasticsearch.recordRebuildIntent(connection, target, null);
                     elasticsearch.ensureInitializedForAliasRead(connection);
                     String current = elasticsearch.readCurrentReadIndex();
@@ -107,8 +105,7 @@ public class SearchRebuildService {
                 }
                 stageHook.accept("REFRESH_REPLAY");
                 elasticsearch.refreshIndex(target);
-                // Claim the durable intent in a short transaction, then do
-                // the potentially slow ES request without any DB lock.
+                // 先在短事务中领取持久意图，再在不持有数据库锁的情况下执行可能较慢的 ES 请求。
                 String switchToken = UUID.randomUUID().toString();
                 gate.assertLease(lease);
                 if (!elasticsearch.claimRebuildIntentSwitch(target, owner, switchToken, lease.generation())) {
@@ -116,7 +113,7 @@ public class SearchRebuildService {
                 }
                 if (!elasticsearch.renewRebuildTarget(target)) throw new IllegalStateException("目标索引租约已过期");
                 stageHook.accept("ALIAS_SWAP");
-                coordinator.execute(java.time.Duration.ofSeconds(30), connection -> {
+                coordinator.execute(java.time.Duration.ofSeconds(30), "rebuild-cutover", owner, connection -> {
                     gate.assertLease(connection, lease);
                     elasticsearch.assertSwitchingIntent(connection, target, owner, switchToken, lease.generation());
                     Set<String> live = elasticsearch.readAllAliasMembers();
@@ -135,8 +132,7 @@ public class SearchRebuildService {
                 gate.release(lease);
             }
         } catch (RuntimeException failure) {
-            // Reconciliation will compare the intent with current aliases if
-            // a process dies between the external alias request and DB commit.
+            // 若进程在 ES 别名请求与数据库提交之间退出，协调器会将意图与当前别名重新比较。
             if (aliasSwitched) elasticsearch.cancelCleanup(target);
             else elasticsearch.armCleanup(target);
             throw failure;

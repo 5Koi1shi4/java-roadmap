@@ -13,7 +13,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 
-/** Repairs durable rebuild state and aliases under the same coordination lock as cutover. */
+/** 在与切换相同的协调锁下修复持久重建状态和别名。 */
 @Component
 public final class SearchRebuildReconciler {
     private static final Duration COORDINATION_TIMEOUT = Duration.ofSeconds(30);
@@ -35,10 +35,10 @@ public final class SearchRebuildReconciler {
         return runOnce(() -> { });
     }
 
-    /** Test seam invoked after gate state is read while the coordinator is held. */
+    /** 协调器持锁读取门禁状态后调用的测试接缝。 */
     ReconcileResult runOnce(Runnable afterGateRead) {
         Objects.requireNonNull(afterGateRead, "门禁读取 hook 不能为空");
-        return coordinator.execute(COORDINATION_TIMEOUT, connection -> {
+        return coordinator.execute(COORDINATION_TIMEOUT, "reconcile", owner, connection -> {
             SearchGateRepository.GateState state = gate.readState(connection);
             afterGateRead.run();
             if (!state.isOpen()) return ReconcileResult.SKIPPED_GATE;
@@ -49,10 +49,8 @@ public final class SearchRebuildReconciler {
             RebuildIntent liveIntent = latestRecoverableLiveIntent(connection, live);
             RebuildIntent authoritative = latestSuccessful(connection);
             ReconcileResult result = ReconcileResult.UNCHANGED;
-            // A live target from an unreconciled intent is evidence that an
-            // external alias request completed before its DB phase update.
-            // It takes precedence over an older durable successful target;
-            // otherwise reconciliation could roll the aliases back.
+            // 未协调意图中的 live target 说明外部别名请求已完成，但数据库阶段更新尚未完成。
+            // 它优先于较旧的持久成功 target，否则协调可能将别名回滚。
             RebuildIntent target = liveIntent != null ? liveIntent : authoritative;
             if (liveIntent != null && liveIntent.owner() != null && liveIntent.token() != null) {
                 elasticsearch.recoverStagedCleanup(connection, live, liveIntent.owner(), liveIntent.token());
@@ -133,7 +131,7 @@ public final class SearchRebuildReconciler {
             RebuildIntent intent = readClaimed(connection, target, token);
             if (intent == null) continue;
 
-            // Every safety decision uses the complete union of read/write members.
+            // 所有安全判断都使用 read/write 成员的完整并集。
             Set<String> live = elasticsearch.readAllAliasMembers();
             if (live.contains(intent.target())) {
                 cancelCleanup(connection, intent.target());

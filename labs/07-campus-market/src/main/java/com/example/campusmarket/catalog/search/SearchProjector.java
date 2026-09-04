@@ -41,7 +41,7 @@ public class SearchProjector {
     }
 
     /** 重建期间将文档写入指定索引，不触碰在线别名。 */
-    /** Replay a change only while the exact rebuild lease is still current. */
+    /** 仅在精确重建租约仍有效时补放变更。 */
     void projectInto(String index, UUID listingId, long eventVersion, SearchGateRepository.Lease lease) {
         gate.assertLease(lease);
         Objects.requireNonNull(index, "目标索引不能为空");
@@ -69,7 +69,7 @@ public class SearchProjector {
     private void projectListing(UUID listingId, long eventVersion, ProductSearchPort target) {
         ProductSearchPort.ProductDocument document = snapshot(listingId);
         if (document == null) {
-            // Listing rows are retained by the current schema; a missing row is a tombstone.
+            // 当前 schema 会保留商品行；找不到商品行时视为 tombstone。
             target.tombstone(listingId.toString(), eventVersion);
             return;
         }

@@ -608,6 +608,22 @@ class SearchRebuildIT extends SharedContainers {
     }
 
     @Test
+    void coordinationTimeoutReturnsCleanupClaimWithoutConsumingBusinessAttempt() {
+        String target = elasticsearch.createRebuildIndex();
+        elasticsearch.scheduleCleanup(target);
+        SearchIndexCleanupRepository repository = new SearchIndexCleanupRepository(jdbc);
+        SearchIndexCleanupRepository.CleanupClaim claim = repository.claimBatch(20).get(0);
+        SearchAliasCoordinator.SearchCoordinationTimeoutException timeout =
+            new SearchAliasCoordinator.SearchCoordinationTimeoutException("cleanup-delete timeout", 1_000_000);
+
+        assertThat(repository.retryAfterCoordinationFailure(claim, timeout)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE id=?", String.class, claim.id()))
+            .isEqualTo("NEW");
+        assertThat(jdbc.queryForObject("SELECT attempt_count FROM search_index_cleanup_task WHERE id=?", Integer.class, claim.id()))
+            .isZero();
+    }
+
+    @Test
     void reconciliationAndGateAcquireShareOneLinearizationPoint() throws Exception {
         Object reconciler = newReconcilerOrNull();
         assertThat(reconciler).as("SearchRebuildReconciler must be available").isNotNull();
@@ -708,6 +724,22 @@ class SearchRebuildIT extends SharedContainers {
         assertThat(Arrays.stream(type.getMethods())
             .noneMatch(method -> method.getName().equals("switchAliasesToSingleLive") && method.getParameterCount() == 1))
             .as("unfenced single-target switchAliasesToSingleLive must be removed").isTrue();
+    }
+
+    @Test
+    void aliasMutationVerifiesTargetExistsBeforeSendingUpdate() throws Exception {
+        String target = elasticsearch.createRebuildIndex();
+        Set<String> live = new java.util.LinkedHashSet<>(elasticsearch.currentReadIndexes());
+        elasticsearchClient.indices().delete(d -> d.index(target));
+        Method mutation = ElasticsearchProductSearch.class.getDeclaredMethod(
+            "replaceAliasesWithSingleTarget", String.class, Set.class);
+        mutation.setAccessible(true);
+
+        InvocationTargetException thrown = assertThrows(InvocationTargetException.class,
+            () -> mutation.invoke(elasticsearch, target, live));
+
+        assertThat(thrown.getCause()).isInstanceOf(ElasticsearchProductSearch.SearchUnavailableException.class);
+        assertThat(elasticsearch.currentReadIndexes()).containsExactlyElementsOf(live);
     }
 
     @Test
