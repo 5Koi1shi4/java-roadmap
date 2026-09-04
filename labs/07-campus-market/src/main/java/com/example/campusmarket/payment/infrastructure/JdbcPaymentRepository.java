@@ -115,6 +115,15 @@ public class JdbcPaymentRepository {
         return jdbc.update("UPDATE refund_order SET reconcile_owner=?,reconcile_token=?,reconcile_lease_until=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('PROCESSING','UNKNOWN','REQUESTED') AND (reconcile_owner IS NULL OR reconcile_lease_until IS NULL OR reconcile_lease_until<=CURRENT_TIMESTAMP(6))", owner, token, refundId.toString()) == 1;
     }
 
+    public boolean markRefundTerminal(UUID refundId, String expectedReference, String reference, String status,
+                                      long amountFen, String owner, String token) {
+        String predicate = expectedReference == null ? "provider_reference IS NULL AND ? IS NOT NULL" : "provider_reference=?";
+        Object[] args = expectedReference == null
+            ? new Object[]{status, reference, refundId.toString(), reference, amountFen, owner, token}
+            : new Object[]{status, reference, refundId.toString(), expectedReference, amountFen, owner, token};
+        return jdbc.update("UPDATE refund_order SET status=?,provider_reference=COALESCE(?,provider_reference),reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND " + predicate + " AND amount_fen=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN') AND reconcile_owner=? AND reconcile_token=?", args) == 1;
+    }
+
     public boolean claimRefundReconciliation(UUID refundId, String owner, String token) {
         return jdbc.update("UPDATE refund_order SET reconcile_owner=?,reconcile_token=?,reconcile_lease_until=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),next_reconcile_at=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('PROCESSING','UNKNOWN','REQUESTED') AND ((reconcile_owner IS NULL AND (next_reconcile_at IS NULL OR next_reconcile_at<=CURRENT_TIMESTAMP(6))) OR (reconcile_lease_until IS NULL OR reconcile_lease_until<=CURRENT_TIMESTAMP(6)))", owner, token, refundId.toString()) == 1;
     }

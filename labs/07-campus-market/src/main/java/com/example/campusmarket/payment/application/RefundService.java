@@ -147,8 +147,7 @@ public class RefundService {
     }
 
     private void settleTerminal(JdbcPaymentRepository.RefundRecord row, String status, String reference, String owner, String token) {
-        int changed = jdbc.update("UPDATE refund_order SET status=?,provider_reference=COALESCE(?,provider_reference),reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND (provider_reference=? OR (provider_reference IS NULL AND ? IS NOT NULL)) AND amount_fen=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN') AND reconcile_owner=? AND reconcile_token=?", status, reference, row.id().toString(), row.providerReference(), reference, row.amountFen(), owner, token);
-        if (changed == 1) {
+        if (repository.markRefundTerminal(row.id(), row.providerReference(), reference, status, row.amountFen(), owner, token)) {
             boolean settled = "SUCCEEDED".equals(status) ? repository.completeRefund(row.paymentId(), row.amountFen()) : repository.releaseRefund(row.paymentId(), row.amountFen());
             if (!settled) throw new IllegalStateException("退款聚合结转失败，等待重试");
             repository.insertPaymentEvent("REFUND_" + status, row.id(), json(java.util.Map.of("refundId", row.id(), "amountFen", row.amountFen())));
