@@ -39,10 +39,15 @@ public class PaymentService {
     }
 
     public PaymentResult createPayment(UUID orderId, String idempotencyKey) {
+        return createPayment(orderId, idempotencyKey, new byte[0]);
+    }
+
+    public PaymentResult createPayment(UUID orderId, String idempotencyKey, byte[] rawRequest) {
         OrderAmount order = jdbc.query("SELECT total_amount_fen FROM trade_order WHERE id=? AND status='PENDING_PAYMENT'",
             rs -> rs.next() ? new OrderAmount(rs.getLong(1)) : null, orderId.toString());
         if (order == null) throw new IllegalStateException("订单不存在或不可支付");
-        byte[] requestHash = digest(orderId + ":" + order.amountFen() + ":" + idempotencyKey);
+        byte[] requestHash = digest(orderId + ":" + order.amountFen() + ":" + provider + ":CNY:" + idempotencyKey + ":" +
+            java.util.Base64.getEncoder().encodeToString(rawRequest == null ? new byte[0] : rawRequest));
         UUID paymentId = repository.insertPendingPayment(orderId, provider, idempotencyKey, Money.ofFen(order.amountFen()), requestHash);
         JdbcPaymentRepository.PaymentRecord existing = repository.findPayment(paymentId);
         if (existing.requestHash() != null && !MessageDigest.isEqual(existing.requestHash(), requestHash)) {

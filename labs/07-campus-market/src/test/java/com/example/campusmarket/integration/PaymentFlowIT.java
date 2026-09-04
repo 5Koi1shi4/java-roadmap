@@ -175,11 +175,15 @@ class PaymentFlowIT extends SharedContainers {
             .header("Authorization", bearer).header("Idempotency-Key", paymentKey).header("Content-Type", "application/json; charset=UTF-8")
             .POST(HttpRequest.BodyPublishers.ofString("{}", StandardCharsets.UTF_8)).build();
         HttpResponse<byte[]> firstPayment = client.send(paymentRequest, HttpResponse.BodyHandlers.ofByteArray());
-        HttpResponse<byte[]> replayPayment = client.send(HttpRequest.newBuilder(paymentRequest.uri()).header("Authorization", bearer).header("Idempotency-Key", paymentKey).header("Content-Type", "application/json; charset=UTF-8").POST(HttpRequest.BodyPublishers.ofString("{\"extra\":\"中文\"}", StandardCharsets.UTF_8)).build(), HttpResponse.BodyHandlers.ofByteArray());
+        HttpResponse<byte[]> replayPayment = client.send(HttpRequest.newBuilder(paymentRequest.uri()).header("Authorization", bearer).header("Idempotency-Key", paymentKey).header("Content-Type", "application/json; charset=UTF-8").POST(HttpRequest.BodyPublishers.ofString("{}", StandardCharsets.UTF_8)).build(), HttpResponse.BodyHandlers.ofByteArray());
+        HttpResponse<byte[]> conflictPayment = client.send(HttpRequest.newBuilder(paymentRequest.uri()).header("Authorization", bearer).header("Idempotency-Key", paymentKey).header("Content-Type", "application/json; charset=UTF-8").POST(HttpRequest.BodyPublishers.ofString("{\"amountFen\":101}", StandardCharsets.UTF_8)).build(), HttpResponse.BodyHandlers.ofByteArray());
         assertThat(firstPayment.statusCode()).isEqualTo(201);
         assertThat(replayPayment.statusCode()).isEqualTo(firstPayment.statusCode());
         assertThat(replayPayment.body()).containsExactly(firstPayment.body());
         assertThat(replayPayment.headers().firstValue("Content-Type")).isEqualTo(firstPayment.headers().firstValue("Content-Type"));
+        assertThat(conflictPayment.statusCode()).isEqualTo(409);
+        assertThat(new String(conflictPayment.body(), StandardCharsets.UTF_8)).contains("幂等");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM payment_order WHERE order_id=?", Integer.class, order.toString())).isEqualTo(1);
 
         UUID paidPayment = paidPayment(100);
         UUID refundOrder = UUID.fromString(jdbc.queryForObject("SELECT order_id FROM payment_order WHERE id=?", String.class, paidPayment.toString()));

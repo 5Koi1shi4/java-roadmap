@@ -53,9 +53,10 @@ public class PaymentWebhookController {
 
     @PostMapping(path = "/api/orders/{orderId}/payments", consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<byte[]> createPayment(@PathVariable java.util.UUID orderId,
+                                                @RequestBody(required = false) byte[] rawRequest,
                                                 @RequestHeader("Idempotency-Key") String key) {
         try {
-            PaymentService.PaymentResult result = payments.createPayment(orderId, key);
+            PaymentService.PaymentResult result = payments.createPayment(orderId, key, rawRequest);
             return result.responseUtf8() == null ? json(201, "{\"paymentId\":\"" + result.paymentId() + "\",\"providerReference\":\""
                 + result.providerReference() + "\",\"status\":\"" + result.status() + "\"}") : bytes(201, result.responseUtf8());
         } catch (IllegalArgumentException e) { return json(400, "{\"error\":\"支付请求无效\"}"); }
