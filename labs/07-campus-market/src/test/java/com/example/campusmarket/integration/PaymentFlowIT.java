@@ -569,6 +569,21 @@ class PaymentFlowIT extends SharedContainers {
         assertThat(jdbc.queryForObject("SELECT reconcile_token FROM refund_order WHERE id=?", String.class, refund.toString())).isEqualTo("token-a");
     }
 
+    @Test
+    void legacyRefundCreateClaimDoesNotBlockImmediateReconciliation() {
+        UUID payment = paidPayment(100);
+        UUID order = UUID.fromString(jdbc.queryForObject("SELECT order_id FROM payment_order WHERE id=?", String.class, payment.toString()));
+        UUID refund = UUID.randomUUID();
+        jdbc.update("INSERT INTO refund_order (id,order_id,payment_order_id,provider,idempotency_key,source_type,paid_amount_fen,amount_fen,reserved_refund_fen,status,created_at,updated_at) VALUES (?,?,?,?,?,'ORDER',?,?,?,'REQUESTED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            refund.toString(), order.toString(), payment.toString(), "simulated", "legacy-refund-claim-" + refund, 100, 40, 40);
+
+        assertThat(repository.claimRefundRequest(refund)).isTrue();
+        assertThat(jdbc.queryForObject("SELECT create_attempted_at IS NOT NULL FROM refund_order WHERE id=?", Boolean.class, refund.toString())).isTrue();
+        assertThat(jdbc.queryForObject("SELECT reconcile_lease_until FROM refund_order WHERE id=?", java.sql.Timestamp.class, refund.toString())).isNull();
+        assertThat(repository.claimRefundReconciliationDirect(refund, "reconciler", "token-reconcile")).isTrue();
+        assertThat(repository.claimInitialRefundAttempt(refund, "second-create", "token-create")).isFalse();
+    }
+
     private UUID paidPayment(long amountFen) {
         UUID order = UUID.randomUUID();
         UUID payment = UUID.randomUUID();

@@ -287,7 +287,17 @@ public class JdbcPaymentRepository {
     }
 
     public boolean claimRefundRequest(UUID refundId) {
-        return claimInitialRefundAttempt(refundId, "refund-request", UUID.randomUUID().toString());
+        // Task 3 接管 owner/token 前，旧 RefundService.finish 不携带 fencing；不要留下
+        // 30 秒租约阻塞它随后发起的主动对账，但 create_attempted_at 仍是不可逆门闩。
+        return jdbc.update("""
+            UPDATE refund_order
+               SET create_attempted_at=CURRENT_TIMESTAMP(6),
+                   reconcile_owner=NULL, reconcile_token=NULL, reconcile_lease_until=NULL,
+                   next_reconcile_at=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),
+                   updated_at=CURRENT_TIMESTAMP(6)
+             WHERE id=? AND create_attempted_at IS NULL
+               AND provider_reference IS NULL AND status='REQUESTED'
+            """, refundId.toString()) == 1;
     }
 
     public boolean claimInitialRefundAttempt(UUID refundId, String owner, String token) {
