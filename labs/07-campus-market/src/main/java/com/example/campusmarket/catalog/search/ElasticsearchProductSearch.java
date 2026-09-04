@@ -64,10 +64,10 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         this.client = Objects.requireNonNull(client, "Elasticsearch 客户端不能为空");
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.dataSource = Objects.requireNonNull(jdbc.getDataSource(), "JDBC数据源不能为空");
-        this.coordinator = new SearchAliasCoordinator(this.dataSource);
+        this.metrics = Objects.requireNonNull(metrics, "指标注册表不能为空");
+        this.coordinator = new SearchAliasCoordinator(this.dataSource, this.metrics);
         this.cleanupRepository = new SearchIndexCleanupRepository(this.jdbc);
         this.aliasMembersReadHook = Objects.requireNonNull(aliasMembersReadHook, "别名读取 hook 不能为空");
-        this.metrics = Objects.requireNonNull(metrics, "指标注册表不能为空");
     }
 
     @Override

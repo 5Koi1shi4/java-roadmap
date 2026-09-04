@@ -201,6 +201,12 @@ public class SearchIndexCleanupRepository {
         update(connection, "UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL,last_error=NULL,failure_class=NULL WHERE index_name=?", index);
     }
 
+    void arm(Connection connection, String index) {
+        Objects.requireNonNull(connection, "连接不能为空");
+        if (index == null || index.isBlank()) return;
+        update(connection, "UPDATE search_index_cleanup_task SET status='NEW',available_at=CURRENT_TIMESTAMP(6),owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE index_name=? AND status='BUILDING'", index);
+    }
+
     String status(Connection connection, String index) {
         try (PreparedStatement statement = connection.prepareStatement(
             "SELECT status FROM search_index_cleanup_task WHERE index_name=?")) {
@@ -236,7 +242,7 @@ public class SearchIndexCleanupRepository {
 
     public boolean renewBuilding(String index, String owner) {
         if (index == null || index.isBlank()) return false;
-        requireLeaseIdentity(owner, "renew");
+        if (owner == null || owner.isBlank()) throw new IllegalArgumentException("清理租约 owner 不能为空");
         return jdbc.update("UPDATE search_index_cleanup_task SET lease_until=TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)) WHERE index_name=? AND status='BUILDING' AND owner_id=? AND lease_until > CURRENT_TIMESTAMP(6)", index, owner) == 1;
     }
 

@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -189,6 +190,26 @@ class SearchRebuildIT extends SharedContainers {
             });
             gate.release(lease);
             assertThat(elasticsearch.currentReadIndexes()).containsExactly(target);
+        }
+    }
+
+    @Test
+    void reconcilerArmCleanupUsesHeldConnectionWithPoolSizeOne() throws Exception {
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl(MYSQL.getJdbcUrl());
+        config.setUsername(MYSQL.getUsername());
+        config.setPassword(MYSQL.getPassword());
+        config.setMaximumPoolSize(1);
+        try (HikariDataSource oneConnection = new HikariDataSource(config)) {
+            JdbcTemplate oneJdbc = new JdbcTemplate(oneConnection);
+            SearchAliasCoordinator coordinator = new SearchAliasCoordinator(oneConnection);
+            SearchIndexCleanupRepository repository = new SearchIndexCleanupRepository(oneJdbc);
+            SearchRebuildReconciler oneReconciler = new SearchRebuildReconciler(
+                new SearchGateRepository(oneJdbc), coordinator, elasticsearch, repository, new SimpleMeterRegistry());
+            coordinator.execute(Duration.ofSeconds(5), "reconcile", "pool-one-arm", connection -> {
+                invokeReconcilerArm(oneReconciler, connection, "not-present");
+                return null;
+            });
         }
     }
 
@@ -555,6 +576,22 @@ class SearchRebuildIT extends SharedContainers {
                 "assertLease", Connection.class, SearchGateRepository.Lease.class);
             assertion.setAccessible(true);
             assertion.invoke(gate, connection, lease);
+        } catch (InvocationTargetException failure) {
+            Throwable cause = failure.getCause();
+            if (cause instanceof RuntimeException runtime) throw runtime;
+            throw new IllegalStateException(cause);
+        } catch (ReflectiveOperationException failure) {
+            throw new IllegalStateException(failure);
+        }
+    }
+
+    private static void invokeReconcilerArm(SearchRebuildReconciler reconciler,
+                                            Connection connection, String index) {
+        try {
+            Method arm = SearchRebuildReconciler.class.getDeclaredMethod(
+                "armCleanup", Connection.class, String.class);
+            arm.setAccessible(true);
+            arm.invoke(reconciler, connection, index);
         } catch (InvocationTargetException failure) {
             Throwable cause = failure.getCause();
             if (cause instanceof RuntimeException runtime) throw runtime;

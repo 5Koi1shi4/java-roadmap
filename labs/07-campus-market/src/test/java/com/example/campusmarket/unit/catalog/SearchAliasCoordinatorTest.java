@@ -2,6 +2,9 @@ package com.example.campusmarket.unit.catalog;
 
 import com.example.campusmarket.catalog.search.SearchAliasCoordinator;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import org.junit.jupiter.api.Test;
 
 import javax.sql.DataSource;
@@ -55,6 +58,49 @@ class SearchAliasCoordinatorTest {
         assertThat(metrics.get("search.alias.coordination.lock.acquire").timer().count()).isEqualTo(1);
         assertThat(metrics.get("search.alias.coordination.lock.acquire").timer()
             .totalTime(java.util.concurrent.TimeUnit.MILLISECONDS)).isLessThan(1_000);
+    }
+
+    @Test
+    void queryLockRuntimeFailureRetainsOriginalRuntimeException() {
+        IllegalStateException original = new IllegalStateException("driver runtime failure");
+        SearchAliasCoordinator coordinator = new SearchAliasCoordinator(runtimeFailingAcquireDataSource(original));
+        assertThat(assertThrows(IllegalStateException.class,
+            () -> coordinator.execute(Duration.ofSeconds(1), "reconcile", "owner-D", connection -> null)))
+            .isSameAs(original);
+    }
+
+    @Test
+    void acquireLogIncludesOwnerWithoutAddingOwnerMetricTag() {
+        ch.qos.logback.classic.Logger logger = (ch.qos.logback.classic.Logger)
+            org.slf4j.LoggerFactory.getLogger(SearchAliasCoordinator.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.setLevel(Level.DEBUG);
+        logger.addAppender(appender);
+        try {
+            SimpleMeterRegistry metrics = new SimpleMeterRegistry();
+            new SearchAliasCoordinator(dataSource(1), metrics)
+                .execute(Duration.ofSeconds(1), "reconcile", "owner-log", connection -> null);
+            assertThat(appender.list).anySatisfy(event -> assertThat(event.getFormattedMessage()).contains("owner-log"));
+            assertThat(metrics.get("search.alias.coordination.lock.acquire").timer().getId().getTags())
+                .noneMatch(tag -> tag.getKey().equals("owner"));
+        } finally {
+            logger.detachAppender(appender);
+        }
+    }
+
+    private static DataSource runtimeFailingAcquireDataSource(RuntimeException original) {
+        Connection connection = (Connection) Proxy.newProxyInstance(
+            SearchAliasCoordinatorTest.class.getClassLoader(), new Class<?>[]{Connection.class},
+            (proxy, method, args) -> switch (method.getName()) {
+                case "setAutoCommit", "close" -> null;
+                case "prepareStatement" -> throw original;
+                case "isClosed" -> false;
+                default -> defaultValue(method.getReturnType());
+            });
+        return (DataSource) Proxy.newProxyInstance(SearchAliasCoordinatorTest.class.getClassLoader(),
+            new Class<?>[]{DataSource.class},
+            (proxy, method, args) -> method.getName().equals("getConnection") ? connection : defaultValue(method.getReturnType()));
     }
 
     private static DataSource dataSource(int... lockResults) {

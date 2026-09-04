@@ -29,17 +29,23 @@ public final class SearchRebuildReconciler {
 
     public SearchRebuildReconciler(SearchGateRepository gate,
                                    SearchAliasCoordinator coordinator, ElasticsearchProductSearch elasticsearch) {
-        this(gate, coordinator, elasticsearch, new SimpleMeterRegistry());
+        this(gate, coordinator, elasticsearch, elasticsearch.cleanupRepository(), new SimpleMeterRegistry());
+    }
+
+    public SearchRebuildReconciler(SearchGateRepository gate,
+                                   SearchAliasCoordinator coordinator, ElasticsearchProductSearch elasticsearch,
+                                   MeterRegistry metrics) {
+        this(gate, coordinator, elasticsearch, elasticsearch.cleanupRepository(), metrics);
     }
 
     @Autowired
     public SearchRebuildReconciler(SearchGateRepository gate,
                                    SearchAliasCoordinator coordinator, ElasticsearchProductSearch elasticsearch,
-                                   MeterRegistry metrics) {
+                                   SearchIndexCleanupRepository cleanupRepository, MeterRegistry metrics) {
         this.gate = Objects.requireNonNull(gate, "搜索门禁不能为空");
         this.coordinator = Objects.requireNonNull(coordinator, "别名协调器不能为空");
         this.elasticsearch = Objects.requireNonNull(elasticsearch, "Elasticsearch不能为空");
-        this.cleanupRepository = elasticsearch.cleanupRepository();
+        this.cleanupRepository = Objects.requireNonNull(cleanupRepository, "清理仓储不能为空");
         this.metrics = Objects.requireNonNull(metrics, "指标注册表不能为空");
     }
 
@@ -219,7 +225,7 @@ public final class SearchRebuildReconciler {
     }
 
     private void armCleanup(Connection connection, String index) throws SQLException {
-        cleanupRepository.arm(index);
+        cleanupRepository.arm(connection, index);
     }
 
     private static void update(Connection connection, String sql, Object... values) throws SQLException {

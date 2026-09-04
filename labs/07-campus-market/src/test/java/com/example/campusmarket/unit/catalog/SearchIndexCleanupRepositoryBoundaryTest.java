@@ -14,6 +14,7 @@ class SearchIndexCleanupRepositoryBoundaryTest {
     @Test
     void ownsCleanupPersistenceOperations() throws Exception {
         assertThat(find("stage", Connection.class, Set.class, String.class, String.class, String.class)).isNotNull();
+        assertThat(find("arm", Connection.class, String.class)).isNotNull();
         assertThat(find("arm", Connection.class, Set.class, Set.class, String.class, String.class)).isNotNull();
         assertThat(find("recover", Connection.class, Set.class, String.class, String.class)).isNotNull();
         assertThat(find("cancel", Connection.class, String.class)).isNotNull();

@@ -58,11 +58,11 @@ public final class SearchAliasCoordinator {
             try {
                 lockResult = queryLock(connection, timeoutSeconds);
             } catch (Throwable failure) {
-                recordAcquire(operation, System.nanoTime() - waitStarted);
-                throw new SearchCoordinationException(context(operation, owner, "获取搜索别名协调锁失败"), failure);
+                recordAcquire(operation, owner, System.nanoTime() - waitStarted);
+                throw toRuntime(failure, context(operation, owner, "获取搜索别名协调锁失败"));
             }
             long waitedNanos = System.nanoTime() - waitStarted;
-            recordAcquire(operation, waitedNanos);
+            recordAcquire(operation, owner, waitedNanos);
             if (lockResult != 1) {
                 if (lockResult == 0) {
                     metrics.counter("search.alias.coordination.lock.timeout", "lock", LOCK_NAME, "operation", operation).increment();
@@ -146,14 +146,14 @@ public final class SearchAliasCoordinator {
         }
     }
 
-    private void recordAcquire(String operation, long nanos) {
+    private void recordAcquire(String operation, String owner, long nanos) {
         Timer.builder("search.alias.coordination.lock.acquire")
             .description("搜索别名协调锁获取耗时")
             .tags(Tags.of("lock", LOCK_NAME, "operation", operation))
             .register(metrics)
             .record(nanos, TimeUnit.NANOSECONDS);
-        LOGGER.debug("搜索别名协调锁获取完成，lockName={}, operation={}, waitMs={}",
-            LOCK_NAME, operation, TimeUnit.NANOSECONDS.toMillis(nanos));
+        LOGGER.debug("搜索别名协调锁获取完成，lockName={}, operation={}, owner={}, waitMs={}",
+            LOCK_NAME, operation, owner, TimeUnit.NANOSECONDS.toMillis(nanos));
     }
 
     private static String context(String operation, String owner, String message) {
