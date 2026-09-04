@@ -58,7 +58,7 @@ public final class SearchAliasCoordinator {
             try {
                 lockResult = queryLock(connection, timeoutSeconds);
             } catch (Throwable failure) {
-                recordAcquire(operation, waitStarted);
+                recordAcquire(operation, System.nanoTime() - waitStarted);
                 throw new SearchCoordinationException(context(operation, owner, "获取搜索别名协调锁失败"), failure);
             }
             long waitedNanos = System.nanoTime() - waitStarted;

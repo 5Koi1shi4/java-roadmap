@@ -11,13 +11,22 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 
 /** 短事务领取和 owner/token fencing 的清理状态变更。 */
 @Repository
 public class SearchIndexCleanupRepository {
+    private static final String COMPLETE_SQL = """
+        UPDATE search_index_cleanup_task
+        SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL,
+            last_error=NULL,failure_class=NULL
+        WHERE id=? AND status='RUNNING' AND owner_id=? AND claim_token=?
+          AND lease_until > CURRENT_TIMESTAMP(6)
+        """;
     private final JdbcTemplate jdbc;
     private final String owner = "search-cleanup-" + UUID.randomUUID();
 
@@ -74,13 +83,7 @@ public class SearchIndexCleanupRepository {
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public int complete(CleanupClaim claim) {
         Objects.requireNonNull(claim, "清理领取不能为空");
-        return jdbc.update("""
-            UPDATE search_index_cleanup_task
-            SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL,
-                last_error=NULL,failure_class=NULL
-            WHERE id=? AND status='RUNNING' AND owner_id=? AND claim_token=?
-              AND lease_until > CURRENT_TIMESTAMP(6)
-            """, claim.id(), claim.owner(), claim.token());
+        return jdbc.update(COMPLETE_SQL, claim.id(), claim.owner(), claim.token());
     }
 
     @Transactional(propagation = Propagation.REQUIRES_NEW)
@@ -141,13 +144,116 @@ public class SearchIndexCleanupRepository {
 
     /** 外部删除后使用的 owner/token/lease CAS。 */
     int complete(Connection connection, CleanupClaim claim) {
-        return update(connection, """
-            UPDATE search_index_cleanup_task
-            SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL,
-                last_error=NULL,failure_class=NULL
-            WHERE id=? AND status='RUNNING' AND owner_id=? AND claim_token=?
-              AND lease_until > CURRENT_TIMESTAMP(6)
-            """, claim.id(), claim.owner(), claim.token());
+        return update(connection, COMPLETE_SQL, claim.id(), claim.owner(), claim.token());
+    }
+
+    void stage(Connection connection, Set<String> live, String target, String owner, String token) {
+        Objects.requireNonNull(connection, "连接不能为空");
+        Objects.requireNonNull(live, "当前别名成员不能为空");
+        requireLeaseIdentity(owner, token);
+        for (String index : live) {
+            if (index == null || index.isBlank() || index.equals(target) || index.equals("campus-listing-000001")) continue;
+            update(connection, """
+                INSERT INTO search_index_cleanup_task(id,index_name,status,owner_id,claim_token,lease_until,attempt_count,available_at,created_at)
+                VALUES (?,?, 'BUILDING',?,?,TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
+                ON DUPLICATE KEY UPDATE status='BUILDING',owner_id=VALUES(owner_id),claim_token=VALUES(claim_token),
+                  lease_until=VALUES(lease_until),available_at=CURRENT_TIMESTAMP(6)
+                """, UUID.randomUUID().toString(), index, owner, token);
+        }
+    }
+
+    void arm(Connection connection, Set<String> staged, Set<String> stillLive, String owner, String token) {
+        Objects.requireNonNull(connection, "连接不能为空");
+        Objects.requireNonNull(staged, "待清理索引不能为空");
+        Objects.requireNonNull(stillLive, "当前别名成员不能为空");
+        requireLeaseIdentity(owner, token);
+        for (String index : staged) {
+            if (index == null || index.isBlank() || stillLive.contains(index)) continue;
+            update(connection, """
+                UPDATE search_index_cleanup_task SET status='NEW',available_at=CURRENT_TIMESTAMP(6),
+                  owner_id=NULL,claim_token=NULL,lease_until=NULL
+                WHERE index_name=? AND status='BUILDING' AND owner_id=? AND claim_token=?
+                """, index, owner, token);
+        }
+    }
+
+    void recover(Connection connection, Set<String> stillLive, String owner, String token) {
+        Objects.requireNonNull(connection, "连接不能为空");
+        Objects.requireNonNull(stillLive, "当前别名成员不能为空");
+        requireLeaseIdentity(owner, token);
+        Set<String> staged = new LinkedHashSet<>();
+        try (PreparedStatement statement = connection.prepareStatement(
+            "SELECT index_name FROM search_index_cleanup_task WHERE status='BUILDING' AND owner_id=? AND claim_token=?")) {
+            statement.setString(1, owner);
+            statement.setString(2, token);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) staged.add(result.getString(1));
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("读取中断切换清理状态失败", failure);
+        }
+        arm(connection, staged, stillLive, owner, token);
+    }
+
+    void cancel(Connection connection, String index) {
+        Objects.requireNonNull(connection, "连接不能为空");
+        if (index == null || index.isBlank()) return;
+        update(connection, "UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL,last_error=NULL,failure_class=NULL WHERE index_name=?", index);
+    }
+
+    String status(Connection connection, String index) {
+        try (PreparedStatement statement = connection.prepareStatement(
+            "SELECT status FROM search_index_cleanup_task WHERE index_name=?")) {
+            statement.setString(1, index);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? result.getString(1) : null;
+            }
+        } catch (SQLException failure) {
+            throw new IllegalStateException("读取索引清理状态失败", failure);
+        }
+    }
+
+    public void schedule(String index) {
+        if (index == null || index.isBlank() || index.startsWith("campus-listing-000001")) return;
+        jdbc.update("INSERT INTO search_index_cleanup_task(id,index_name,status,attempt_count,available_at,created_at) VALUES (?,?, 'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE status=IF(status='DONE',status,'NEW'),available_at=IF(status='DONE',available_at,CURRENT_TIMESTAMP(6))", UUID.randomUUID().toString(), index);
+    }
+
+    void schedule(Connection connection, String index) {
+        if (index == null || index.isBlank() || index.startsWith("campus-listing-000001")) return;
+        update(connection, """
+            INSERT INTO search_index_cleanup_task(id,index_name,status,attempt_count,available_at,created_at)
+            VALUES (?,?, 'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
+            ON DUPLICATE KEY UPDATE status=IF(status='DONE',status,'NEW'),
+              available_at=IF(status='DONE',available_at,CURRENT_TIMESTAMP(6))
+            """, UUID.randomUUID().toString(), index);
+    }
+
+    public void registerBuilding(String index, String owner, String token) {
+        if (index == null || index.isBlank() || index.startsWith("campus-listing-000001")) return;
+        requireLeaseIdentity(owner, token);
+        jdbc.update("INSERT INTO search_index_cleanup_task(id,index_name,status,owner_id,claim_token,lease_until,attempt_count,available_at,created_at) VALUES (?,?, 'BUILDING',?,?,TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE status='BUILDING',owner_id=VALUES(owner_id),claim_token=VALUES(claim_token),lease_until=VALUES(lease_until)", UUID.randomUUID().toString(), index, owner, token);
+    }
+
+    public boolean renewBuilding(String index, String owner) {
+        if (index == null || index.isBlank()) return false;
+        requireLeaseIdentity(owner, "renew");
+        return jdbc.update("UPDATE search_index_cleanup_task SET lease_until=TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)) WHERE index_name=? AND status='BUILDING' AND owner_id=? AND lease_until > CURRENT_TIMESTAMP(6)", index, owner) == 1;
+    }
+
+    public void arm(String index) {
+        if (index == null || index.isBlank()) return;
+        jdbc.update("UPDATE search_index_cleanup_task SET status='NEW',available_at=CURRENT_TIMESTAMP(6),owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE index_name=? AND status='BUILDING'", index);
+    }
+
+    public void cancel(String index) {
+        if (index == null || index.isBlank()) return;
+        jdbc.update("UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL,last_error=NULL,failure_class=NULL WHERE index_name=?", index);
+    }
+
+    private static void requireLeaseIdentity(String owner, String token) {
+        if (owner == null || owner.isBlank() || token == null || token.isBlank()) {
+            throw new IllegalArgumentException("清理租约身份不能为空");
+        }
     }
 
     private static int update(Connection connection, String sql, Object... values) {

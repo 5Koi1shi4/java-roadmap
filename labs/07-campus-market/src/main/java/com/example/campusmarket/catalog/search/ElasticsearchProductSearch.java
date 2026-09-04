@@ -7,6 +7,8 @@ import co.elastic.clients.elasticsearch._types.query_dsl.Query;
 import co.elastic.clients.elasticsearch._types.mapping.TypeMapping;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
 import co.elastic.clients.elasticsearch.core.search.Hit;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Autowired;
 
@@ -35,23 +37,37 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     private final org.springframework.jdbc.core.JdbcTemplate jdbc;
     private final DataSource dataSource;
     private final SearchAliasCoordinator coordinator;
+    private final SearchIndexCleanupRepository cleanupRepository;
+    private final MeterRegistry metrics;
     private final Consumer<Set<String>> aliasMembersReadHook;
     private volatile boolean initialized;
     private final String cleanupOwner = "search-cleanup-" + UUID.randomUUID();
 
-    @Autowired
     public ElasticsearchProductSearch(ElasticsearchClient client, org.springframework.jdbc.core.JdbcTemplate jdbc) {
-        this(client, jdbc, ignored -> { });
+        this(client, jdbc, ignored -> { }, new SimpleMeterRegistry());
+    }
+
+    @Autowired
+    public ElasticsearchProductSearch(ElasticsearchClient client, org.springframework.jdbc.core.JdbcTemplate jdbc,
+                                      MeterRegistry metrics) {
+        this(client, jdbc, ignored -> { }, metrics);
     }
 
     /** 跨实例互斥锁持有期间、读取 live 别名后且 ES 别名请求前触发的测试接缝。 */
     public ElasticsearchProductSearch(ElasticsearchClient client, org.springframework.jdbc.core.JdbcTemplate jdbc,
                                       Consumer<Set<String>> aliasMembersReadHook) {
+        this(client, jdbc, aliasMembersReadHook, new SimpleMeterRegistry());
+    }
+
+    ElasticsearchProductSearch(ElasticsearchClient client, org.springframework.jdbc.core.JdbcTemplate jdbc,
+                               Consumer<Set<String>> aliasMembersReadHook, MeterRegistry metrics) {
         this.client = Objects.requireNonNull(client, "Elasticsearch 客户端不能为空");
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.dataSource = Objects.requireNonNull(jdbc.getDataSource(), "JDBC数据源不能为空");
         this.coordinator = new SearchAliasCoordinator(this.dataSource);
+        this.cleanupRepository = new SearchIndexCleanupRepository(this.jdbc);
         this.aliasMembersReadHook = Objects.requireNonNull(aliasMembersReadHook, "别名读取 hook 不能为空");
+        this.metrics = Objects.requireNonNull(metrics, "指标注册表不能为空");
     }
 
     @Override
@@ -196,11 +212,7 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
             if (!client.indices().exists(e -> e.index(targetIndex)).value()) {
                 throw new SearchUnavailableException("目标索引不存在，别名切换可重试");
             }
-        } catch (IOException e) {
-            throw new SearchUnavailableException("校验目标索引失败", e);
-        }
-        aliasMembersReadHook.accept(Set.copyOf(live));
-        try {
+            aliasMembersReadHook.accept(Set.copyOf(live));
             client.indices().updateAliases(a -> {
                 for (String index : live) {
                     a.actions(action -> action.remove(r -> r.index(index).alias(READ_ALIAS)));
@@ -210,9 +222,14 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
                 a.actions(action -> action.add(x -> x.index(targetIndex).alias(WRITE_ALIAS).isWriteIndex(true)));
                 return a;
             });
+            metrics.counter("search.alias.mutation.success").increment();
             return new AliasTransition(live);
         } catch (IOException e) {
-            throw new SearchUnavailableException("搜索别名切换失败", e);
+            metrics.counter("search.alias.mutation.failure").increment();
+            throw new SearchUnavailableException("校验或执行搜索别名切换失败", e);
+        } catch (RuntimeException failure) {
+            metrics.counter("search.alias.mutation.failure").increment();
+            throw failure;
         }
     }
 
@@ -221,65 +238,21 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
      * 这样进程在 ES 成功后停止时，协调仍可恢复暂存集合。
      */
     void stageCleanup(Connection connection, Set<String> live, String target, String owner, String token) {
-        Objects.requireNonNull(connection, "连接不能为空");
-        Objects.requireNonNull(live, "当前别名成员不能为空");
-        requireLeaseIdentity(owner, token);
-        for (String index : live) {
-            if (index == null || index.isBlank() || index.equals(target) || index.equals(INITIAL_INDEX)) continue;
-            update(connection, """
-                INSERT INTO search_index_cleanup_task(id,index_name,status,owner_id,claim_token,lease_until,attempt_count,available_at,created_at)
-                VALUES (?,?, 'BUILDING',?,?,TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
-                ON DUPLICATE KEY UPDATE status='BUILDING',owner_id=VALUES(owner_id),claim_token=VALUES(claim_token),
-                  lease_until=VALUES(lease_until),available_at=CURRENT_TIMESTAMP(6)
-                """, UUID.randomUUID().toString(), index, owner, token);
-        }
+        cleanupRepository.stage(connection, live, target, owner, token);
     }
 
     /** 只有别名请求完成后才将暂存成员置为可清理。 */
     void armStagedCleanup(Connection connection, Set<String> staged, Set<String> stillLive, String owner, String token) {
-        Objects.requireNonNull(connection, "连接不能为空");
-        Objects.requireNonNull(staged, "待清理索引不能为空");
-        Objects.requireNonNull(stillLive, "当前别名成员不能为空");
-        requireLeaseIdentity(owner, token);
-        for (String index : staged) {
-            if (index == null || index.isBlank() || stillLive.contains(index)) continue;
-            update(connection, """
-                UPDATE search_index_cleanup_task SET status='NEW',available_at=CURRENT_TIMESTAMP(6),
-                  owner_id=NULL,claim_token=NULL,lease_until=NULL
-                WHERE index_name=? AND status='BUILDING' AND owner_id=? AND claim_token=?
-                """, index, owner, token);
-        }
+        cleanupRepository.arm(connection, staged, stillLive, owner, token);
     }
 
     /** 恢复被中断切换意图暂存的行。 */
     void recoverStagedCleanup(Connection connection, Set<String> stillLive, String owner, String token) {
-        Objects.requireNonNull(connection, "连接不能为空");
-        Objects.requireNonNull(stillLive, "当前别名成员不能为空");
-        requireLeaseIdentity(owner, token);
-        Set<String> staged = new LinkedHashSet<>();
-        try (PreparedStatement statement = connection.prepareStatement(
-            "SELECT index_name FROM search_index_cleanup_task WHERE status='BUILDING' AND owner_id=? AND claim_token=?")) {
-            statement.setString(1, owner);
-            statement.setString(2, token);
-            try (ResultSet result = statement.executeQuery()) {
-                while (result.next()) staged.add(result.getString(1));
-            }
-        } catch (SQLException failure) {
-            throw new IllegalStateException("读取中断切换清理状态失败", failure);
-        }
-        armStagedCleanup(connection, staged, stillLive, owner, token);
+        cleanupRepository.recover(connection, stillLive, owner, token);
     }
 
     void cancelCleanup(Connection connection, String index) {
-        Objects.requireNonNull(connection, "连接不能为空");
-        if (index == null || index.isBlank()) return;
-        update(connection, "UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL,last_error=NULL,failure_class=NULL WHERE index_name=?", index);
-    }
-
-    private static void requireLeaseIdentity(String owner, String token) {
-        if (owner == null || owner.isBlank() || token == null || token.isBlank()) {
-            throw new IllegalArgumentException("清理租约身份不能为空");
-        }
+        cleanupRepository.cancel(connection, index);
     }
 
     void assertSwitchingIntent(Connection connection, String target, String owner, String token, long generation) {
@@ -385,8 +358,7 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     }
 
     public void scheduleCleanup(String index) {
-        if (index == null || index.isBlank() || index.startsWith("campus-listing-000001")) return;
-        jdbc.update("INSERT INTO search_index_cleanup_task(id,index_name,status,attempt_count,available_at,created_at) VALUES (?,?, 'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE status=IF(status='DONE',status,'NEW'),available_at=IF(status='DONE',available_at,CURRENT_TIMESTAMP(6))", UUID.randomUUID().toString(), index);
+        cleanupRepository.schedule(index);
     }
 
     public void recordRebuildIntent(String target, String previous) {
@@ -437,25 +409,21 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
 
     /** 在索引可能仍 live 或仍在填充时登记索引。 */
     public void registerRebuildTarget(String index) {
-        if (index == null || index.isBlank() || index.startsWith("campus-listing-000001")) return;
-        jdbc.update("INSERT INTO search_index_cleanup_task(id,index_name,status,owner_id,claim_token,lease_until,attempt_count,available_at,created_at) VALUES (?,?, 'BUILDING',?,?,TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE status='BUILDING',owner_id=VALUES(owner_id),claim_token=VALUES(claim_token),lease_until=VALUES(lease_until)", UUID.randomUUID().toString(), index, cleanupOwner, UUID.randomUUID().toString());
+        cleanupRepository.registerBuilding(index, cleanupOwner, UUID.randomUUID().toString());
     }
 
     public boolean renewRebuildTarget(String index) {
-        if (index == null || index.isBlank()) return false;
-        return jdbc.update("UPDATE search_index_cleanup_task SET lease_until=TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)) WHERE index_name=? AND status='BUILDING' AND owner_id=? AND lease_until > CURRENT_TIMESTAMP(6)", index, cleanupOwner) == 1;
+        return cleanupRepository.renewBuilding(index, cleanupOwner);
     }
 
     /** 让失败或无引用索引进入清理 worker 的候选范围。 */
     public void armCleanup(String index) {
-        if (index == null || index.isBlank()) return;
-        jdbc.update("UPDATE search_index_cleanup_task SET status='NEW',available_at=CURRENT_TIMESTAMP(6),owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE index_name=? AND status='BUILDING'", index);
+        cleanupRepository.arm(index);
     }
 
     /** 在清理 worker 可见前，将受保护的 BUILDING target 标记为 live。 */
     public void cancelCleanup(String index) {
-        if (index == null || index.isBlank()) return;
-        jdbc.update("UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL,last_error=NULL,failure_class=NULL WHERE index_name=?", index);
+        cleanupRepository.cancel(index);
     }
 
     private static void update(Connection connection, String sql, Object... values) {
@@ -465,6 +433,10 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         } catch (SQLException failure) {
             throw new IllegalStateException("更新索引清理状态失败", failure);
         }
+    }
+
+    SearchIndexCleanupRepository cleanupRepository() {
+        return cleanupRepository;
     }
 
     /** 作为 ES 原语删除索引；所有权和 fencing 由 worker 负责。 */

@@ -44,6 +44,19 @@ class SearchAliasCoordinatorTest {
         assertThat(metrics.get("search.alias.coordination.lock.release.failure").counter().count()).isEqualTo(1);
     }
 
+    @Test
+    void lockAcquireFailureMeasuresElapsedDurationInsteadOfAbsoluteNanoTime() {
+        SimpleMeterRegistry metrics = new SimpleMeterRegistry();
+        SearchAliasCoordinator coordinator = new SearchAliasCoordinator(failingAcquireDataSource(), metrics);
+
+        assertThrows(SearchAliasCoordinator.SearchCoordinationException.class,
+            () -> coordinator.execute(Duration.ofSeconds(1), "reconcile", "owner-C", connection -> null));
+
+        assertThat(metrics.get("search.alias.coordination.lock.acquire").timer().count()).isEqualTo(1);
+        assertThat(metrics.get("search.alias.coordination.lock.acquire").timer()
+            .totalTime(java.util.concurrent.TimeUnit.MILLISECONDS)).isLessThan(1_000);
+    }
+
     private static DataSource dataSource(int... lockResults) {
         java.util.concurrent.atomic.AtomicInteger statementNumber = new java.util.concurrent.atomic.AtomicInteger();
         Connection connection = (Connection) Proxy.newProxyInstance(
@@ -51,6 +64,20 @@ class SearchAliasCoordinatorTest {
             (proxy, method, args) -> switch (method.getName()) {
                 case "setAutoCommit", "close" -> null;
                 case "prepareStatement" -> statement(lockResults[Math.min(statementNumber.getAndIncrement(), lockResults.length - 1)]);
+                case "isClosed" -> false;
+                default -> defaultValue(method.getReturnType());
+            });
+        return (DataSource) Proxy.newProxyInstance(
+            SearchAliasCoordinatorTest.class.getClassLoader(), new Class<?>[]{DataSource.class},
+            (proxy, method, args) -> method.getName().equals("getConnection") ? connection : defaultValue(method.getReturnType()));
+    }
+
+    private static DataSource failingAcquireDataSource() {
+        Connection connection = (Connection) Proxy.newProxyInstance(
+            SearchAliasCoordinatorTest.class.getClassLoader(), new Class<?>[]{Connection.class},
+            (proxy, method, args) -> switch (method.getName()) {
+                case "setAutoCommit", "close" -> null;
+                case "prepareStatement" -> throw new java.sql.SQLException("named lock unavailable");
                 case "isClosed" -> false;
                 default -> defaultValue(method.getReturnType());
             });

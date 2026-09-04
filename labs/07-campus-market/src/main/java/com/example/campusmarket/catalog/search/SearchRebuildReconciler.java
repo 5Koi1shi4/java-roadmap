@@ -2,6 +2,8 @@ package com.example.campusmarket.catalog.search;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -21,14 +23,24 @@ public final class SearchRebuildReconciler {
     private final SearchGateRepository gate;
     private final SearchAliasCoordinator coordinator;
     private final ElasticsearchProductSearch elasticsearch;
+    private final SearchIndexCleanupRepository cleanupRepository;
+    private final MeterRegistry metrics;
     private final String owner = "search-reconcile-" + UUID.randomUUID();
+
+    public SearchRebuildReconciler(SearchGateRepository gate,
+                                   SearchAliasCoordinator coordinator, ElasticsearchProductSearch elasticsearch) {
+        this(gate, coordinator, elasticsearch, new SimpleMeterRegistry());
+    }
 
     @Autowired
     public SearchRebuildReconciler(SearchGateRepository gate,
-                                   SearchAliasCoordinator coordinator, ElasticsearchProductSearch elasticsearch) {
+                                   SearchAliasCoordinator coordinator, ElasticsearchProductSearch elasticsearch,
+                                   MeterRegistry metrics) {
         this.gate = Objects.requireNonNull(gate, "搜索门禁不能为空");
         this.coordinator = Objects.requireNonNull(coordinator, "别名协调器不能为空");
         this.elasticsearch = Objects.requireNonNull(elasticsearch, "Elasticsearch不能为空");
+        this.cleanupRepository = elasticsearch.cleanupRepository();
+        this.metrics = Objects.requireNonNull(metrics, "指标注册表不能为空");
     }
 
     public ReconcileResult runOnce() {
@@ -41,8 +53,14 @@ public final class SearchRebuildReconciler {
         return coordinator.execute(COORDINATION_TIMEOUT, "reconcile", owner, connection -> {
             SearchGateRepository.GateState state = gate.readState(connection);
             afterGateRead.run();
-            if (!state.isOpen()) return ReconcileResult.SKIPPED_GATE;
-            if (hasLiveSwitching(connection)) return ReconcileResult.SKIPPED_SWITCHING;
+            if (!state.isOpen()) {
+                metrics.counter("search.alias.reconciliation.skip", "reason", "gate").increment();
+                return ReconcileResult.SKIPPED_GATE;
+            }
+            if (hasLiveSwitching(connection)) {
+                metrics.counter("search.alias.reconciliation.skip", "reason", "active_intent").increment();
+                return ReconcileResult.SKIPPED_SWITCHING;
+            }
             elasticsearch.ensureInitializedForAliasRead(connection);
 
             Set<String> live = elasticsearch.readAllAliasMembers();
@@ -180,10 +198,7 @@ public final class SearchRebuildReconciler {
     }
 
     private String taskStatus(Connection connection, String index) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("SELECT status FROM search_index_cleanup_task WHERE index_name=?")) {
-            statement.setString(1, index);
-            try (ResultSet result = statement.executeQuery()) { return result.next() ? result.getString(1) : null; }
-        }
+        return cleanupRepository.status(connection, index);
     }
 
     private void markReconciled(Connection connection, String target, String token) throws SQLException {
@@ -196,21 +211,15 @@ public final class SearchRebuildReconciler {
     }
 
     private void cancelCleanup(Connection connection, String index) throws SQLException {
-        update(connection, "UPDATE search_index_cleanup_task SET status='DONE',owner_id=NULL,claim_token=NULL,lease_until=NULL,last_error=NULL,failure_class=NULL WHERE index_name=?", index);
+        cleanupRepository.cancel(connection, index);
     }
 
     private void scheduleCleanup(Connection connection, String index) throws SQLException {
-        if (index == null || index.isBlank() || index.startsWith("campus-listing-000001")) return;
-        update(connection, """
-            INSERT INTO search_index_cleanup_task(id,index_name,status,attempt_count,available_at,created_at)
-            VALUES (?,?, 'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
-            ON DUPLICATE KEY UPDATE status=IF(status='DONE',status,'NEW'),
-              available_at=IF(status='DONE',available_at,CURRENT_TIMESTAMP(6))
-            """, UUID.randomUUID().toString(), index);
+        cleanupRepository.schedule(connection, index);
     }
 
     private void armCleanup(Connection connection, String index) throws SQLException {
-        update(connection, "UPDATE search_index_cleanup_task SET status='NEW',available_at=CURRENT_TIMESTAMP(6),owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE index_name=? AND status='BUILDING'", index);
+        cleanupRepository.arm(index);
     }
 
     private static void update(Connection connection, String sql, Object... values) throws SQLException {
