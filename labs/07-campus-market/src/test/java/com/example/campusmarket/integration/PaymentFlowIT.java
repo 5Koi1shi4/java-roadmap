@@ -240,7 +240,8 @@ class PaymentFlowIT extends SharedContainers {
             .header("Authorization", bearer).header("Idempotency-Key", "missing-body-" + order).header("Content-Type", "application/json; charset=UTF-8")
             .POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofByteArray());
         assertThat(missing.statusCode()).isEqualTo(400);
-        assertThat(missing.headers().firstValue("Content-Type")).contains("charset=UTF-8");
+        String missingContentType = missing.headers().firstValue("Content-Type").orElseThrow();
+        assertThat(missingContentType).contains("application/json").containsIgnoringCase("charset=UTF-8");
         HttpResponse<byte[]> blank = client.send(HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + port + "/api/orders/" + order + "/payments"))
             .header("Authorization", bearer).header("Idempotency-Key", "   ").header("Content-Type", "application/json; charset=UTF-8")
             .POST(HttpRequest.BodyPublishers.ofString("{}", StandardCharsets.UTF_8)).build(), HttpResponse.BodyHandlers.ofByteArray());
