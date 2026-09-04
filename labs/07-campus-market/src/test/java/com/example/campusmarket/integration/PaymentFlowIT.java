@@ -5,6 +5,7 @@ import com.example.campusmarket.payment.application.PaymentGateway;
 import com.example.campusmarket.payment.application.PaymentService;
 import com.example.campusmarket.payment.application.RefundService;
 import com.example.campusmarket.payment.infrastructure.JdbcPaymentRepository;
+import com.example.campusmarket.payment.infrastructure.SimulatedPaymentProviderController;
 import com.example.campusmarket.payment.application.PaymentReconciliationScheduler;
 import com.example.campusmarket.identity.application.AuthenticatedUser;
 import com.example.campusmarket.identity.infrastructure.JwtService;
@@ -44,6 +45,7 @@ class PaymentFlowIT extends SharedContainers {
     @Autowired private JdbcPaymentRepository repository;
     @Autowired private PaymentReconciliationScheduler reconciliation;
     @Autowired private JwtService jwtService;
+    @Autowired private SimulatedPaymentProviderController provider;
 
     @Test
     void paymentCallbackMovesPendingOrderToAwaitingHandoffOnlyOnce() throws Exception {
@@ -98,6 +100,7 @@ class PaymentFlowIT extends SharedContainers {
 
     @Test
     void sameRefundIdempotencyKeyConcurrentlyClaimsOneReservationAndOneProviderRequest() throws Exception {
+        provider.resetRequestCountersForTest();
         UUID payment = paidPayment(100);
         UUID order = UUID.fromString(jdbc.queryForObject("SELECT order_id FROM payment_order WHERE id=?", String.class, payment.toString()));
         jdbc.update("UPDATE payment_order SET provider_reference=? WHERE id=?", "sim-pay-paid-" + payment, payment.toString());
@@ -125,6 +128,7 @@ class PaymentFlowIT extends SharedContainers {
         executor.shutdownNow();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=? AND idempotency_key=?", Integer.class, order.toString(), key)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT reserved_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(30L);
+        assertThat(provider.refundCreateRequestCountForTest()).isEqualTo(1);
     }
 
     @Test
@@ -193,6 +197,127 @@ class PaymentFlowIT extends SharedContainers {
         reconciliation.runOnce(20);
         assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, payment.toString())).isEqualTo("UNKNOWN");
         assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("PENDING_PAYMENT");
+    }
+
+    @Test
+    void refundReconciliationWrongReferenceOrAmountDoesNotAdvanceFunds() throws Exception {
+        UUID payment = paidPayment(100);
+        UUID order = UUID.fromString(jdbc.queryForObject("SELECT order_id FROM payment_order WHERE id=?", String.class, payment.toString()));
+        jdbc.update("UPDATE payment_order SET provider_reference=? WHERE id=?", "sim-pay-refund-mismatch-" + payment, payment.toString());
+        RefundService.RefundResult requested = refunds.requestRefund(order, "refund-mismatch-" + payment, com.example.campusmarket.shared.Money.ofFen(30));
+        String originalReference = requested.providerReference();
+
+        jdbc.update("UPDATE refund_order SET provider_reference='provider-reference-does-not-exist',next_reconcile_at=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),reconcile_lease_until=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE id=?", requested.refundId().toString());
+        reconciliation.runOnce(20);
+        assertThat(jdbc.queryForObject("SELECT status FROM refund_order WHERE id=?", String.class, requested.refundId().toString())).isEqualTo("PROCESSING");
+        assertThat(jdbc.queryForObject("SELECT reserved_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(30L);
+
+        jdbc.update("UPDATE refund_order SET provider_reference=?,next_reconcile_at=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),reconcile_lease_until=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE id=?", originalReference, requested.refundId().toString());
+        // The provider record is deliberately changed to a different amount via a second key.
+        String otherKey = "refund-other-" + payment;
+        new com.example.campusmarket.payment.infrastructure.SimulatedPaymentGateway(HttpClient.newHttpClient(), new com.fasterxml.jackson.databind.ObjectMapper(),
+            "simulated", "http://localhost:" + port + "/simulated-provider", "local-only-payment-secret-change-me")
+            .requestRefund(new PaymentGateway.CreateRefundRequest(order, "sim-pay-refund-mismatch-" + payment, com.example.campusmarket.shared.Money.ofFen(40), otherKey));
+        String otherReference = "sim-refund-" + UUID.nameUUIDFromBytes(otherKey.getBytes(StandardCharsets.UTF_8));
+        jdbc.update("UPDATE refund_order SET provider_reference=?,next_reconcile_at=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),reconcile_lease_until=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE id=?", otherReference, requested.refundId().toString());
+        reconciliation.runOnce(20);
+        assertThat(jdbc.queryForObject("SELECT status FROM refund_order WHERE id=?", String.class, requested.refundId().toString())).isEqualTo("PROCESSING");
+        assertThat(jdbc.queryForObject("SELECT successful_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(0L);
+        assertThat(jdbc.queryForObject("SELECT reserved_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(30L);
+    }
+
+    @Test
+    void immediateProviderSuccessAndFailureSettlePaymentAndOrderAtomically() {
+        provider.setNextPaymentStatusForTest("SUCCEEDED");
+        UUID successOrder = pendingOrder();
+        PaymentService.PaymentResult success = payments.createPayment(successOrder, "immediate-success-" + successOrder, "{}".getBytes(StandardCharsets.UTF_8));
+        assertThat(success.status()).isEqualTo("SUCCEEDED");
+        assertThat(jdbc.queryForObject("SELECT paid_amount_fen FROM payment_order WHERE id=?", Long.class, success.paymentId().toString())).isEqualTo(100L);
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, successOrder.toString())).isEqualTo("AWAITING_HANDOFF");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='PAYMENT_SUCCEEDED' AND aggregate_id=?", Integer.class, success.paymentId().toString())).isEqualTo(1);
+
+        provider.setNextPaymentStatusForTest("FAILED");
+        UUID failedOrder = pendingOrder();
+        PaymentService.PaymentResult failed = payments.createPayment(failedOrder, "immediate-failed-" + failedOrder, "{}".getBytes(StandardCharsets.UTF_8));
+        assertThat(failed.status()).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT paid_amount_fen FROM payment_order WHERE id=?", Long.class, failed.paymentId().toString())).isEqualTo(0L);
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, failedOrder.toString())).isEqualTo("PENDING_PAYMENT");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='PAYMENT_FAILED' AND aggregate_id=?", Integer.class, failed.paymentId().toString())).isEqualTo(1);
+    }
+
+    @Test
+    void specialJsonEscapesArePartOfPaymentRequestFingerprint() throws Exception {
+        UUID order = pendingOrder();
+        UUID userId = UUID.fromString(jdbc.queryForObject("SELECT buyer_id FROM trade_order WHERE id=?", String.class, order.toString()));
+        String bearer = "Bearer " + jwtService.issue(new AuthenticatedUser(userId, Set.of("ROLE_USER")));
+        String key = "special-json-" + order;
+        String firstBody = "{\"note\":\"引号\\\" 反斜杠\\\\ 雪☃\"}";
+        String escapedBody = "{\"note\":\"引号\\\" 反斜杠\\\\ 雪\\u2603\"}";
+        HttpClient client = HttpClient.newHttpClient();
+        java.net.URI uri = java.net.URI.create("http://localhost:" + port + "/api/orders/" + order + "/payments");
+        HttpResponse<byte[]> first = client.send(HttpRequest.newBuilder(uri).header("Authorization", bearer).header("Idempotency-Key", key)
+            .header("Content-Type", "application/json; charset=UTF-8").POST(HttpRequest.BodyPublishers.ofString(firstBody, StandardCharsets.UTF_8)).build(), HttpResponse.BodyHandlers.ofByteArray());
+        HttpResponse<byte[]> replay = client.send(HttpRequest.newBuilder(uri).header("Authorization", bearer).header("Idempotency-Key", key)
+            .header("Content-Type", "application/json; charset=UTF-8").POST(HttpRequest.BodyPublishers.ofString(firstBody, StandardCharsets.UTF_8)).build(), HttpResponse.BodyHandlers.ofByteArray());
+        HttpResponse<byte[]> conflict = client.send(HttpRequest.newBuilder(uri).header("Authorization", bearer).header("Idempotency-Key", key)
+            .header("Content-Type", "application/json; charset=UTF-8").POST(HttpRequest.BodyPublishers.ofString(escapedBody, StandardCharsets.UTF_8)).build(), HttpResponse.BodyHandlers.ofByteArray());
+        assertThat(first.statusCode()).isEqualTo(201);
+        assertThat(replay.statusCode()).isEqualTo(first.statusCode());
+        assertThat(replay.body()).containsExactly(first.body());
+        assertThat(conflict.statusCode()).isEqualTo(409);
+        assertThat(new String(conflict.body(), StandardCharsets.UTF_8)).contains("幂等");
+    }
+
+    @Test
+    void concurrentPaymentIdempotencyPerformsOneRealProviderRequest() throws Exception {
+        provider.resetRequestCountersForTest();
+        UUID order = pendingOrder();
+        String key = "payment-count-" + order;
+        int workers = 8;
+        ExecutorService executor = Executors.newFixedThreadPool(workers);
+        CountDownLatch ready = new CountDownLatch(workers);
+        CountDownLatch start = new CountDownLatch(1);
+        List<java.util.concurrent.Future<PaymentService.PaymentResult>> futures = new ArrayList<>();
+        for (int i = 0; i < workers; i++) futures.add(executor.submit(() -> {
+            ready.countDown(); start.await(5, TimeUnit.SECONDS);
+            return payments.createPayment(order, key, "{}".getBytes(StandardCharsets.UTF_8));
+        }));
+        assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+        start.countDown();
+        for (var future : futures) assertThat(future.get(15, TimeUnit.SECONDS).paymentId()).isNotNull();
+        executor.shutdownNow();
+        assertThat(provider.paymentCreateRequestCountForTest()).isEqualTo(1);
+    }
+
+    @Test
+    void initialPaymentRequestCannotOverwriteSchedulerTerminalResponseAfterLeaseHandoff() throws Exception {
+        provider.resetRequestCountersForTest();
+        UUID order = pendingOrder();
+        String key = "payment-race-" + order;
+        var gateway = new com.example.campusmarket.payment.infrastructure.SimulatedPaymentGateway(HttpClient.newHttpClient(), new com.fasterxml.jackson.databind.ObjectMapper(),
+            "simulated", "http://localhost:" + port + "/simulated-provider", "local-only-payment-secret-change-me");
+        gateway.createPayment(new PaymentGateway.CreatePaymentRequest(order, com.example.campusmarket.shared.Money.ofFen(100), key));
+        provider.blockNextPaymentCreateForTest();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        var future = executor.submit(() -> payments.createPayment(order, key, "{}".getBytes(StandardCharsets.UTF_8)));
+        try {
+            assertThat(provider.awaitPaymentCreateEnteredForTest(10, TimeUnit.SECONDS)).isTrue();
+            String paymentId = jdbc.queryForObject("SELECT id FROM payment_order WHERE order_id=?", String.class, order.toString());
+            jdbc.update("UPDATE payment_order SET next_reconcile_at=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),reconcile_lease_until=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE id=?", paymentId);
+            String reference = "sim-pay-" + UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8));
+            client().send(HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + port + "/simulated-provider/payments/" + reference + "/SUCCEEDED"))
+                .POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofByteArray());
+            assertThat(reconciliation.runOnce(20)).isGreaterThanOrEqualTo(1);
+            byte[] terminal = jdbc.queryForObject("SELECT response_utf8 FROM payment_order WHERE id=?", (rs, rowNum) -> rs.next() ? rs.getBytes(1) : null, paymentId);
+            assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, paymentId)).isEqualTo("SUCCEEDED");
+            provider.releaseBlockedPaymentCreateForTest();
+            PaymentService.PaymentResult late = future.get(15, TimeUnit.SECONDS);
+            assertThat(late.status()).isEqualTo("SUCCEEDED");
+            assertThat((byte[]) jdbc.queryForObject("SELECT response_utf8 FROM payment_order WHERE id=?", (rs, rowNum) -> rs.next() ? rs.getBytes(1) : null, paymentId)).containsExactly(terminal);
+        } finally {
+            provider.releaseBlockedPaymentCreateForTest();
+            executor.shutdownNow();
+        }
     }
 
     @Test
@@ -368,6 +493,22 @@ class PaymentFlowIT extends SharedContainers {
         jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,status,created_at,updated_at) VALUES (?,?,?,?,?,?,'SUCCEEDED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
             payment.toString(), order.toString(), "simulated", "paid-" + payment, amountFen, amountFen);
         return payment;
+    }
+
+    private UUID pendingOrder() {
+        UUID order = UUID.randomUUID();
+        UUID seller = user();
+        UUID buyer = user();
+        UUID listing = UUID.randomUUID();
+        jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,?,100,0,'SOLD_OUT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            listing.toString(), seller.toString(), "教材", "描述", "教材");
+        jdbc.update("INSERT INTO trade_order (id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,paid_amount_fen,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,100,1,100,0,'PENDING_PAYMENT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            order.toString(), buyer.toString(), seller.toString(), listing.toString(), "教材", "描述");
+        return order;
+    }
+
+    private HttpClient client() {
+        return HttpClient.newHttpClient();
     }
 
     private UUID user() {

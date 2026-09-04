@@ -56,7 +56,9 @@ public class PaymentService {
         if (existing.responseUtf8() != null && ("SUCCEEDED".equals(existing.status()) || "FAILED".equals(existing.status())))
             return new PaymentResult(paymentId, existing.providerReference(), existing.status(), existing.responseUtf8());
         if (existing.providerReference() != null) return new PaymentResult(paymentId, existing.providerReference(), existing.status(), existing.responseUtf8());
-        if (!repository.claimPaymentRequest(paymentId)) {
+        String owner = "payment-request-" + UUID.randomUUID();
+        String token = UUID.randomUUID().toString();
+        if (!repository.claimPaymentRequest(paymentId, owner, token)) {
             JdbcPaymentRepository.PaymentRecord claimed = repository.findPayment(paymentId);
             return new PaymentResult(paymentId, claimed.providerReference(), claimed.status(), claimed.responseUtf8());
         }
@@ -64,14 +66,26 @@ public class PaymentService {
             PaymentGateway.PaymentCreated created = gateway.createPayment(new PaymentGateway.CreatePaymentRequest(orderId,
                 Money.ofFen(order.amountFen()), idempotencyKey));
             if (created.status().amountFen() != order.amountFen()) throw new IllegalStateException("支付提供方金额不匹配");
-            repository.bindProviderPayment(paymentId, created.providerReference(), created.status().status());
             byte[] response = response(paymentId, created.providerReference(), created.status().status().name());
-            repository.savePaymentResponse(paymentId, response);
+            boolean committed = transactions.execute(ignored -> {
+                if (!repository.bindProviderPayment(paymentId, created.providerReference(), created.status().status(), owner, token)) return false;
+                if (created.status().status() == PaymentGateway.PaymentStatus.Status.SUCCEEDED) {
+                    advanceOrderAfterSuccess(paymentId, orderId);
+                    repository.insertPaymentEvent("PAYMENT_SUCCEEDED", paymentId,
+                        json(java.util.Map.of("paymentId", paymentId, "orderId", orderId, "amountFen", created.status().amountFen())));
+                } else if (created.status().status() == PaymentGateway.PaymentStatus.Status.FAILED) {
+                    repository.insertPaymentEvent("PAYMENT_FAILED", paymentId, json(java.util.Map.of("paymentId", paymentId)));
+                }
+                if (!repository.savePaymentResponseAndRelease(paymentId, response, owner, token))
+                    throw new IllegalStateException("支付响应落库 CAS 失败，等待重试");
+                return true;
+            });
+            if (!committed) return queryPayment(paymentId);
             return new PaymentResult(paymentId, created.providerReference(), created.status().status().name(), response);
         } catch (RuntimeException unavailable) {
-            repository.markPaymentUnknown(paymentId);
+            if (!repository.markPaymentUnknown(paymentId, owner, token)) return queryPayment(paymentId);
             byte[] response = response(paymentId, null, "UNKNOWN");
-            repository.savePaymentResponse(paymentId, response);
+            if (!repository.savePaymentResponseAndRelease(paymentId, response, owner, token)) return queryPayment(paymentId);
             return new PaymentResult(paymentId, null, "UNKNOWN", response);
         }
     }
@@ -99,7 +113,7 @@ public class PaymentService {
         if (status.status() == PaymentGateway.PaymentStatus.Status.SUCCEEDED)
             transactions().execute(ignored -> { if (repository.markPaymentSucceeded(paymentId, row.providerReference(), status.providerReference(), status.amountFen(), owner, token)) {
                 repository.savePaymentResponse(paymentId, response(paymentId, status.providerReference(), "SUCCEEDED"));
-                jdbc.update("UPDATE trade_order o JOIN payment_order p ON p.order_id=o.id SET o.paid_amount_fen=p.paid_amount_fen,o.status='AWAITING_HANDOFF',o.updated_at=CURRENT_TIMESTAMP(6) WHERE p.id=? AND o.status='PENDING_PAYMENT'", row.id().toString());
+                advanceOrderAfterSuccess(paymentId, row.orderId());
                 repository.insertPaymentEvent("PAYMENT_SUCCEEDED", row.id(), json(java.util.Map.of("paymentId", row.id(), "orderId", row.orderId(), "amountFen", status.amountFen()))); }
                 return null; });
         else if (status.status() == PaymentGateway.PaymentStatus.Status.FAILED)
@@ -113,6 +127,11 @@ public class PaymentService {
     private TransactionTemplate transactions() {
         if (transactions == null) throw new IllegalStateException("对账事务管理器未装配");
         return transactions;
+    }
+
+    private void advanceOrderAfterSuccess(UUID paymentId, UUID orderId) {
+        jdbc.update("UPDATE trade_order o JOIN payment_order p ON p.order_id=o.id SET o.paid_amount_fen=p.paid_amount_fen,o.status='AWAITING_HANDOFF',o.updated_at=CURRENT_TIMESTAMP(6) WHERE p.id=? AND o.id=? AND o.status='PENDING_PAYMENT'",
+            paymentId.toString(), orderId.toString());
     }
 
     @Transactional

@@ -71,6 +71,17 @@ public class JdbcPaymentRepository {
             reference, paid, status.name(), paymentId.toString()) == 1;
     }
 
+    /** 仅允许仍持有首次请求租约的 owner 绑定 provider 结果；过期 owner 即使迟到也不得落库。 */
+    public boolean bindProviderPayment(UUID paymentId, String reference, PaymentGateway.PaymentStatus.Status status,
+                                       String owner, String token) {
+        long paid = status == PaymentGateway.PaymentStatus.Status.SUCCEEDED
+            ? jdbc.queryForObject("SELECT amount_fen FROM payment_order WHERE id=?", Long.class, paymentId.toString()) : 0L;
+        return jdbc.update("UPDATE payment_order SET provider_reference=?,paid_amount_fen=?,status=?,updated_at=CURRENT_TIMESTAMP(6) " +
+                "WHERE id=? AND provider_reference IS NULL AND status IN ('PENDING','CREATED','UNKNOWN') " +
+                "AND reconcile_owner=? AND reconcile_token=? AND reconcile_lease_until>CURRENT_TIMESTAMP(6)",
+            reference, paid, status.name(), paymentId.toString(), owner, token) == 1;
+    }
+
     public boolean markPaymentSucceededByReference(String provider, String reference, long amountFen) {
         return jdbc.update("UPDATE payment_order SET paid_amount_fen=amount_fen,status='SUCCEEDED',updated_at=CURRENT_TIMESTAMP(6) WHERE provider=? AND provider_reference=? AND status IN ('PENDING','CREATED') AND amount_fen=?",
             provider, reference, amountFen) == 1;
@@ -80,9 +91,26 @@ public class JdbcPaymentRepository {
         jdbc.update("UPDATE payment_order SET response_utf8=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", responseUtf8, paymentId.toString());
     }
 
+    /** 绑定 owner/token 并释放租约；终态已被新 owner 接管时条件更新为 0。 */
+    public boolean savePaymentResponseAndRelease(UUID paymentId, byte[] responseUtf8, String owner, String token) {
+        return jdbc.update("UPDATE payment_order SET response_utf8=?,reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL," +
+                "next_reconcile_at=CASE WHEN status='UNKNOWN' THEN DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 30 SECOND) ELSE NULL END," +
+                "updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND reconcile_owner=? AND reconcile_token=? AND reconcile_lease_until>CURRENT_TIMESTAMP(6)",
+            responseUtf8, paymentId.toString(), owner, token) == 1;
+    }
+
     /** 为首次 provider IO 建立短时租约，应用并发请求只有一个 owner。 */
     public boolean claimPaymentRequest(UUID paymentId) {
-        return jdbc.update("UPDATE payment_order SET next_reconcile_at=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND provider_reference IS NULL AND (next_reconcile_at IS NULL OR next_reconcile_at<=CURRENT_TIMESTAMP(6))", paymentId.toString()) == 1;
+        return claimPaymentRequest(paymentId, "payment-request", UUID.randomUUID().toString());
+    }
+
+    /** 首次 provider IO 与对账共用数据库 owner/token/lease fencing。 */
+    public boolean claimPaymentRequest(UUID paymentId, String owner, String token) {
+        return jdbc.update("UPDATE payment_order SET reconcile_owner=?,reconcile_token=?,reconcile_lease_until=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 30 SECOND)," +
+                "next_reconcile_at=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 30 SECOND),updated_at=CURRENT_TIMESTAMP(6) " +
+                "WHERE id=? AND provider_reference IS NULL AND status IN ('PENDING','CREATED','UNKNOWN') " +
+                "AND (reconcile_owner IS NULL OR reconcile_lease_until IS NULL OR reconcile_lease_until<=CURRENT_TIMESTAMP(6))",
+            owner, token, paymentId.toString()) == 1;
     }
 
     public boolean claimPaymentReconciliation(UUID paymentId) {
@@ -130,6 +158,11 @@ public class JdbcPaymentRepository {
 
     public boolean markPaymentUnknown(UUID paymentId) {
         return jdbc.update("UPDATE payment_order SET status='UNKNOWN',next_reconcile_at=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('PENDING','CREATED','UNKNOWN')", paymentId.toString()) == 1;
+    }
+
+    public boolean markPaymentUnknown(UUID paymentId, String owner, String token) {
+        return jdbc.update("UPDATE payment_order SET status='UNKNOWN',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('PENDING','CREATED','UNKNOWN') " +
+                "AND reconcile_owner=? AND reconcile_token=? AND reconcile_lease_until>CURRENT_TIMESTAMP(6)", paymentId.toString(), owner, token) == 1;
     }
 
     public boolean bindUnknownPaymentReference(UUID paymentId, String reference) {
