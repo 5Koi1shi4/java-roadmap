@@ -172,7 +172,7 @@ public class JdbcPaymentRepository {
         Object[] args = expectedReference == null
             ? new Object[]{status, reference, refundId.toString(), reference, amountFen, owner, token}
             : new Object[]{status, reference, refundId.toString(), expectedReference, amountFen, owner, token};
-        return jdbc.update("UPDATE refund_order SET status=?,provider_reference=COALESCE(?,provider_reference),reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND " + predicate + " AND amount_fen=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN') AND reconcile_owner=? AND reconcile_token=?", args) == 1;
+        return jdbc.update("UPDATE refund_order SET status=?,provider_reference=COALESCE(?,provider_reference),reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND " + predicate + " AND amount_fen=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN') AND reconcile_owner=? AND reconcile_token=? AND reconcile_lease_until>CURRENT_TIMESTAMP(6)", args) == 1;
     }
 
     public boolean claimRefundReconciliation(UUID refundId, String owner, String token) {
@@ -241,6 +241,28 @@ public class JdbcPaymentRepository {
             amountFen, paymentId.toString(), amountFen) == 1;
     }
 
+    /** Provider create 返回待定结果时，仅由当前 fencing owner 绑定 reference 并释放租约。 */
+    public boolean markRefundProcessing(UUID refundId, String expectedReference, String reference,
+                                        long amountFen, String owner, String token) {
+        String predicate = expectedReference == null ? "provider_reference IS NULL AND ? IS NOT NULL" : "provider_reference=?";
+        Object[] args = expectedReference == null
+            ? new Object[]{reference, refundId.toString(), reference, amountFen, owner, token}
+            : new Object[]{reference, refundId.toString(), expectedReference, amountFen, owner, token};
+        return jdbc.update("UPDATE refund_order SET status='PROCESSING',provider_reference=COALESCE(?,provider_reference)," +
+            "reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL,next_reconcile_at=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 30 SECOND)," +
+            "updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND " + predicate + " AND amount_fen=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN')" +
+            " AND reconcile_owner=? AND reconcile_token=? AND reconcile_lease_until>CURRENT_TIMESTAMP(6)", args) == 1;
+    }
+
+    /** Provider 结果未知时保留不可逆 create 事实，仅当前 fencing owner 可释放租约。 */
+    public boolean markRefundUnknown(UUID refundId, String reference, String owner, String token) {
+        return jdbc.update("UPDATE refund_order SET status='UNKNOWN',provider_reference=COALESCE(?,provider_reference)," +
+            "reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL,next_reconcile_at=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 30 SECOND)," +
+            "updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN')" +
+            " AND reconcile_owner=? AND reconcile_token=? AND reconcile_lease_until>CURRENT_TIMESTAMP(6)",
+            reference, refundId.toString(), owner, token) == 1;
+    }
+
     public RefundInsert insertRefund(UUID orderId, UUID paymentId, String provider, String idempotencyKey,
                              String sourceType, UUID sourceId, long paidAmountFen, long amountFen) {
         return insertRefund(orderId, paymentId, provider, idempotencyKey, sourceType, sourceId, paidAmountFen, amountFen, null);
@@ -287,17 +309,7 @@ public class JdbcPaymentRepository {
     }
 
     public boolean claimRefundRequest(UUID refundId) {
-        // Task 3 接管 owner/token 前，旧 RefundService.finish 不携带 fencing；不要留下
-        // 30 秒租约阻塞它随后发起的主动对账，但 create_attempted_at 仍是不可逆门闩。
-        return jdbc.update("""
-            UPDATE refund_order
-               SET create_attempted_at=CURRENT_TIMESTAMP(6),
-                   reconcile_owner=NULL, reconcile_token=NULL, reconcile_lease_until=NULL,
-                   next_reconcile_at=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),
-                   updated_at=CURRENT_TIMESTAMP(6)
-             WHERE id=? AND create_attempted_at IS NULL
-               AND provider_reference IS NULL AND status='REQUESTED'
-            """, refundId.toString()) == 1;
+        return claimInitialRefundAttempt(refundId, "refund-request", UUID.randomUUID().toString());
     }
 
     public boolean claimInitialRefundAttempt(UUID refundId, String owner, String token) {

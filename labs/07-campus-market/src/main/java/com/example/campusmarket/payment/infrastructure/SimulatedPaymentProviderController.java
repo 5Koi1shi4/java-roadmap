@@ -36,8 +36,11 @@ public class SimulatedPaymentProviderController {
     private final AtomicInteger paymentCreateRequests = new AtomicInteger();
     private final AtomicInteger refundCreateRequests = new AtomicInteger();
     private volatile String nextPaymentStatus;
+    private volatile String nextRefundStatus;
     private volatile CountDownLatch paymentCreateEntered;
     private volatile CountDownLatch paymentCreateRelease;
+    private volatile CountDownLatch refundCreateEntered;
+    private volatile CountDownLatch refundCreateRelease;
 
     public SimulatedPaymentProviderController(ObjectMapper objectMapper,
                                                @Value("${campus.market.payment.provider:simulated}") String provider,
@@ -123,17 +126,30 @@ public class SimulatedPaymentProviderController {
             throw new IllegalArgumentException("退款请求无效");
         }
         String ref = "sim-refund-" + UUID.nameUUIDFromBytes(request.idempotencyKey().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        RefundResponse response;
         synchronized (refundIndexLock) {
             RefundEntry entry = refundsByKey.get(request.idempotencyKey());
             if (entry != null && (entry.amountFen() != request.amountFen()
                 || !entry.paymentReference().equals(request.paymentProviderReference()))) throw new IdempotencyConflictException();
             if (entry == null) {
-                entry = new RefundEntry(request.amountFen(), "PENDING", request.paymentProviderReference(), request.idempotencyKey());
+                String initialStatus = nextRefundStatus;
+                nextRefundStatus = null;
+                entry = new RefundEntry(request.amountFen(), initialStatus == null ? "PENDING" : initialStatus,
+                    request.paymentProviderReference(), request.idempotencyKey());
                 refundsByKey.put(request.idempotencyKey(), entry);
                 refunds.put(ref, entry);
             }
-            return new RefundResponse(provider, ref, entry.status(), entry.amountFen());
+            response = new RefundResponse(provider, ref, entry.status(), entry.amountFen());
         }
+        CountDownLatch entered = refundCreateEntered;
+        if (entered != null) {
+            entered.countDown();
+            CountDownLatch release = refundCreateRelease;
+            try { if (release != null) release.await(30, TimeUnit.SECONDS); }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+            refundCreateRelease = null;
+        }
+        return response;
     }
 
     @GetMapping("/refunds/{reference}")
@@ -218,11 +234,28 @@ public class SimulatedPaymentProviderController {
         paymentCreateRequests.set(0);
         refundCreateRequests.set(0);
         nextPaymentStatus = null;
+        nextRefundStatus = null;
+        releaseBlockedPaymentCreateForTest();
+        releaseBlockedRefundCreateForTest();
+        paymentCreateEntered = null;
+        paymentCreateRelease = null;
+        refundCreateEntered = null;
+        refundCreateRelease = null;
     }
 
     public int paymentCreateRequestCountForTest() { return paymentCreateRequests.get(); }
     public int paymentCreateRequestCount() { return paymentCreateRequests.get(); }
     public int refundCreateRequestCountForTest() { return refundCreateRequests.get(); }
+    public int refundCreateRequestCount() { return refundCreateRequests.get(); }
+
+    public void setNextRefundStatusForTest(String status) {
+        validateStatus(status);
+        nextRefundStatus = status;
+    }
+
+    public void nextRefundStatus(String status) {
+        setNextRefundStatusForTest(status);
+    }
 
     public void blockNextPaymentCreateForTest() {
         paymentCreateEntered = new CountDownLatch(1);
@@ -236,6 +269,21 @@ public class SimulatedPaymentProviderController {
 
     public void releaseBlockedPaymentCreateForTest() {
         CountDownLatch release = paymentCreateRelease;
+        if (release != null) release.countDown();
+    }
+
+    public void blockNextRefundCreateForTest() {
+        refundCreateEntered = new CountDownLatch(1);
+        refundCreateRelease = new CountDownLatch(1);
+    }
+
+    public boolean awaitRefundCreateEnteredForTest(long timeout, TimeUnit unit) throws InterruptedException {
+        CountDownLatch entered = refundCreateEntered;
+        return entered != null && entered.await(timeout, unit);
+    }
+
+    public void releaseBlockedRefundCreateForTest() {
+        CountDownLatch release = refundCreateRelease;
         if (release != null) release.countDown();
     }
 

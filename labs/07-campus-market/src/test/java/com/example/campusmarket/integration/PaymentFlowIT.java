@@ -148,6 +148,105 @@ class PaymentFlowIT extends SharedContainers {
     }
 
     @Test
+    void unknownRefundRetryNeverCreatesAgain() {
+        provider.resetRequestCountersForTest();
+        provider.setNextRefundStatusForTest("UNKNOWN");
+        UUID payment = paidPayment(100);
+        UUID order = UUID.fromString(jdbc.queryForObject("SELECT order_id FROM payment_order WHERE id=?", String.class, payment.toString()));
+        jdbc.update("UPDATE payment_order SET provider_reference=? WHERE id=?", "sim-pay-unknown-refund-" + payment, payment.toString());
+
+        String key = "unknown-refund-" + payment;
+        RefundService.RefundResult first = refunds.requestRefund(order, key, com.example.campusmarket.shared.Money.ofFen(30));
+        assertThat(first.status()).isEqualTo("UNKNOWN");
+        jdbc.update("UPDATE refund_order SET next_reconcile_at=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),reconcile_lease_until=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE id=?", first.refundId().toString());
+        reconciliation.runOnce(20);
+        RefundService.RefundResult replay = refunds.requestRefund(order, key, com.example.campusmarket.shared.Money.ofFen(30));
+
+        assertThat(replay.refundId()).isEqualTo(first.refundId());
+        assertThat(provider.refundCreateRequestCount()).isEqualTo(1);
+    }
+
+    @Test
+    void slowRefundCreateAndReconciliationDoNotDoubleCreate() throws Exception {
+        provider.resetRequestCountersForTest();
+        provider.setNextRefundStatusForTest("SUCCEEDED");
+        provider.blockNextRefundCreateForTest();
+        UUID payment = paidPayment(100);
+        UUID order = UUID.fromString(jdbc.queryForObject("SELECT order_id FROM payment_order WHERE id=?", String.class, payment.toString()));
+        jdbc.update("UPDATE payment_order SET provider_reference=? WHERE id=?", "sim-pay-slow-refund-" + payment, payment.toString());
+        String key = "slow-refund-" + payment;
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        var request = executor.submit(() -> refunds.requestRefund(order, key, com.example.campusmarket.shared.Money.ofFen(30)));
+        assertThat(provider.awaitRefundCreateEnteredForTest(10, TimeUnit.SECONDS)).isTrue();
+        UUID refund = UUID.fromString(jdbc.queryForObject("SELECT id FROM refund_order WHERE order_id=? AND idempotency_key=?", String.class, order.toString(), key));
+        jdbc.update("UPDATE refund_order SET next_reconcile_at=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),reconcile_lease_until=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE id=?", refund.toString());
+        assertThat(reconciliation.runOnce(20)).isGreaterThanOrEqualTo(1);
+        provider.releaseBlockedRefundCreateForTest();
+        RefundService.RefundResult late = request.get(15, TimeUnit.SECONDS);
+        executor.shutdownNow();
+
+        assertThat(late.status()).isEqualTo("SUCCEEDED");
+        assertThat(provider.refundCreateRequestCount()).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='REFUND_SUCCEEDED' AND aggregate_id=?", Integer.class, refund.toString())).isEqualTo(1);
+    }
+
+    @Test
+    void immediateRefundSuccessCommitsAtomically() {
+        provider.setNextRefundStatusForTest("SUCCEEDED");
+        UUID payment = paidPayment(100);
+        UUID order = UUID.fromString(jdbc.queryForObject("SELECT order_id FROM payment_order WHERE id=?", String.class, payment.toString()));
+        jdbc.update("UPDATE payment_order SET provider_reference=? WHERE id=?", "sim-pay-immediate-success-" + payment, payment.toString());
+
+        RefundService.RefundResult result = refunds.requestRefund(order, "immediate-refund-success-" + payment, com.example.campusmarket.shared.Money.ofFen(30));
+        assertThat(result.status()).isEqualTo("SUCCEEDED");
+        assertThat(result.responseUtf8()).isNotNull();
+        assertThat(jdbc.queryForObject("SELECT reserved_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(0L);
+        assertThat(jdbc.queryForObject("SELECT successful_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(30L);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='REFUND_SUCCEEDED' AND aggregate_id=?", Integer.class, result.refundId().toString())).isEqualTo(1);
+    }
+
+    @Test
+    void immediateRefundFailureReleasesAtomically() {
+        provider.setNextRefundStatusForTest("FAILED");
+        UUID payment = paidPayment(100);
+        UUID order = UUID.fromString(jdbc.queryForObject("SELECT order_id FROM payment_order WHERE id=?", String.class, payment.toString()));
+        jdbc.update("UPDATE payment_order SET provider_reference=? WHERE id=?", "sim-pay-immediate-failure-" + payment, payment.toString());
+
+        RefundService.RefundResult result = refunds.requestRefund(order, "immediate-refund-failure-" + payment, com.example.campusmarket.shared.Money.ofFen(30));
+        assertThat(result.status()).isEqualTo("FAILED");
+        assertThat(result.responseUtf8()).isNotNull();
+        assertThat(jdbc.queryForObject("SELECT reserved_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(0L);
+        assertThat(jdbc.queryForObject("SELECT successful_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(0L);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='REFUND_FAILED' AND aggregate_id=?", Integer.class, result.refundId().toString())).isEqualTo(1);
+    }
+
+    @Test
+    void immediateRefundRollsBackWhenAggregateCasFails() throws Exception {
+        provider.setNextRefundStatusForTest("SUCCEEDED");
+        provider.blockNextRefundCreateForTest();
+        UUID payment = paidPayment(100);
+        UUID order = UUID.fromString(jdbc.queryForObject("SELECT order_id FROM payment_order WHERE id=?", String.class, payment.toString()));
+        jdbc.update("UPDATE payment_order SET provider_reference=? WHERE id=?", "sim-pay-cas-refund-" + payment, payment.toString());
+        String key = "immediate-refund-cas-" + payment;
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        var request = executor.submit(() -> refunds.requestRefund(order, key, com.example.campusmarket.shared.Money.ofFen(30)));
+        assertThat(provider.awaitRefundCreateEnteredForTest(10, TimeUnit.SECONDS)).isTrue();
+        UUID refund = UUID.fromString(jdbc.queryForObject("SELECT id FROM refund_order WHERE order_id=? AND idempotency_key=?", String.class, order.toString(), key));
+        jdbc.update("UPDATE payment_order SET reserved_refund_fen=0 WHERE id=?", payment.toString());
+        provider.releaseBlockedRefundCreateForTest();
+        try {
+            request.get(15, TimeUnit.SECONDS);
+        } catch (java.util.concurrent.ExecutionException expected) {
+            // 聚合 CAS 失败必须回滚退款终态、响应和 Outbox。
+        }
+        executor.shutdownNow();
+
+        assertThat(jdbc.queryForObject("SELECT status FROM refund_order WHERE id=?", String.class, refund.toString())).isEqualTo("REQUESTED");
+        assertThat(jdbc.queryForObject("SELECT response_utf8 FROM refund_order WHERE id=?", byte[].class, refund.toString())).isNull();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id=? AND event_type LIKE 'REFUND_%'", Integer.class, refund.toString())).isEqualTo(0);
+    }
+
+    @Test
     void pendingPaymentIsReconciledByRealSchedulerWithoutCreatingAnotherRequest() throws Exception {
         UUID payment = UUID.randomUUID();
         UUID order = UUID.randomUUID();
@@ -570,7 +669,7 @@ class PaymentFlowIT extends SharedContainers {
     }
 
     @Test
-    void legacyRefundCreateClaimDoesNotBlockImmediateReconciliation() {
+    void legacyRefundCreateClaimRetainsResultFencing() {
         UUID payment = paidPayment(100);
         UUID order = UUID.fromString(jdbc.queryForObject("SELECT order_id FROM payment_order WHERE id=?", String.class, payment.toString()));
         UUID refund = UUID.randomUUID();
@@ -579,7 +678,9 @@ class PaymentFlowIT extends SharedContainers {
 
         assertThat(repository.claimRefundRequest(refund)).isTrue();
         assertThat(jdbc.queryForObject("SELECT create_attempted_at IS NOT NULL FROM refund_order WHERE id=?", Boolean.class, refund.toString())).isTrue();
-        assertThat(jdbc.queryForObject("SELECT reconcile_lease_until FROM refund_order WHERE id=?", java.sql.Timestamp.class, refund.toString())).isNull();
+        assertThat(jdbc.queryForObject("SELECT reconcile_lease_until FROM refund_order WHERE id=?", java.sql.Timestamp.class, refund.toString())).isNotNull();
+        assertThat(repository.claimRefundReconciliationDirect(refund, "reconciler", "token-reconcile")).isFalse();
+        jdbc.update("UPDATE refund_order SET reconcile_lease_until=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE id=?", refund.toString());
         assertThat(repository.claimRefundReconciliationDirect(refund, "reconciler", "token-reconcile")).isTrue();
         assertThat(repository.claimInitialRefundAttempt(refund, "second-create", "token-create")).isFalse();
     }

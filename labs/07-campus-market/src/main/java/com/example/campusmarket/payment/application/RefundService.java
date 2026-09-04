@@ -63,9 +63,9 @@ public class RefundService {
         if (result.amountFen() != row.amountFen() || result.providerReference() == null
             || (row.providerReference() != null && !row.providerReference().equals(result.providerReference()))) return queryRefund(refundId);
         if (result.status() == PaymentGateway.RefundStatus.Status.SUCCEEDED)
-            transactions.execute(ignored -> { settleTerminal(row, "SUCCEEDED", result.providerReference(), owner, token); return null; });
+            transactions.execute(ignored -> { settleTerminal(row.id(), row.paymentId(), row.amountFen(), row.providerReference(), result.providerReference(), "SUCCEEDED", owner, token); return null; });
         else if (result.status() == PaymentGateway.RefundStatus.Status.FAILED)
-            transactions.execute(ignored -> { settleTerminal(row, "FAILED", result.providerReference(), owner, token); return null; });
+            transactions.execute(ignored -> { settleTerminal(row.id(), row.paymentId(), row.amountFen(), row.providerReference(), result.providerReference(), "FAILED", owner, token); return null; });
         return queryRefund(refundId);
     }
 
@@ -83,32 +83,22 @@ public class RefundService {
 
     private RefundResult requestRefundInternal(UUID orderId, String idempotencyKey, Money amount, String sourceType, UUID sourceId, byte[] rawRequest) {
         byte[] body = rawRequest == null ? new byte[0] : rawRequest.clone();
-        RefundIntent intent = transactions.execute(status -> prepare(orderId, idempotencyKey, amount, sourceType, sourceId, body));
+        String owner = "refund-request-" + UUID.randomUUID();
+        String token = UUID.randomUUID().toString();
+        RefundIntent intent = transactions.execute(status -> prepare(orderId, idempotencyKey, amount, sourceType, sourceId, body, owner, token));
         if (intent.existing() != null) return intent.existing();
         PaymentGateway.RefundCreated created;
         try {
             created = gateway.requestRefund(new PaymentGateway.CreateRefundRequest(orderId,
                 intent.paymentReference(), amount, idempotencyKey));
         } catch (RuntimeException failure) {
-            return transactions.execute(status -> {
-                RefundResult result = finish(intent.refundId(), intent.paymentId(), amount.fen(), null,
-                    PaymentGateway.RefundStatus.Status.UNKNOWN);
-                byte[] response = response(result.refundId(), result.providerReference(), result.status());
-                repository.saveRefundResponse(intent.refundId(), response);
-                return new RefundResult(result.refundId(), result.providerReference(), result.status(), response);
-            });
+            return finishUnknown(intent);
         }
-        return transactions.execute(status -> {
-            RefundResult result = finish(intent.refundId(), intent.paymentId(), amount.fen(),
-                created.providerReference(), created.status());
-            byte[] response = response(result.refundId(), result.providerReference(), result.status());
-            repository.saveRefundResponse(intent.refundId(), response);
-            result = new RefundResult(result.refundId(), result.providerReference(), result.status(), response);
-            return result;
-        });
+        return finishOwned(intent, created);
     }
 
-    private RefundIntent prepare(UUID orderId, String idempotencyKey, Money amount, String sourceType, UUID sourceId, byte[] rawRequest) {
+    private RefundIntent prepare(UUID orderId, String idempotencyKey, Money amount, String sourceType, UUID sourceId,
+                                 byte[] rawRequest, String owner, String token) {
         JdbcPaymentRepository.PaymentRecord payment = jdbc.query("SELECT id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status FROM payment_order WHERE order_id=? AND status='SUCCEEDED' ORDER BY created_at DESC LIMIT 1",
             rs -> rs.next() ? new JdbcPaymentRepository.PaymentRecord(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),
                 rs.getString("provider"), rs.getString("idempotency_key"), rs.getLong("amount_fen"), rs.getLong("paid_amount_fen"),
@@ -122,13 +112,13 @@ public class RefundService {
         JdbcPaymentRepository.RefundRecord existing = repository.findRefundByKey(orderId, idempotencyKey);
         if (existing != null) {
             if (existing.amountFen() != amount.fen() || (existing.requestHash() != null && !MessageDigest.isEqual(existing.requestHash(), requestHash))) throw new IdempotencyConflictException();
-                return new RefundIntent(null, null, null, new RefundResult(existing.id(), existing.providerReference(), existing.status(), existing.responseUtf8()));
+                return new RefundIntent(null, null, null, 0L, null, null, new RefundResult(existing.id(), existing.providerReference(), existing.status(), existing.responseUtf8()));
         }
         if (!repository.reserveRefund(payment.id(), amount.fen())) {
             JdbcPaymentRepository.RefundRecord concurrent = repository.findRefundByKey(orderId, idempotencyKey);
             if (concurrent != null && concurrent.amountFen() == amount.fen()
                 && (concurrent.requestHash() == null || MessageDigest.isEqual(concurrent.requestHash(), requestHash))) {
-                return new RefundIntent(null, null, null, new RefundResult(concurrent.id(), concurrent.providerReference(), concurrent.status(), concurrent.responseUtf8()));
+                return new RefundIntent(null, null, null, 0L, null, null, new RefundResult(concurrent.id(), concurrent.providerReference(), concurrent.status(), concurrent.responseUtf8()));
             }
             throw new RefundLimitExceededException();
         }
@@ -141,35 +131,58 @@ public class RefundService {
             if (raced == null) throw new IdempotencyConflictException("退款幂等记录未找到");
             if (raced.amountFen() != amount.fen()) throw new IdempotencyConflictException("退款金额不一致");
             if (raced.requestHash() != null && !MessageDigest.isEqual(raced.requestHash(), requestHash)) throw new IdempotencyConflictException("退款请求指纹不一致");
-            return new RefundIntent(null, null, null, new RefundResult(raced.id(), raced.providerReference(), raced.status(), raced.responseUtf8()));
+            return new RefundIntent(null, null, null, 0L, null, null, new RefundResult(raced.id(), raced.providerReference(), raced.status(), raced.responseUtf8()));
         }
-        repository.claimRefundRequest(claim.id());
-        return new RefundIntent(claim.id(), payment.id(), payment.providerReference(), null);
+        if (!repository.claimInitialRefundAttempt(claim.id(), owner, token))
+            throw new IllegalStateException("退款首次创建权获取失败");
+        return new RefundIntent(claim.id(), payment.id(), payment.providerReference(), amount.fen(), owner, token, null);
     }
 
-    private RefundResult finish(UUID refundId, UUID paymentId, long amountFen, String reference, PaymentGateway.RefundStatus.Status status) {
-        String storedStatus = status == PaymentGateway.RefundStatus.Status.PENDING ? "PROCESSING" : status.name();
-        int changed = jdbc.update("UPDATE refund_order SET status=?,provider_reference=COALESCE(?,provider_reference),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN')", storedStatus, reference, refundId.toString());
-        if (changed != 1) throw new IllegalStateException("退款状态更新 CAS 失败，等待重试");
-        if (status == PaymentGateway.RefundStatus.Status.SUCCEEDED) {
-            if (!repository.completeRefund(paymentId, amountFen)) throw new IllegalStateException("退款额度结转失败，等待对账");
-            repository.insertPaymentEvent("REFUND_SUCCEEDED", refundId, json(java.util.Map.of("refundId", refundId, "amountFen", amountFen)));
-        }
-        if (status == PaymentGateway.RefundStatus.Status.FAILED) {
-            if (!repository.releaseRefund(paymentId, amountFen)) throw new IllegalStateException("退款额度释放失败，等待对账");
-            repository.insertPaymentEvent("REFUND_FAILED", refundId, json(java.util.Map.of("refundId", refundId, "amountFen", amountFen)));
-        }
-        if (status == PaymentGateway.RefundStatus.Status.UNKNOWN) repository.saveRefundResponse(refundId, response(refundId, reference, "UNKNOWN"));
-        return new RefundResult(refundId, reference, storedStatus);
+    /** 只有首次 claim 的 owner 才能在事务外 IO 返回后提交结果；迟到 owner 直接重放当前记录。 */
+    private RefundResult finishOwned(RefundIntent intent, PaymentGateway.RefundCreated created) {
+        String status = created.status().name();
+        RefundResult committed = transactions.execute(ignored -> {
+            if (created.status() == PaymentGateway.RefundStatus.Status.SUCCEEDED
+                || created.status() == PaymentGateway.RefundStatus.Status.FAILED) {
+                if (!settleTerminal(intent.refundId(), intent.paymentId(), intent.amountFen(), null,
+                    created.providerReference(), status, intent.owner(), intent.token())) return null;
+                byte[] saved = response(intent.refundId(), created.providerReference(), status);
+                return new RefundResult(intent.refundId(), created.providerReference(), status, saved);
+            }
+            if (created.status() == PaymentGateway.RefundStatus.Status.PENDING) {
+                if (!repository.markRefundProcessing(intent.refundId(), null, created.providerReference(),
+                    intent.amountFen(), intent.owner(), intent.token())) return null;
+                byte[] saved = response(intent.refundId(), created.providerReference(), "PROCESSING");
+                repository.saveRefundResponse(intent.refundId(), saved);
+                return new RefundResult(intent.refundId(), created.providerReference(), "PROCESSING", saved);
+            }
+            if (!repository.markRefundUnknown(intent.refundId(), created.providerReference(), intent.owner(), intent.token())) return null;
+            byte[] saved = response(intent.refundId(), created.providerReference(), "UNKNOWN");
+            repository.saveRefundResponse(intent.refundId(), saved);
+            return new RefundResult(intent.refundId(), created.providerReference(), "UNKNOWN", saved);
+        });
+        return committed == null ? queryRefund(intent.refundId()) : committed;
     }
 
-    private void settleTerminal(JdbcPaymentRepository.RefundRecord row, String status, String reference, String owner, String token) {
-        if (!repository.markRefundTerminal(row.id(), row.providerReference(), reference, status, row.amountFen(), owner, token))
-            throw new IllegalStateException("退款状态结算 CAS 失败，等待重试");
-        repository.saveRefundResponse(row.id(), response(row.id(), reference, status));
-        boolean settled = "SUCCEEDED".equals(status) ? repository.completeRefund(row.paymentId(), row.amountFen()) : repository.releaseRefund(row.paymentId(), row.amountFen());
+    private RefundResult finishUnknown(RefundIntent intent) {
+        RefundResult committed = transactions.execute(ignored -> {
+            if (!repository.markRefundUnknown(intent.refundId(), null, intent.owner(), intent.token())) return null;
+            byte[] saved = response(intent.refundId(), null, "UNKNOWN");
+            repository.saveRefundResponse(intent.refundId(), saved);
+            return new RefundResult(intent.refundId(), null, "UNKNOWN", saved);
+        });
+        return committed == null ? queryRefund(intent.refundId()) : committed;
+    }
+
+    private boolean settleTerminal(UUID refundId, UUID paymentId, long amountFen, String expectedReference,
+                                   String reference, String status, String owner, String token) {
+        if (!repository.markRefundTerminal(refundId, expectedReference, reference, status, amountFen, owner, token))
+            return false;
+        boolean settled = "SUCCEEDED".equals(status) ? repository.completeRefund(paymentId, amountFen) : repository.releaseRefund(paymentId, amountFen);
         if (!settled) throw new IllegalStateException("退款聚合结转失败，等待重试");
-        repository.insertPaymentEvent("REFUND_" + status, row.id(), json(java.util.Map.of("refundId", row.id(), "amountFen", row.amountFen())));
+        repository.saveRefundResponse(refundId, response(refundId, reference, status));
+        repository.insertPaymentEvent("REFUND_" + status, refundId, json(java.util.Map.of("refundId", refundId, "amountFen", amountFen)));
+        return true;
     }
 
     @Transactional
@@ -207,7 +220,8 @@ public class RefundService {
     public record RefundResult(UUID refundId, String providerReference, String status, byte[] responseUtf8) {
         public RefundResult(UUID refundId, String providerReference, String status) { this(refundId, providerReference, status, null); }
     }
-    private record RefundIntent(UUID refundId, UUID paymentId, String paymentReference, RefundResult existing) {}
+    private record RefundIntent(UUID refundId, UUID paymentId, String paymentReference, long amountFen,
+                                String owner, String token, RefundResult existing) {}
     public static class RefundLimitExceededException extends RuntimeException { }
     public static class IdempotencyConflictException extends RuntimeException { public IdempotencyConflictException() { } public IdempotencyConflictException(String message) { super(message); } }
     private static byte[] digest(String value) {
