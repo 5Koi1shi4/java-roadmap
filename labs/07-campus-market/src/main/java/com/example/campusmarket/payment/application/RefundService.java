@@ -144,9 +144,9 @@ public class RefundService {
         RefundResult committed = transactions.execute(ignored -> {
             if (created.status() == PaymentGateway.RefundStatus.Status.SUCCEEDED
                 || created.status() == PaymentGateway.RefundStatus.Status.FAILED) {
-                if (!settleTerminal(intent.refundId(), intent.paymentId(), intent.amountFen(), null,
-                    created.providerReference(), status, intent.owner(), intent.token())) return null;
-                byte[] saved = response(intent.refundId(), created.providerReference(), status);
+                byte[] saved = settleTerminal(intent.refundId(), intent.paymentId(), intent.amountFen(), null,
+                    created.providerReference(), status, intent.owner(), intent.token());
+                if (saved == null) return null;
                 return new RefundResult(intent.refundId(), created.providerReference(), status, saved);
             }
             if (created.status() == PaymentGateway.RefundStatus.Status.PENDING) {
@@ -174,15 +174,16 @@ public class RefundService {
         return committed == null ? queryRefund(intent.refundId()) : committed;
     }
 
-    private boolean settleTerminal(UUID refundId, UUID paymentId, long amountFen, String expectedReference,
+    private byte[] settleTerminal(UUID refundId, UUID paymentId, long amountFen, String expectedReference,
                                    String reference, String status, String owner, String token) {
         if (!repository.markRefundTerminal(refundId, expectedReference, reference, status, amountFen, owner, token))
-            return false;
+            return null;
         boolean settled = "SUCCEEDED".equals(status) ? repository.completeRefund(paymentId, amountFen) : repository.releaseRefund(paymentId, amountFen);
         if (!settled) throw new IllegalStateException("退款聚合结转失败，等待重试");
-        repository.saveRefundResponse(refundId, response(refundId, reference, status));
+        byte[] saved = response(refundId, reference, status);
+        repository.saveRefundResponse(refundId, saved);
         repository.insertPaymentEvent("REFUND_" + status, refundId, json(java.util.Map.of("refundId", refundId, "amountFen", amountFen)));
-        return true;
+        return saved;
     }
 
     @Transactional
