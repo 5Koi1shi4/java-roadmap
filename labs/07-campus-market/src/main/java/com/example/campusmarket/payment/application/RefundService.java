@@ -81,9 +81,16 @@ public class RefundService {
             return new RefundIntent(null, null, null, new RefundResult(existing.id(), existing.providerReference(), existing.status()));
         }
         if (!repository.reserveRefund(payment.id(), amount.fen())) throw new RefundLimitExceededException();
-        UUID refundId = repository.insertRefund(orderId, payment.id(), payment.provider(), idempotencyKey, sourceType, sourceId,
+        JdbcPaymentRepository.RefundInsert claim = repository.insertRefund(orderId, payment.id(), payment.provider(), idempotencyKey, sourceType, sourceId,
             payment.paidAmountFen(), amount.fen());
-        return new RefundIntent(refundId, payment.id(), payment.providerReference(), null);
+        if (!claim.inserted()) {
+            // 并发请求可能先占额后抢到同一唯一键；释放本次临时占额并重放原结果。
+            repository.releaseRefund(payment.id(), amount.fen());
+            JdbcPaymentRepository.RefundRecord raced = repository.findRefundByKey(orderId, idempotencyKey);
+            if (raced == null || raced.amountFen() != amount.fen()) throw new IdempotencyConflictException();
+            return new RefundIntent(null, null, null, new RefundResult(raced.id(), raced.providerReference(), raced.status()));
+        }
+        return new RefundIntent(claim.id(), payment.id(), payment.providerReference(), null);
     }
 
     private RefundResult finish(UUID refundId, UUID paymentId, long amountFen, String reference, PaymentGateway.RefundStatus.Status status) {

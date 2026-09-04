@@ -8,6 +8,7 @@ import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.containers.Network;
 import org.testcontainers.containers.RabbitMQContainer;
 import org.testcontainers.containers.ToxiproxyContainer;
+import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.elasticsearch.ElasticsearchContainer;
 import org.testcontainers.images.builder.ImageFromDockerfile;
 import org.testcontainers.lifecycle.Startables;
@@ -56,12 +57,20 @@ public abstract class SharedContainers {
     protected static final ToxiproxyContainer TOXIPROXY = new ToxiproxyContainer(
         DockerImageName.parse("ghcr.io/shopify/toxiproxy:2.12.0"))
         .withNetwork(NETWORK)
-        .withNetworkAliases("toxiproxy");
+        .withNetworkAliases("toxiproxy")
+        .withAccessToHost(true);
+    /** 可被 Toxiproxy 注入断连的真实 HTTP provider 边界。 */
+    protected static final GenericContainer<?> PAYMENT_PROVIDER_HTTP = new GenericContainer<>(DockerImageName.parse("python:3.12-alpine"))
+        .withCommand("sh", "-c", "mkdir -p /www/payments && printf '{\"providerReference\":\"probe\",\"status\":\"UNKNOWN\",\"amountFen\":0}' > /www/payments/probe && python -m http.server 8080 --directory /www")
+        .withNetwork(NETWORK)
+        .withNetworkAliases("payment-provider-http")
+        .withExposedPorts(8080)
+        .waitingFor(Wait.forListeningPort());
     protected static ToxiproxyContainer.ContainerProxy MINIO_PROXY;
     protected static ToxiproxyContainer.ContainerProxy ELASTICSEARCH_PROXY;
 
     static {
-        Startables.deepStart(Stream.of(MYSQL, REDIS, RABBITMQ, ELASTICSEARCH, MINIO, TOXIPROXY)).join();
+        Startables.deepStart(Stream.of(MYSQL, REDIS, RABBITMQ, ELASTICSEARCH, MINIO, TOXIPROXY, PAYMENT_PROVIDER_HTTP)).join();
         MINIO_PROXY = TOXIPROXY.getProxy(MINIO, 9000);
         ELASTICSEARCH_PROXY = TOXIPROXY.getProxy(ELASTICSEARCH, 9200);
     }

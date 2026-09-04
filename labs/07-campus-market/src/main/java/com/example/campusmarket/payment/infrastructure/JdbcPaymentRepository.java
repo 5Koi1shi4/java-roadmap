@@ -90,7 +90,7 @@ public class JdbcPaymentRepository {
             amountFen, paymentId.toString(), amountFen) == 1;
     }
 
-    public UUID insertRefund(UUID orderId, UUID paymentId, String provider, String idempotencyKey,
+    public RefundInsert insertRefund(UUID orderId, UUID paymentId, String provider, String idempotencyKey,
                              String sourceType, UUID sourceId, long paidAmountFen, long amountFen) {
         UUID id = UUID.randomUUID();
         jdbc.update("""
@@ -100,8 +100,9 @@ public class JdbcPaymentRepository {
             ON DUPLICATE KEY UPDATE id=id
             """, id.toString(), orderId.toString(), paymentId.toString(), provider, idempotencyKey,
             sourceType, sourceId == null ? null : sourceId.toString(), paidAmountFen, amountFen, amountFen);
-        return jdbc.queryForObject("SELECT id FROM refund_order WHERE order_id=? AND idempotency_key=?",
+        UUID actual = jdbc.queryForObject("SELECT id FROM refund_order WHERE order_id=? AND idempotency_key=?",
             (rs, rowNum) -> UUID.fromString(rs.getString(1)), orderId.toString(), idempotencyKey);
+        return new RefundInsert(actual, actual.equals(id));
     }
 
     public boolean bindRefundProvider(UUID refundId, String reference, PaymentGateway.RefundStatus.Status status) {
@@ -158,6 +159,7 @@ public class JdbcPaymentRepository {
     }
     public record RefundRecord(UUID id, UUID orderId, UUID paymentId, String provider, String idempotencyKey,
                                long amountFen, String providerReference, String status) {}
+    public record RefundInsert(UUID id, boolean inserted) {}
 
     private static byte[] digest(byte[] body) {
         try { return MessageDigest.getInstance("SHA-256").digest(body); }

@@ -9,6 +9,7 @@ import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 
 import java.time.Instant;
 import java.util.Map;
@@ -126,6 +127,11 @@ public class SimulatedPaymentProviderController {
     }
     @ExceptionHandler(IllegalArgumentException.class)
     ResponseEntity<byte[]> invalidProviderRequest() {
+        return ResponseEntity.badRequest().contentType(MediaType.parseMediaType("application/json; charset=UTF-8"))
+            .body("{\"error\":\"请求参数无效\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    ResponseEntity<byte[]> unreadableProviderRequest() {
         return ResponseEntity.badRequest().contentType(MediaType.parseMediaType("application/json; charset=UTF-8"))
             .body("{\"error\":\"请求参数无效\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
