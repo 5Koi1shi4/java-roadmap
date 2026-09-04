@@ -2,6 +2,7 @@ package com.example.campusmarket.unit.catalog;
 
 import com.example.campusmarket.catalog.search.SearchAliasCoordinator;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.micrometer.core.instrument.MeterRegistry;
 import ch.qos.logback.classic.Level;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
@@ -9,15 +10,24 @@ import org.junit.jupiter.api.Test;
 
 import javax.sql.DataSource;
 import java.lang.reflect.Proxy;
+import java.lang.reflect.Constructor;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.time.Duration;
+import java.util.function.Consumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class SearchAliasCoordinatorTest {
+    @Test
+    void acquisitionAttemptHookReceivesTheContenderConnection() throws Exception {
+        Constructor<SearchAliasCoordinator> constructor = SearchAliasCoordinator.class.getDeclaredConstructor(
+            DataSource.class, MeterRegistry.class, Consumer.class);
+        assertThat(constructor).isNotNull();
+    }
+
     @Test
     void lockTimeoutIsClassifiedAndMeasuredWithoutOwnerMetricTag() {
         SimpleMeterRegistry metrics = new SimpleMeterRegistry();

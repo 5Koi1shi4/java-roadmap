@@ -41,12 +41,14 @@ import java.util.concurrent.Future;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.lang.reflect.Method;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.util.Arrays;
 import java.util.Set;
+import java.util.function.Consumer;
 import javax.sql.DataSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -139,10 +141,11 @@ class SearchRebuildIT extends SharedContainers {
     @Test
     void aliasCoordinatorSerializesWorkers() throws Exception {
         SearchAliasCoordinator first = new SearchAliasCoordinator(dataSource);
-        SearchAliasCoordinator second = new SearchAliasCoordinator(dataSource);
+        AtomicLong waiterConnectionId = new AtomicLong();
+        SearchAliasCoordinator second = coordinatorWithAcquireAttemptHook(dataSource, metrics,
+            connection -> waiterConnectionId.set(queryLong(connection, "SELECT CONNECTION_ID()")));
         CountDownLatch locked = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        CountDownLatch waiterEntered = new CountDownLatch(1);
         CountDownLatch waiterCallback = new CountDownLatch(1);
         ExecutorService workers = Executors.newFixedThreadPool(2);
         try {
@@ -153,15 +156,17 @@ class SearchRebuildIT extends SharedContainers {
             }));
             assertThat(locked.await(30, TimeUnit.SECONDS)).isTrue();
             Future<Integer> waiter = workers.submit(() -> {
-                waiterEntered.countDown();
                 return second.execute(Duration.ofSeconds(5), connection -> {
                     waiterCallback.countDown();
                     return queryInt(connection, "SELECT 1");
                 });
             });
-            assertThat(waiterEntered.await(30, TimeUnit.SECONDS)).isTrue();
-            assertThat(waiter.isDone()).isFalse();
-            assertThat(waiterCallback.await(200, TimeUnit.MILLISECONDS)).isFalse();
+            await().atMost(Duration.ofSeconds(30)).until(() -> waiterConnectionId.get() > 0);
+            await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
+                assertThat(getLockQueryCount(waiterConnectionId.get())).isEqualTo(1);
+                assertThat(getNamedLockOwnerId()).isNotNull();
+            });
+            assertThat(waiterCallback.getCount()).isEqualTo(1);
             release.countDown();
             owner.get(30, TimeUnit.SECONDS);
             assertThat(waiter.get(30, TimeUnit.SECONDS)).isEqualTo(1);
@@ -225,8 +230,9 @@ class SearchRebuildIT extends SharedContainers {
         SearchGateRepository gateA = new SearchGateRepository(new JdbcTemplate(dataSource));
         SearchGateRepository gateB = new SearchGateRepository(new JdbcTemplate(dataSource));
         SearchAliasCoordinator coordinatorA = new SearchAliasCoordinator(dataSource);
-        CountDownLatch bAcquireAttempted = new CountDownLatch(1);
-        SearchAliasCoordinator coordinatorB = coordinatorWithAcquireAttemptHook(dataSource, metrics, bAcquireAttempted::countDown);
+        AtomicLong bConnectionId = new AtomicLong();
+        SearchAliasCoordinator coordinatorB = coordinatorWithAcquireAttemptHook(dataSource, metrics,
+            connection -> bConnectionId.set(queryLong(connection, "SELECT CONNECTION_ID()")));
         java.util.concurrent.atomic.AtomicInteger aliasMutations = new java.util.concurrent.atomic.AtomicInteger();
         ElasticsearchProductSearch mutationSearch = new ElasticsearchProductSearch(elasticsearchClient,
             jdbc, ignored -> aliasMutations.incrementAndGet());
@@ -264,8 +270,12 @@ class SearchRebuildIT extends SharedContainers {
                 });
                 return null;
             });
-            assertThat(bAcquireAttempted.await(30, TimeUnit.SECONDS)).isTrue();
-            assertThat(bEntered.await(0, TimeUnit.MILLISECONDS)).isFalse();
+            await().atMost(Duration.ofSeconds(30)).until(() -> bConnectionId.get() > 0);
+            await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
+                assertThat(getLockQueryCount(bConnectionId.get())).isEqualTo(1);
+                assertThat(getNamedLockOwnerId()).isNotNull();
+            });
+            assertThat(bEntered.getCount()).isEqualTo(1);
             releaseFinalFenceA.countDown();
             ExecutionException staleA = assertThrows(ExecutionException.class, () -> first.get(30, TimeUnit.SECONDS));
             assertThat(staleA.getCause()).isInstanceOf(SearchGateRepository.SearchGateClosedException.class);
@@ -597,14 +607,39 @@ class SearchRebuildIT extends SharedContainers {
     }
 
     private static SearchAliasCoordinator coordinatorWithAcquireAttemptHook(
-        DataSource dataSource, MeterRegistry metrics, Runnable hook) {
+        DataSource dataSource, MeterRegistry metrics, Consumer<Connection> hook) {
         try {
             Constructor<SearchAliasCoordinator> constructor = SearchAliasCoordinator.class.getDeclaredConstructor(
-                DataSource.class, MeterRegistry.class, Runnable.class);
+                DataSource.class, MeterRegistry.class, Consumer.class);
             constructor.setAccessible(true);
             return constructor.newInstance(dataSource, metrics, hook);
         } catch (ReflectiveOperationException failure) {
             throw new IllegalStateException("构造协调器测试接缝失败", failure);
+        }
+    }
+
+    private int getLockQueryCount(long connectionId) {
+        return jdbc.queryForObject("""
+            SELECT COUNT(*)
+              FROM information_schema.PROCESSLIST
+             WHERE ID=?
+               AND COMMAND='Query'
+               AND INFO LIKE '%GET_LOCK%'
+            """, Integer.class, connectionId);
+    }
+
+    private Integer getNamedLockOwnerId() {
+        return jdbc.queryForObject("SELECT IS_USED_LOCK(?)", Integer.class,
+            "campus-market:search-alias-coordination");
+    }
+
+    private static long queryLong(Connection connection, String sql) {
+        try (PreparedStatement statement = connection.prepareStatement(sql);
+             ResultSet result = statement.executeQuery()) {
+            if (!result.next()) throw new IllegalStateException("查询未返回结果: " + sql);
+            return result.getLong(1);
+        } catch (SQLException failure) {
+            throw new IllegalStateException(failure);
         }
     }
 
@@ -771,7 +806,7 @@ class SearchRebuildIT extends SharedContainers {
         cleanupRepository.schedule(target);
         CountDownLatch cleanupRead = new CountDownLatch(1);
         CountDownLatch releaseCleanup = new CountDownLatch(1);
-        CountDownLatch cutoverAcquireAttempted = new CountDownLatch(1);
+        AtomicLong cutoverConnectionId = new AtomicLong();
         cleanupWorker.setCleanupDeleteHook(index -> {
             cleanupRead.countDown();
             awaitBarrier(cleanupRead, releaseCleanup);
@@ -783,7 +818,8 @@ class SearchRebuildIT extends SharedContainers {
 
             CountDownLatch cutoverEntered = new CountDownLatch(1);
             SearchAliasCoordinator cutoverCoordinator = coordinatorWithAcquireAttemptHook(
-                dataSource, metrics, cutoverAcquireAttempted::countDown);
+                dataSource, metrics,
+                connection -> cutoverConnectionId.set(queryLong(connection, "SELECT CONNECTION_ID()")));
             Future<Void> cutover = workers.submit(() -> {
                 cutoverCoordinator.execute(Duration.ofSeconds(30), "rebuild-cutover", "cleanup-cutover", connection -> {
                     cutoverEntered.countDown();
@@ -793,8 +829,12 @@ class SearchRebuildIT extends SharedContainers {
                 });
                 return null;
             });
-            assertThat(cutoverAcquireAttempted.await(30, TimeUnit.SECONDS)).isTrue();
-            assertThat(cutoverEntered.await(0, TimeUnit.MILLISECONDS)).isFalse();
+            await().atMost(Duration.ofSeconds(30)).until(() -> cutoverConnectionId.get() > 0);
+            await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> {
+                assertThat(getLockQueryCount(cutoverConnectionId.get())).isEqualTo(1);
+                assertThat(getNamedLockOwnerId()).isNotNull();
+            });
+            assertThat(cutoverEntered.getCount()).isEqualTo(1);
             releaseCleanup.countDown();
             cleanup.get(30, TimeUnit.SECONDS);
             cutover.get(30, TimeUnit.SECONDS);

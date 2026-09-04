@@ -16,6 +16,7 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 /** 使用 MySQL 会话锁串行化跨实例别名操作。 */
 @Component
@@ -25,19 +26,19 @@ public final class SearchAliasCoordinator {
 
     private final DataSource dataSource;
     private final MeterRegistry metrics;
-    private final Runnable acquisitionAttemptHook;
+    private final Consumer<Connection> acquisitionAttemptHook;
 
     public SearchAliasCoordinator(DataSource dataSource) {
-        this(dataSource, new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), () -> { });
+        this(dataSource, new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), connection -> { });
     }
 
     @Autowired
     public SearchAliasCoordinator(DataSource dataSource, MeterRegistry metrics) {
-        this(dataSource, metrics, () -> { });
+        this(dataSource, metrics, connection -> { });
     }
 
     /** 仅测试使用的 GET_LOCK 尝试通知；默认无操作，不改变锁协议。 */
-    SearchAliasCoordinator(DataSource dataSource, MeterRegistry metrics, Runnable acquisitionAttemptHook) {
+    SearchAliasCoordinator(DataSource dataSource, MeterRegistry metrics, Consumer<Connection> acquisitionAttemptHook) {
         this.dataSource = Objects.requireNonNull(dataSource, "数据源不能为空");
         this.metrics = Objects.requireNonNull(metrics, "指标注册表不能为空");
         this.acquisitionAttemptHook = Objects.requireNonNull(acquisitionAttemptHook, "获取尝试 hook 不能为空");
@@ -67,7 +68,7 @@ public final class SearchAliasCoordinator {
             long waitStarted = System.nanoTime();
             int lockResult;
             try {
-                acquisitionAttemptHook.run();
+                acquisitionAttemptHook.accept(connection);
                 lockResult = queryLock(connection, timeoutSeconds);
             } catch (Throwable failure) {
                 recordAcquire(operation, owner, System.nanoTime() - waitStarted);
