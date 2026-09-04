@@ -25,19 +25,30 @@ public final class SearchAliasCoordinator {
 
     private final DataSource dataSource;
     private final MeterRegistry metrics;
+    private final Runnable acquisitionAttemptHook;
 
     public SearchAliasCoordinator(DataSource dataSource) {
-        this(dataSource, new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
+        this(dataSource, new io.micrometer.core.instrument.simple.SimpleMeterRegistry(), () -> { });
     }
 
     @Autowired
     public SearchAliasCoordinator(DataSource dataSource, MeterRegistry metrics) {
+        this(dataSource, metrics, () -> { });
+    }
+
+    /** 仅测试使用的 GET_LOCK 尝试通知；默认无操作，不改变锁协议。 */
+    SearchAliasCoordinator(DataSource dataSource, MeterRegistry metrics, Runnable acquisitionAttemptHook) {
         this.dataSource = Objects.requireNonNull(dataSource, "数据源不能为空");
         this.metrics = Objects.requireNonNull(metrics, "指标注册表不能为空");
+        this.acquisitionAttemptHook = Objects.requireNonNull(acquisitionAttemptHook, "获取尝试 hook 不能为空");
     }
 
     public <T> T execute(Duration timeout, CriticalSection<T> section) {
         return execute(timeout, "unknown", "unknown", section);
+    }
+
+    DataSource dataSource() {
+        return dataSource;
     }
 
     /** 在固定物理连接上取得协调锁并执行临界区。 */
@@ -56,6 +67,7 @@ public final class SearchAliasCoordinator {
             long waitStarted = System.nanoTime();
             int lockResult;
             try {
+                acquisitionAttemptHook.run();
                 lockResult = queryLock(connection, timeoutSeconds);
             } catch (Throwable failure) {
                 recordAcquire(operation, owner, System.nanoTime() - waitStarted);

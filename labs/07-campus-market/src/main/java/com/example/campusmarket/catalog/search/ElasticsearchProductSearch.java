@@ -14,9 +14,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 
 import java.io.IOException;
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -26,18 +23,13 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
-import java.util.function.Function;
-import javax.sql.DataSource;
 
 /** Elasticsearch 商品索引实现，所有写入均通过 external_gte 版本保护。 */
 @Component
 public class ElasticsearchProductSearch implements ProductSearchPort {
     private static final String INITIAL_INDEX = "campus-listing-000001";
     private final ElasticsearchClient client;
-    private final org.springframework.jdbc.core.JdbcTemplate jdbc;
-    private final DataSource dataSource;
     private final SearchAliasCoordinator coordinator;
-    private final SearchIndexCleanupRepository cleanupRepository;
     private final MeterRegistry metrics;
     private final Consumer<Set<String>> aliasMembersReadHook;
     private volatile boolean initialized;
@@ -62,11 +54,10 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     ElasticsearchProductSearch(ElasticsearchClient client, org.springframework.jdbc.core.JdbcTemplate jdbc,
                                Consumer<Set<String>> aliasMembersReadHook, MeterRegistry metrics) {
         this.client = Objects.requireNonNull(client, "Elasticsearch 客户端不能为空");
-        this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
-        this.dataSource = Objects.requireNonNull(jdbc.getDataSource(), "JDBC数据源不能为空");
+        Objects.requireNonNull(jdbc, "JDBC不能为空");
+        var dataSource = Objects.requireNonNull(jdbc.getDataSource(), "JDBC数据源不能为空");
         this.metrics = Objects.requireNonNull(metrics, "指标注册表不能为空");
-        this.coordinator = new SearchAliasCoordinator(this.dataSource, this.metrics);
-        this.cleanupRepository = new SearchIndexCleanupRepository(this.jdbc);
+        this.coordinator = new SearchAliasCoordinator(dataSource, this.metrics);
         this.aliasMembersReadHook = Objects.requireNonNull(aliasMembersReadHook, "别名读取 hook 不能为空");
     }
 
@@ -233,49 +224,8 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         }
     }
 
-    /**
-     * 在外部别名请求前保护所有原 live 成员。行 owner/token 标识切换意图，
-     * 这样进程在 ES 成功后停止时，协调仍可恢复暂存集合。
-     */
-    void stageCleanup(Connection connection, Set<String> live, String target, String owner, String token) {
-        cleanupRepository.stage(connection, live, target, owner, token);
-    }
-
-    /** 只有别名请求完成后才将暂存成员置为可清理。 */
-    void armStagedCleanup(Connection connection, Set<String> staged, Set<String> stillLive, String owner, String token) {
-        cleanupRepository.arm(connection, staged, stillLive, owner, token);
-    }
-
-    /** 恢复被中断切换意图暂存的行。 */
-    void recoverStagedCleanup(Connection connection, Set<String> stillLive, String owner, String token) {
-        cleanupRepository.recover(connection, stillLive, owner, token);
-    }
-
-    void cancelCleanup(Connection connection, String index) {
-        cleanupRepository.cancel(connection, index);
-    }
-
-    void assertSwitchingIntent(Connection connection, String target, String owner, String token, long generation) {
-        Objects.requireNonNull(connection, "连接不能为空");
-        try (PreparedStatement statement = connection.prepareStatement("""
-            SELECT 1 FROM search_rebuild_intent
-            WHERE target_index=? AND phase='SWITCHING' AND owner_id=? AND claim_token=?
-              AND generation=? AND lease_until > CURRENT_TIMESTAMP(6)
-            """)) {
-            statement.setString(1, target);
-            statement.setString(2, owner);
-            statement.setString(3, token);
-            statement.setLong(4, generation);
-            try (ResultSet result = statement.executeQuery()) {
-                if (!result.next()) throw new SearchGateRepository.SearchGateClosedException("重建切换意图已失效");
-            }
-        } catch (SQLException failure) {
-            throw new IllegalStateException("校验重建切换意图失败", failure);
-        }
-    }
-
-    private <T> T withAliasCoordinator(Function<Connection, T> operation) {
-        return coordinator.execute(java.time.Duration.ofSeconds(30), "initialize-alias", cleanupOwner, operation::apply);
+    private <T> T withAliasCoordinator(java.util.function.Function<Connection, T> operation) {
+        return coordinator.execute(java.time.Duration.ofSeconds(30), "initialize-alias", "search-index-initializer", operation::apply);
     }
 
     private Set<String> aliasMembers(String alias) throws IOException {
@@ -355,88 +305,6 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         } catch (co.elastic.clients.elasticsearch._types.ElasticsearchException e) {
             if (!isVersionConflict(e)) throw e;
         }
-    }
-
-    public void scheduleCleanup(String index) {
-        cleanupRepository.schedule(index);
-    }
-
-    public void recordRebuildIntent(String target, String previous) {
-        if (target == null || target.isBlank()) throw new IllegalArgumentException("目标索引不能为空");
-        jdbc.update("INSERT INTO search_rebuild_intent(id,target_index,previous_index,phase,created_at,updated_at) VALUES (?,?,?,?,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE previous_index=VALUES(previous_index),updated_at=CURRENT_TIMESTAMP(6)", UUID.randomUUID().toString(), target, previous, "CREATED");
-    }
-
-    void recordRebuildIntent(Connection connection, String target, String previous) {
-        Objects.requireNonNull(connection, "连接不能为空");
-        if (target == null || target.isBlank()) throw new IllegalArgumentException("目标索引不能为空");
-        update(connection, "INSERT INTO search_rebuild_intent(id,target_index,previous_index,phase,created_at,updated_at) VALUES (?,?,?,?,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE previous_index=VALUES(previous_index),updated_at=CURRENT_TIMESTAMP(6)", UUID.randomUUID().toString(), target, previous, "CREATED");
-    }
-
-    public void markRebuildIntentSwitched(String target) {
-        jdbc.update("UPDATE search_rebuild_intent SET phase='SWITCHED',owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=?", target);
-    }
-
-    /** 在短小且持久的数据库操作中领取最终别名切换。 */
-    public boolean claimRebuildIntentSwitch(String target, String owner, String token, long generation) {
-        if (target == null || target.isBlank() || owner == null || owner.isBlank()
-            || token == null || token.isBlank() || generation <= 0) throw new IllegalArgumentException("重建切换领取参数无效");
-        return jdbc.update("UPDATE search_rebuild_intent SET phase='SWITCHING',owner_id=?,claim_token=?,lease_until=TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)),generation=?,updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=? AND phase='BUILDING'", owner, token, generation, target) == 1;
-    }
-
-    public boolean markRebuildIntentSwitched(String target, String owner, String token) {
-        return jdbc.update("UPDATE search_rebuild_intent SET phase='SWITCHED',owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=? AND phase='SWITCHING' AND owner_id=? AND claim_token=? AND lease_until > CURRENT_TIMESTAMP(6)", target, owner, token) == 1;
-    }
-
-    public void updateRebuildIntentPrevious(String target, String previous) {
-        jdbc.update("UPDATE search_rebuild_intent SET previous_index=?,updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=? AND phase='CREATED'", previous, target);
-    }
-
-    void updateRebuildIntentPrevious(Connection connection, String target, String previous) {
-        Objects.requireNonNull(connection, "连接不能为空");
-        try (PreparedStatement statement = connection.prepareStatement(
-            "UPDATE search_rebuild_intent SET previous_index=?,updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=? AND phase='CREATED'")) {
-            statement.setString(1, previous);
-            statement.setString(2, target);
-            statement.executeUpdate();
-        } catch (SQLException failure) {
-            throw new IllegalStateException("更新重建意图旧索引失败", failure);
-        }
-    }
-
-    public void markRebuildIntentBuilding(String target) {
-        jdbc.update("UPDATE search_rebuild_intent SET phase='BUILDING',updated_at=CURRENT_TIMESTAMP(6) WHERE target_index=? AND phase='CREATED'", target);
-    }
-
-    /** 在索引可能仍 live 或仍在填充时登记索引。 */
-    public void registerRebuildTarget(String index) {
-        cleanupRepository.registerBuilding(index, cleanupOwner, UUID.randomUUID().toString());
-    }
-
-    public boolean renewRebuildTarget(String index) {
-        return cleanupRepository.renewBuilding(index, cleanupOwner);
-    }
-
-    /** 让失败或无引用索引进入清理 worker 的候选范围。 */
-    public void armCleanup(String index) {
-        cleanupRepository.arm(index);
-    }
-
-    /** 在清理 worker 可见前，将受保护的 BUILDING target 标记为 live。 */
-    public void cancelCleanup(String index) {
-        cleanupRepository.cancel(index);
-    }
-
-    private static void update(Connection connection, String sql, Object... values) {
-        try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            for (int i = 0; i < values.length; i++) statement.setObject(i + 1, values[i]);
-            statement.executeUpdate();
-        } catch (SQLException failure) {
-            throw new IllegalStateException("更新索引清理状态失败", failure);
-        }
-    }
-
-    SearchIndexCleanupRepository cleanupRepository() {
-        return cleanupRepository;
     }
 
     /** 作为 ES 原语删除索引；所有权和 fencing 由 worker 负责。 */

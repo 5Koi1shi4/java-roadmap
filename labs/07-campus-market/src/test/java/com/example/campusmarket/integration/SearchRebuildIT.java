@@ -11,6 +11,7 @@ import com.example.campusmarket.catalog.search.SearchGateRepository;
 import com.example.campusmarket.catalog.search.SearchAliasCoordinator;
 import com.example.campusmarket.catalog.search.SearchIndexCleanupRepository;
 import com.example.campusmarket.catalog.search.SearchIndexCleanupWorker;
+import com.example.campusmarket.catalog.search.SearchRebuildIntentRepository;
 import com.example.campusmarket.catalog.search.SearchRebuildReconciler;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
@@ -34,6 +35,7 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.CountDownLatch;
@@ -64,6 +66,8 @@ class SearchRebuildIT extends SharedContainers {
     @Autowired ElasticsearchProductSearch elasticsearch;
     @Autowired ElasticsearchClient elasticsearchClient;
     @Autowired SearchIndexCleanupWorker cleanupWorker;
+    @Autowired SearchIndexCleanupRepository cleanupRepository;
+    @Autowired SearchRebuildIntentRepository intentRepository;
     @Autowired SearchRebuildReconciler reconciler;
     @Autowired MeterRegistry metrics;
 
@@ -221,52 +225,59 @@ class SearchRebuildIT extends SharedContainers {
         SearchGateRepository gateA = new SearchGateRepository(new JdbcTemplate(dataSource));
         SearchGateRepository gateB = new SearchGateRepository(new JdbcTemplate(dataSource));
         SearchAliasCoordinator coordinatorA = new SearchAliasCoordinator(dataSource);
-        SearchAliasCoordinator coordinatorB = new SearchAliasCoordinator(dataSource);
+        CountDownLatch bAcquireAttempted = new CountDownLatch(1);
+        SearchAliasCoordinator coordinatorB = coordinatorWithAcquireAttemptHook(dataSource, metrics, bAcquireAttempted::countDown);
+        java.util.concurrent.atomic.AtomicInteger aliasMutations = new java.util.concurrent.atomic.AtomicInteger();
+        ElasticsearchProductSearch mutationSearch = new ElasticsearchProductSearch(elasticsearchClient,
+            jdbc, ignored -> aliasMutations.incrementAndGet());
         SearchGateRepository.Lease leaseA = gateA.acquire("lease-expiry-A", Duration.ofSeconds(30));
-        CountDownLatch mutationA = new CountDownLatch(1);
-        CountDownLatch releaseA = new CountDownLatch(1);
-        java.util.List<String> order = new java.util.concurrent.CopyOnWriteArrayList<>();
+        CountDownLatch beforeFinalFenceA = new CountDownLatch(1);
+        CountDownLatch releaseFinalFenceA = new CountDownLatch(1);
+        CountDownLatch bEntered = new CountDownLatch(1);
         ExecutorService workers = Executors.newFixedThreadPool(2);
         try {
             Future<Void> first = workers.submit(() -> {
                 coordinatorA.execute(Duration.ofSeconds(30), "rebuild-cutover", "lease-expiry-A", connection -> {
                     invokeGateLease(gateA, connection, leaseA);
-                    invokeAliasMutation(elasticsearch, targetA, live);
-                    order.add("A");
-                    mutationA.countDown();
-                    awaitBarrier(mutationA, releaseA);
+                    beforeFinalFenceA.countDown();
+                    awaitBarrier(beforeFinalFenceA, releaseFinalFenceA);
+                    invokeGateLease(gateA, connection, leaseA);
+                    invokeAliasMutation(mutationSearch, targetA, live);
                     return null;
                 });
                 return null;
             });
-            assertThat(mutationA.await(30, TimeUnit.SECONDS)).isTrue();
+            assertThat(beforeFinalFenceA.await(30, TimeUnit.SECONDS)).isTrue();
             jdbc.update("UPDATE search_rebuild_gate SET lease_until=TIMESTAMPADD(MICROSECOND,-1,CURRENT_TIMESTAMP(6)) WHERE id=1");
             Future<Void> second = workers.submit(() -> {
-                if (!releaseA.await(30, TimeUnit.SECONDS)) throw new IllegalStateException("等待 A 释放超时");
-                SearchGateRepository.Lease leaseB = gateB.acquire("lease-expiry-B", Duration.ofSeconds(30));
-                try {
-                    coordinatorB.execute(Duration.ofSeconds(30), "rebuild-cutover", "lease-expiry-B", connection -> {
+                coordinatorB.execute(Duration.ofSeconds(30), "rebuild-cutover", "lease-expiry-B", connection -> {
+                    SearchGateRepository.Lease leaseB = invokeGateAcquire(gateB, connection, "lease-expiry-B", Duration.ofSeconds(30));
+                    try {
                         invokeGateLease(gateB, connection, leaseB);
+                        bEntered.countDown();
                         Set<String> currentLive = new java.util.LinkedHashSet<>(elasticsearch.currentReadIndexes());
-                        invokeAliasMutation(elasticsearch, targetB, currentLive);
-                        order.add("B");
+                        invokeAliasMutation(mutationSearch, targetB, currentLive);
                         return null;
-                    });
-                    return null;
-                } finally {
-                    gateB.release(leaseB);
-                }
+                    } finally {
+                        invokeGateRelease(gateB, connection, leaseB);
+                    }
+                });
+                return null;
             });
-            assertThat(second.isDone()).isFalse();
-            releaseA.countDown();
-            first.get(30, TimeUnit.SECONDS);
+            assertThat(bAcquireAttempted.await(30, TimeUnit.SECONDS)).isTrue();
+            assertThat(bEntered.await(0, TimeUnit.MILLISECONDS)).isFalse();
+            releaseFinalFenceA.countDown();
+            ExecutionException staleA = assertThrows(ExecutionException.class, () -> first.get(30, TimeUnit.SECONDS));
+            assertThat(staleA.getCause()).isInstanceOf(SearchGateRepository.SearchGateClosedException.class);
+            assertThat(aliasMutations).hasValue(0);
+            assertThat(bEntered.await(30, TimeUnit.SECONDS)).isTrue();
             second.get(30, TimeUnit.SECONDS);
-            assertThat(order).containsExactly("A", "B");
+            assertThat(aliasMutations).hasValue(1);
             assertThat(elasticsearch.currentReadIndexes()).containsExactly(targetB);
             assertThat(elasticsearch.currentWriteIndexes()).containsExactly(targetB);
         } finally {
             gateA.release(leaseA);
-            releaseA.countDown();
+            releaseFinalFenceA.countDown();
             workers.shutdownNow();
             assertThat(workers.awaitTermination(30, TimeUnit.SECONDS)).isTrue();
         }
@@ -483,9 +494,9 @@ class SearchRebuildIT extends SharedContainers {
     void reconciliationCannotRollbackWhileHigherGenerationIsSwitching() throws Exception {
         SearchRebuildService.RebuildReport old = rebuild.rebuild();
         String target = elasticsearch.createRebuildIndex();
-        elasticsearch.recordRebuildIntent(target, old.index());
-        elasticsearch.markRebuildIntentBuilding(target);
-        elasticsearch.registerRebuildTarget(target);
+        intentRepository.record(target, old.index());
+        intentRepository.markBuilding(target);
+        cleanupRepository.registerBuilding(target, "search-cleanup-test", UUID.randomUUID().toString());
         long activeGeneration = jdbc.queryForObject("SELECT generation FROM search_rebuild_gate WHERE id=1", Long.class) + 1;
         jdbc.update("UPDATE search_rebuild_intent SET phase='SWITCHING',generation=?,owner_id='new-owner',claim_token='new-token',lease_until=TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6)) WHERE target_index=?", activeGeneration, target);
         Set<String> liveMembers = new java.util.LinkedHashSet<>(elasticsearch.currentReadIndexes());
@@ -585,6 +596,51 @@ class SearchRebuildIT extends SharedContainers {
         }
     }
 
+    private static SearchAliasCoordinator coordinatorWithAcquireAttemptHook(
+        DataSource dataSource, MeterRegistry metrics, Runnable hook) {
+        try {
+            Constructor<SearchAliasCoordinator> constructor = SearchAliasCoordinator.class.getDeclaredConstructor(
+                DataSource.class, MeterRegistry.class, Runnable.class);
+            constructor.setAccessible(true);
+            return constructor.newInstance(dataSource, metrics, hook);
+        } catch (ReflectiveOperationException failure) {
+            throw new IllegalStateException("构造协调器测试接缝失败", failure);
+        }
+    }
+
+    private static SearchGateRepository.Lease invokeGateAcquire(SearchGateRepository gate,
+                                                                 Connection connection, String owner,
+                                                                 Duration duration) {
+        try {
+            Method acquire = SearchGateRepository.class.getDeclaredMethod(
+                "acquire", Connection.class, String.class, Duration.class);
+            acquire.setAccessible(true);
+            return (SearchGateRepository.Lease) acquire.invoke(gate, connection, owner, duration);
+        } catch (InvocationTargetException failure) {
+            Throwable cause = failure.getCause();
+            if (cause instanceof RuntimeException runtime) throw runtime;
+            throw new IllegalStateException(cause);
+        } catch (ReflectiveOperationException failure) {
+            throw new IllegalStateException(failure);
+        }
+    }
+
+    private static int invokeGateRelease(SearchGateRepository gate, Connection connection,
+                                         SearchGateRepository.Lease lease) {
+        try {
+            Method release = SearchGateRepository.class.getDeclaredMethod(
+                "release", Connection.class, SearchGateRepository.Lease.class);
+            release.setAccessible(true);
+            return (int) release.invoke(gate, connection, lease);
+        } catch (InvocationTargetException failure) {
+            Throwable cause = failure.getCause();
+            if (cause instanceof RuntimeException runtime) throw runtime;
+            throw new IllegalStateException(cause);
+        } catch (ReflectiveOperationException failure) {
+            throw new IllegalStateException(failure);
+        }
+    }
+
     private static void invokeReconcilerArm(SearchRebuildReconciler reconciler,
                                             Connection connection, String index) {
         try {
@@ -633,9 +689,9 @@ class SearchRebuildIT extends SharedContainers {
     void reconciliationProtectsAliasTargetAfterSwitchBeforeIntentCommit() throws Exception {
         String previous = elasticsearch.currentReadIndex();
         String target = elasticsearch.createRebuildIndex();
-        elasticsearch.recordRebuildIntent(target, previous);
-        elasticsearch.markRebuildIntentBuilding(target);
-        elasticsearch.registerRebuildTarget(target);
+        intentRepository.record(target, previous);
+        intentRepository.markBuilding(target);
+        cleanupRepository.registerBuilding(target, "search-cleanup-test", UUID.randomUUID().toString());
 
         // 模拟外部别名请求已成功，但数据库阶段更新或提交随即中断。
         Set<String> liveMembers = new java.util.LinkedHashSet<>(elasticsearch.currentReadIndexes());
@@ -663,7 +719,7 @@ class SearchRebuildIT extends SharedContainers {
     @Test
     void twoCleanupWorkersUseSkipLockedAndOwnerFencing() throws Exception {
         String target = elasticsearch.createRebuildIndex();
-        elasticsearch.scheduleCleanup(target);
+        cleanupRepository.schedule(target);
         CountDownLatch claimCommitted = new CountDownLatch(1);
         CountDownLatch releaseDelete = new CountDownLatch(1);
         SearchIndexCleanupRepository firstRepository = new SearchIndexCleanupRepository(new JdbcTemplate(dataSource));
@@ -712,9 +768,10 @@ class SearchRebuildIT extends SharedContainers {
     void cleanupAndCutoverShareCoordinator() throws Exception {
         String target = elasticsearch.createRebuildIndex();
         String cutoverTarget = elasticsearch.createRebuildIndex();
-        elasticsearch.scheduleCleanup(target);
+        cleanupRepository.schedule(target);
         CountDownLatch cleanupRead = new CountDownLatch(1);
         CountDownLatch releaseCleanup = new CountDownLatch(1);
+        CountDownLatch cutoverAcquireAttempted = new CountDownLatch(1);
         cleanupWorker.setCleanupDeleteHook(index -> {
             cleanupRead.countDown();
             awaitBarrier(cleanupRead, releaseCleanup);
@@ -724,12 +781,11 @@ class SearchRebuildIT extends SharedContainers {
             Future<Integer> cleanup = workers.submit(cleanupWorker::runOnce);
             assertThat(cleanupRead.await(30, TimeUnit.SECONDS)).isTrue();
 
-            CountDownLatch cutoverStarted = new CountDownLatch(1);
             CountDownLatch cutoverEntered = new CountDownLatch(1);
+            SearchAliasCoordinator cutoverCoordinator = coordinatorWithAcquireAttemptHook(
+                dataSource, metrics, cutoverAcquireAttempted::countDown);
             Future<Void> cutover = workers.submit(() -> {
-                cutoverStarted.countDown();
-                if (!releaseCleanup.await(30, TimeUnit.SECONDS)) throw new IllegalStateException("等待清理 live-check 释放超时");
-                new SearchAliasCoordinator(dataSource).execute(Duration.ofSeconds(30), "rebuild-cutover", "cleanup-cutover", connection -> {
+                cutoverCoordinator.execute(Duration.ofSeconds(30), "rebuild-cutover", "cleanup-cutover", connection -> {
                     cutoverEntered.countDown();
                     Set<String> currentLive = allAliasMembersFromRawClient();
                     invokeAliasMutation(elasticsearch, cutoverTarget, currentLive);
@@ -737,8 +793,8 @@ class SearchRebuildIT extends SharedContainers {
                 });
                 return null;
             });
-            assertThat(cutoverStarted.await(30, TimeUnit.SECONDS)).isTrue();
-            assertThat(cutoverEntered.await(200, TimeUnit.MILLISECONDS)).isFalse();
+            assertThat(cutoverAcquireAttempted.await(30, TimeUnit.SECONDS)).isTrue();
+            assertThat(cutoverEntered.await(0, TimeUnit.MILLISECONDS)).isFalse();
             releaseCleanup.countDown();
             cleanup.get(30, TimeUnit.SECONDS);
             cutover.get(30, TimeUnit.SECONDS);
@@ -756,7 +812,7 @@ class SearchRebuildIT extends SharedContainers {
     @Test
     void cleanupSuspendsCallerTransaction() {
         String target = elasticsearch.createRebuildIndex();
-        elasticsearch.scheduleCleanup(target);
+        cleanupRepository.schedule(target);
         AtomicBoolean observedSuspended = new AtomicBoolean();
         cleanupWorker.setCleanupDeleteHook(index -> observedSuspended.set(!TransactionSynchronizationManager.isActualTransactionActive()));
         try {
@@ -773,7 +829,7 @@ class SearchRebuildIT extends SharedContainers {
     @Test
     void cleanupClaimIsVisibleAndStaleCompletionIsFenced() {
         String target = elasticsearch.createRebuildIndex();
-        elasticsearch.scheduleCleanup(target);
+        cleanupRepository.schedule(target);
         SearchIndexCleanupRepository first = new SearchIndexCleanupRepository(jdbc);
         SearchIndexCleanupRepository second = new SearchIndexCleanupRepository(new JdbcTemplate(dataSource));
         SearchIndexCleanupRepository.CleanupClaim oldClaim = first.claimBatch(20).get(0);
@@ -790,7 +846,7 @@ class SearchRebuildIT extends SharedContainers {
     @Test
     void coordinationTimeoutReturnsCleanupClaimWithoutConsumingBusinessAttempt() {
         String target = elasticsearch.createRebuildIndex();
-        elasticsearch.scheduleCleanup(target);
+        cleanupRepository.schedule(target);
         SearchIndexCleanupRepository repository = new SearchIndexCleanupRepository(jdbc);
         SearchIndexCleanupRepository.CleanupClaim claim = repository.claimBatch(20).get(0);
         SearchAliasCoordinator.SearchCoordinationTimeoutException timeout =
@@ -955,7 +1011,7 @@ class SearchRebuildIT extends SharedContainers {
     @Test
     void cleanupLiveProtectionIsMeasured() throws Exception {
         String target = elasticsearch.createRebuildIndex();
-        elasticsearch.scheduleCleanup(target);
+        cleanupRepository.schedule(target);
         elasticsearchClient.indices().updateAliases(a -> a
             .actions(x -> x.add(v -> v.index(target).alias(ProductSearchPort.READ_ALIAS)))
             .actions(x -> x.add(v -> v.index(target).alias(ProductSearchPort.WRITE_ALIAS))));

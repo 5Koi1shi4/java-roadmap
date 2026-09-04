@@ -21,39 +21,62 @@ public class SearchRebuildService {
     private final TransactionTemplate transactions;
     private final SearchGateRepository gate;
     private final SearchAliasCoordinator coordinator;
+    private final SearchIndexCleanupRepository cleanupRepository;
+    private final SearchRebuildIntentRepository intentRepository;
     private final String owner = "search-rebuild-" + UUID.randomUUID();
+    private final String cleanupOwner = "search-cleanup-" + UUID.randomUUID();
     private final Runnable beforeGateAcquire;
     private final Consumer<String> stageHook;
 
     public SearchRebuildService(JdbcTemplate jdbc, SearchProjector projector, ElasticsearchProductSearch elasticsearch,
                                 PlatformTransactionManager transactionManager, SearchGateRepository gate) {
-        this(jdbc, projector, elasticsearch, transactionManager, gate, new SearchAliasCoordinator(jdbc.getDataSource()), () -> { }, stage -> { });
+        this(jdbc, projector, elasticsearch, transactionManager, gate, new SearchAliasCoordinator(jdbc.getDataSource()),
+            new SearchIndexCleanupRepository(jdbc), new SearchRebuildIntentRepository(jdbc), () -> { }, stage -> { });
+    }
+
+    public SearchRebuildService(JdbcTemplate jdbc, SearchProjector projector, ElasticsearchProductSearch elasticsearch,
+                                PlatformTransactionManager transactionManager, SearchGateRepository gate,
+                                SearchAliasCoordinator coordinator) {
+        this(jdbc, projector, elasticsearch, transactionManager, gate, coordinator,
+            new SearchIndexCleanupRepository(jdbc), new SearchRebuildIntentRepository(jdbc), () -> { }, stage -> { });
     }
 
     @Autowired
     public SearchRebuildService(JdbcTemplate jdbc, SearchProjector projector, ElasticsearchProductSearch elasticsearch,
                                 PlatformTransactionManager transactionManager, SearchGateRepository gate,
-                                SearchAliasCoordinator coordinator) {
-        this(jdbc, projector, elasticsearch, transactionManager, gate, coordinator, () -> { }, stage -> { });
+                                SearchAliasCoordinator coordinator, SearchIndexCleanupRepository cleanupRepository,
+                                SearchRebuildIntentRepository intentRepository) {
+        this(jdbc, projector, elasticsearch, transactionManager, gate, coordinator, cleanupRepository, intentRepository,
+            () -> { }, stage -> { });
     }
 
     /** 使门禁前并发重建窗口具有确定性的测试接缝。 */
     public SearchRebuildService(JdbcTemplate jdbc, SearchProjector projector, ElasticsearchProductSearch elasticsearch,
                                 PlatformTransactionManager transactionManager, SearchGateRepository gate,
                                 Runnable beforeGateAcquire) {
-        this(jdbc, projector, elasticsearch, transactionManager, gate, new SearchAliasCoordinator(jdbc.getDataSource()), beforeGateAcquire, stage -> { });
+        this(jdbc, projector, elasticsearch, transactionManager, gate, new SearchAliasCoordinator(jdbc.getDataSource()),
+            new SearchIndexCleanupRepository(jdbc), new SearchRebuildIntentRepository(jdbc), beforeGateAcquire, stage -> { });
     }
 
     /** 用于确定性注入填充、补放和别名故障的完整测试接缝。 */
     public SearchRebuildService(JdbcTemplate jdbc, SearchProjector projector, ElasticsearchProductSearch elasticsearch,
                                 PlatformTransactionManager transactionManager, SearchGateRepository gate,
                                 Runnable beforeGateAcquire, Consumer<String> stageHook) {
-        this(jdbc, projector, elasticsearch, transactionManager, gate, new SearchAliasCoordinator(jdbc.getDataSource()), beforeGateAcquire, stageHook);
+        this(jdbc, projector, elasticsearch, transactionManager, gate, new SearchAliasCoordinator(jdbc.getDataSource()),
+            new SearchIndexCleanupRepository(jdbc), new SearchRebuildIntentRepository(jdbc), beforeGateAcquire, stageHook);
     }
 
     SearchRebuildService(JdbcTemplate jdbc, SearchProjector projector, ElasticsearchProductSearch elasticsearch,
                          PlatformTransactionManager transactionManager, SearchGateRepository gate,
                          SearchAliasCoordinator coordinator, Runnable beforeGateAcquire, Consumer<String> stageHook) {
+        this(jdbc, projector, elasticsearch, transactionManager, gate, coordinator,
+            new SearchIndexCleanupRepository(jdbc), new SearchRebuildIntentRepository(jdbc), beforeGateAcquire, stageHook);
+    }
+
+    SearchRebuildService(JdbcTemplate jdbc, SearchProjector projector, ElasticsearchProductSearch elasticsearch,
+                         PlatformTransactionManager transactionManager, SearchGateRepository gate,
+                         SearchAliasCoordinator coordinator, SearchIndexCleanupRepository cleanupRepository,
+                         SearchRebuildIntentRepository intentRepository, Runnable beforeGateAcquire, Consumer<String> stageHook) {
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.projector = Objects.requireNonNull(projector, "投影器不能为空");
         this.elasticsearch = Objects.requireNonNull(elasticsearch, "Elasticsearch不能为空");
@@ -61,6 +84,8 @@ public class SearchRebuildService {
         this.transactions.setIsolationLevelName("ISOLATION_REPEATABLE_READ");
         this.gate = Objects.requireNonNull(gate, "搜索门禁不能为空");
         this.coordinator = Objects.requireNonNull(coordinator, "别名协调器不能为空");
+        this.cleanupRepository = Objects.requireNonNull(cleanupRepository, "清理仓储不能为空");
+        this.intentRepository = Objects.requireNonNull(intentRepository, "重建意图仓储不能为空");
         this.beforeGateAcquire = Objects.requireNonNull(beforeGateAcquire, "切换前 barrier 不能为空");
         this.stageHook = Objects.requireNonNull(stageHook, "重建阶段 hook 不能为空");
     }
@@ -76,20 +101,20 @@ public class SearchRebuildService {
                 coordinator.execute(java.time.Duration.ofSeconds(30), "rebuild-initialize", owner, connection -> {
                     gate.assertLease(connection, lease);
                     // 只有本 worker 持有门禁后才创建并填充意图，避免协调在门禁前窗口领取无 owner 的 CREATED 行。
-                    elasticsearch.recordRebuildIntent(connection, target, null);
+                    intentRepository.record(connection, target, null);
                     elasticsearch.ensureInitializedForAliasRead(connection);
                     String current = elasticsearch.readCurrentReadIndex();
-                    elasticsearch.updateRebuildIntentPrevious(connection, target, current);
+                    intentRepository.updatePrevious(connection, target, current);
                     return null;
                 });
                 elasticsearch.createRebuildIndex(target);
-                elasticsearch.markRebuildIntentBuilding(target);
-                elasticsearch.registerRebuildTarget(target);
+                intentRepository.markBuilding(target);
+                cleanupRepository.registerBuilding(target, cleanupOwner, UUID.randomUUID().toString());
                 renewOrThrow(lease);
                 stageHook.accept("FILL");
                 for (ProductSearchPort.ProductDocument document : snapshot.documents()) {
                     renewOrThrow(lease);
-                    if (!elasticsearch.renewRebuildTarget(target)) throw new IllegalStateException("目标索引租约已过期");
+                    if (!cleanupRepository.renewBuilding(target, cleanupOwner)) throw new IllegalStateException("目标索引租约已过期");
                     projector.projectDocumentInto(target, document, lease);
                 }
                 stageHook.accept("REFRESH_FILL");
@@ -100,7 +125,7 @@ public class SearchRebuildService {
                     (rs, rowNum) -> new OutboxChange(UUID.fromString(rs.getString(1)), rs.getLong(2)), snapshot.highWater()));
                 for (OutboxChange change : changes) {
                     renewOrThrow(lease);
-                    if (!elasticsearch.renewRebuildTarget(target)) throw new IllegalStateException("目标索引租约已过期");
+                    if (!cleanupRepository.renewBuilding(target, cleanupOwner)) throw new IllegalStateException("目标索引租约已过期");
                     projector.projectInto(target, change.listingId(), change.aggregateVersion(), lease);
                 }
                 stageHook.accept("REFRESH_REPLAY");
@@ -108,23 +133,23 @@ public class SearchRebuildService {
                 // 先在短事务中领取持久意图，再在不持有数据库锁的情况下执行可能较慢的 ES 请求。
                 String switchToken = UUID.randomUUID().toString();
                 gate.assertLease(lease);
-                if (!elasticsearch.claimRebuildIntentSwitch(target, owner, switchToken, lease.generation())) {
+                if (!intentRepository.claimSwitch(target, owner, switchToken, lease.generation())) {
                     throw new IllegalStateException("重建切换意图已被其他 worker 领取");
                 }
-                if (!elasticsearch.renewRebuildTarget(target)) throw new IllegalStateException("目标索引租约已过期");
+                if (!cleanupRepository.renewBuilding(target, cleanupOwner)) throw new IllegalStateException("目标索引租约已过期");
                 stageHook.accept("ALIAS_SWAP");
                 coordinator.execute(java.time.Duration.ofSeconds(30), "rebuild-cutover", owner, connection -> {
                     gate.assertLease(connection, lease);
-                    elasticsearch.assertSwitchingIntent(connection, target, owner, switchToken, lease.generation());
+                    intentRepository.assertSwitching(connection, target, owner, switchToken, lease.generation());
                     Set<String> live = elasticsearch.readAllAliasMembers();
-                    elasticsearch.stageCleanup(connection, live, target, owner, switchToken);
+                    cleanupRepository.stage(connection, live, target, owner, switchToken);
                     ElasticsearchProductSearch.AliasTransition result = elasticsearch.replaceAliasesWithSingleTarget(target, live);
                     stageHook.accept("AFTER_ALIAS_SWAP");
-                    elasticsearch.armStagedCleanup(connection, result.previousIndexes(), Set.of(target), owner, switchToken);
-                    elasticsearch.cancelCleanup(connection, target);
+                    cleanupRepository.arm(connection, result.previousIndexes(), Set.of(target), owner, switchToken);
+                    cleanupRepository.cancel(connection, target);
                     return result;
                 });
-                elasticsearch.markRebuildIntentSwitched(target, owner, switchToken);
+                intentRepository.markSwitched(target, owner, switchToken);
                 RebuildReport report = new RebuildReport(target, snapshot.highWater(), snapshot.documents().size(), changes.size());
                 aliasSwitched = true;
                 return report;
@@ -133,8 +158,8 @@ public class SearchRebuildService {
             }
         } catch (RuntimeException failure) {
             // 若进程在 ES 别名请求与数据库提交之间退出，协调器会将意图与当前别名重新比较。
-            if (aliasSwitched) elasticsearch.cancelCleanup(target);
-            else elasticsearch.armCleanup(target);
+            if (aliasSwitched) cleanupRepository.cancel(target);
+            else cleanupRepository.arm(target);
             throw failure;
         }
     }

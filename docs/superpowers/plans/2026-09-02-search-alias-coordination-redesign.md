@@ -89,11 +89,11 @@ public final class SearchAliasCoordinator {
 
     public <T> T execute(Duration timeout, CriticalSection<T> section) {
         // validate timeout: > 0 and <= 60 seconds
-        // get one Connection, set autoCommit=true
-        // SELECT GET_LOCK(LOCK_NAME, timeoutSeconds)
-        // run section with that exact Connection
-        // finally SELECT RELEASE_LOCK(LOCK_NAME) on the same Connection
-        // preserve the primary exception and attach release failure as suppressed
+        // 获取一个 Connection，并设置 autoCommit=true
+        // 执行 SELECT GET_LOCK(LOCK_NAME, timeoutSeconds)
+        // 使用同一个 Connection 执行临界区
+        // 最后仍在同一个 Connection 上执行 SELECT RELEASE_LOCK(LOCK_NAME)
+        // 保留主异常，并将释放锁失败作为 suppressed 异常附加
     }
 
     @FunctionalInterface
@@ -264,7 +264,7 @@ Pause cleanup after it reads a target as non-live while holding the coordinator.
 assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isTrue();
 cleanupWorker.runOnce();
 // Inside cleanupDeleteHook:
-assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse(); // 已暂停调用方事务
 ```
 
 Retain the existing two-worker lease-expiry test and assert the stale owner's completion CAS changes zero rows.
@@ -289,7 +289,7 @@ public class SearchIndexCleanupWorker {
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public int runOnce() {
         List<CleanupClaim> claims = repository.claimBatch(20); // REQUIRES_NEW bean
-        for (CleanupClaim claim : claims) cleanupOne(claim);
+        for (CleanupClaim claim : claims) cleanupOne(claim); // 逐个处理已领取的清理任务
         return claims.size();
     }
 
