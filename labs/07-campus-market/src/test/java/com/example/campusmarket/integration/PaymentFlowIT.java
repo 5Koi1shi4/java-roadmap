@@ -480,6 +480,35 @@ class PaymentFlowIT extends SharedContainers {
         assertThat(jdbc.queryForObject("SELECT status FROM refund_order WHERE id=?", String.class, second.toString())).isEqualTo("SUCCEEDED");
     }
 
+    @Test
+    void paymentCreateAttemptCanOnlyBeClaimedOnce() {
+        UUID order = pendingOrder();
+        UUID payment = UUID.randomUUID();
+        jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,status,created_at,updated_at) VALUES (?,?,?,?,100,'PENDING',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            payment.toString(), order.toString(), "simulated", "initial-payment-" + payment);
+
+        assertThat(repository.claimInitialPaymentAttempt(payment, "owner-a", "token-a")).isTrue();
+        jdbc.update("UPDATE payment_order SET reconcile_lease_until=DATE_SUB(CURRENT_TIMESTAMP(6), INTERVAL 1 SECOND) WHERE id=?", payment.toString());
+        assertThat(repository.claimInitialPaymentAttempt(payment, "owner-b", "token-b")).isFalse();
+        assertThat(jdbc.queryForObject("SELECT create_attempted_at IS NOT NULL FROM payment_order WHERE id=?", Boolean.class, payment.toString())).isTrue();
+        assertThat(jdbc.queryForObject("SELECT reconcile_token FROM payment_order WHERE id=?", String.class, payment.toString())).isEqualTo("token-a");
+    }
+
+    @Test
+    void refundCreateAttemptCanOnlyBeClaimedOnce() {
+        UUID payment = paidPayment(100);
+        UUID order = UUID.fromString(jdbc.queryForObject("SELECT order_id FROM payment_order WHERE id=?", String.class, payment.toString()));
+        UUID refund = UUID.randomUUID();
+        jdbc.update("INSERT INTO refund_order (id,order_id,payment_order_id,provider,idempotency_key,source_type,paid_amount_fen,amount_fen,reserved_refund_fen,status,created_at,updated_at) VALUES (?,?,?,?,?,'ORDER',?,?,?,'REQUESTED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            refund.toString(), order.toString(), payment.toString(), "simulated", "initial-refund-" + refund, 100, 40, 40);
+
+        assertThat(repository.claimInitialRefundAttempt(refund, "owner-a", "token-a")).isTrue();
+        jdbc.update("UPDATE refund_order SET reconcile_lease_until=DATE_SUB(CURRENT_TIMESTAMP(6), INTERVAL 1 SECOND) WHERE id=?", refund.toString());
+        assertThat(repository.claimInitialRefundAttempt(refund, "owner-b", "token-b")).isFalse();
+        assertThat(jdbc.queryForObject("SELECT create_attempted_at IS NOT NULL FROM refund_order WHERE id=?", Boolean.class, refund.toString())).isTrue();
+        assertThat(jdbc.queryForObject("SELECT reconcile_token FROM refund_order WHERE id=?", String.class, refund.toString())).isEqualTo("token-a");
+    }
+
     private UUID paidPayment(long amountFen) {
         UUID order = UUID.randomUUID();
         UUID payment = UUID.randomUUID();

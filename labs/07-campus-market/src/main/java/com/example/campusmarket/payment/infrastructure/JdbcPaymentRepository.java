@@ -104,13 +104,22 @@ public class JdbcPaymentRepository {
         return claimPaymentRequest(paymentId, "payment-request", UUID.randomUUID().toString());
     }
 
-    /** 首次 provider IO 与对账共用数据库 owner/token/lease fencing。 */
+    /** 首次 provider create 只能成功一次；租约到期或 UNKNOWN 不会重新取得 create 权。 */
     public boolean claimPaymentRequest(UUID paymentId, String owner, String token) {
-        return jdbc.update("UPDATE payment_order SET reconcile_owner=?,reconcile_token=?,reconcile_lease_until=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 30 SECOND)," +
-                "next_reconcile_at=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 30 SECOND),updated_at=CURRENT_TIMESTAMP(6) " +
-                "WHERE id=? AND provider_reference IS NULL AND status IN ('PENDING','CREATED','UNKNOWN') " +
-                "AND (reconcile_owner IS NULL OR reconcile_lease_until IS NULL OR reconcile_lease_until<=CURRENT_TIMESTAMP(6))",
-            owner, token, paymentId.toString()) == 1;
+        return claimInitialPaymentAttempt(paymentId, owner, token);
+    }
+
+    public boolean claimInitialPaymentAttempt(UUID paymentId, String owner, String token) {
+        return jdbc.update("""
+            UPDATE payment_order
+               SET create_attempted_at=CURRENT_TIMESTAMP(6),
+                   reconcile_owner=?, reconcile_token=?,
+                   reconcile_lease_until=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),
+                   next_reconcile_at=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),
+                   updated_at=CURRENT_TIMESTAMP(6)
+             WHERE id=? AND create_attempted_at IS NULL
+               AND provider_reference IS NULL AND status IN ('PENDING','CREATED')
+            """, owner, token, paymentId.toString()) == 1;
     }
 
     public boolean claimPaymentReconciliation(UUID paymentId) {
@@ -264,7 +273,20 @@ public class JdbcPaymentRepository {
     }
 
     public boolean claimRefundRequest(UUID refundId) {
-        return jdbc.update("UPDATE refund_order SET next_reconcile_at=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND provider_reference IS NULL AND status='REQUESTED' AND (next_reconcile_at IS NULL OR next_reconcile_at<=CURRENT_TIMESTAMP(6))", refundId.toString()) == 1;
+        return claimInitialRefundAttempt(refundId, "refund-request", UUID.randomUUID().toString());
+    }
+
+    public boolean claimInitialRefundAttempt(UUID refundId, String owner, String token) {
+        return jdbc.update("""
+            UPDATE refund_order
+               SET create_attempted_at=CURRENT_TIMESTAMP(6),
+                   reconcile_owner=?, reconcile_token=?,
+                   reconcile_lease_until=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),
+                   next_reconcile_at=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),
+                   updated_at=CURRENT_TIMESTAMP(6)
+             WHERE id=? AND create_attempted_at IS NULL
+               AND provider_reference IS NULL AND status='REQUESTED'
+            """, owner, token, refundId.toString()) == 1;
     }
 
     public boolean recordCallback(PaymentGateway.VerifiedCallback callback, byte[] rawBody) {
