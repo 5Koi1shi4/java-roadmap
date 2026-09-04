@@ -41,15 +41,19 @@ public class SimulatedPaymentProviderController {
 
     @PostMapping(path = "/payments", consumes = MediaType.APPLICATION_JSON_VALUE)
     public PaymentResponse createPayment(@RequestBody PaymentRequest request) {
-        if (request.amountFen() <= 0 || request.idempotencyKey() == null || request.idempotencyKey().isBlank()) {
+        if (request.orderId() == null || request.orderId().isBlank() || request.amountFen() <= 0
+            || request.idempotencyKey() == null || request.idempotencyKey().isBlank()) {
             throw new IllegalArgumentException("支付请求无效");
         }
-        PaymentEntry prior = paymentsByKey.get(request.idempotencyKey());
-        if (prior != null && (!prior.orderId().equals(request.orderId()) || prior.amountFen() != request.amountFen())) throw new IdempotencyConflictException();
         String ref = "sim-pay-" + UUID.nameUUIDFromBytes(request.idempotencyKey().getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        payments.putIfAbsent(ref, new PaymentEntry(request.orderId(), request.amountFen(), "PENDING"));
-        paymentsByKey.putIfAbsent(request.idempotencyKey(), payments.get(ref));
-        return new PaymentResponse(provider, ref, payments.get(ref).status(), request.amountFen());
+        PaymentEntry entry = paymentsByKey.compute(request.idempotencyKey(), (ignored, prior) -> {
+            if (prior != null && (!prior.orderId().equals(request.orderId()) || prior.amountFen() != request.amountFen())) {
+                throw new IdempotencyConflictException();
+            }
+            return prior == null ? new PaymentEntry(request.orderId(), request.amountFen(), "PENDING") : prior;
+        });
+        payments.putIfAbsent(ref, entry);
+        return new PaymentResponse(provider, ref, entry.status(), entry.amountFen());
     }
 
     @GetMapping("/payments/{reference}")
@@ -57,6 +61,14 @@ public class SimulatedPaymentProviderController {
         PaymentEntry entry = payments.get(reference);
         if (entry == null) return new PaymentResponse(provider, reference, "UNKNOWN", 0);
         return new PaymentResponse(provider, reference, entry.status(), entry.amountFen());
+    }
+
+    @GetMapping("/payments/by-key/{idempotencyKey}")
+    public PaymentResponse queryPaymentByKey(@PathVariable String idempotencyKey) {
+        PaymentEntry entry = paymentsByKey.get(idempotencyKey);
+        if (entry == null) return new PaymentResponse(provider, "unknown", "UNKNOWN", 0);
+        String ref = "sim-pay-" + UUID.nameUUIDFromBytes(idempotencyKey.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        return new PaymentResponse(provider, ref, entry.status(), entry.amountFen());
     }
 
     @PostMapping("/payments/{reference}/{status}")
@@ -71,15 +83,19 @@ public class SimulatedPaymentProviderController {
 
     @PostMapping(path = "/refunds", consumes = MediaType.APPLICATION_JSON_VALUE)
     public RefundResponse createRefund(@RequestBody RefundRequest request) {
-        if (request.amountFen() <= 0 || request.idempotencyKey() == null || request.idempotencyKey().isBlank()) {
+        if (request.orderId() == null || request.orderId().isBlank() || request.paymentProviderReference() == null
+            || request.paymentProviderReference().isBlank() || request.amountFen() <= 0
+            || request.idempotencyKey() == null || request.idempotencyKey().isBlank()) {
             throw new IllegalArgumentException("退款请求无效");
         }
-        RefundEntry prior = refundsByKey.get(request.idempotencyKey());
-        if (prior != null && (prior.amountFen() != request.amountFen() || !prior.paymentReference().equals(request.paymentProviderReference()))) throw new IdempotencyConflictException();
         String ref = "sim-refund-" + UUID.nameUUIDFromBytes(request.idempotencyKey().getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        refunds.putIfAbsent(ref, new RefundEntry(request.amountFen(), "PENDING"));
-        refundsByKey.putIfAbsent(request.idempotencyKey(), new RefundEntry(request.amountFen(), "PENDING", request.paymentProviderReference()));
-        return new RefundResponse(provider, ref, refunds.get(ref).status(), request.amountFen());
+        RefundEntry entry = refundsByKey.compute(request.idempotencyKey(), (ignored, prior) -> {
+            if (prior != null && (prior.amountFen() != request.amountFen()
+                || !prior.paymentReference().equals(request.paymentProviderReference()))) throw new IdempotencyConflictException();
+            return prior == null ? new RefundEntry(request.amountFen(), "PENDING", request.paymentProviderReference()) : prior;
+        });
+        refunds.putIfAbsent(ref, entry);
+        return new RefundResponse(provider, ref, entry.status(), entry.amountFen());
     }
 
     @GetMapping("/refunds/{reference}")
@@ -87,6 +103,14 @@ public class SimulatedPaymentProviderController {
         RefundEntry entry = refunds.get(reference);
         if (entry == null) return new RefundResponse(provider, reference, "UNKNOWN", 0);
         return new RefundResponse(provider, reference, entry.status(), entry.amountFen());
+    }
+
+    @GetMapping("/refunds/by-key/{idempotencyKey}")
+    public RefundResponse queryRefundByKey(@PathVariable String idempotencyKey) {
+        RefundEntry entry = refundsByKey.get(idempotencyKey);
+        if (entry == null) return new RefundResponse(provider, "unknown", "UNKNOWN", 0);
+        String ref = "sim-refund-" + UUID.nameUUIDFromBytes(idempotencyKey.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        return new RefundResponse(provider, ref, entry.status(), entry.amountFen());
     }
 
     @PostMapping("/refunds/{reference}/{status}")

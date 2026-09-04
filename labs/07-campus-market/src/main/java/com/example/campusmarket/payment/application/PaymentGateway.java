@@ -11,8 +11,16 @@ import java.util.UUID;
 public interface PaymentGateway {
     PaymentCreated createPayment(CreatePaymentRequest request);
     PaymentStatus queryPayment(String providerReference);
+    /** 按原幂等键查询未知支付，避免对未知结果盲目重新创建。 */
+    default PaymentStatus queryPaymentByIdempotencyKey(String idempotencyKey) {
+        throw new UnsupportedOperationException("提供方不支持按幂等键对账");
+    }
     RefundCreated requestRefund(CreateRefundRequest request);
     RefundStatus queryRefund(String providerReference);
+    /** 按退款幂等键查询未知退款，禁止超时后重复创建。 */
+    default RefundStatus queryRefundByIdempotencyKey(String idempotencyKey) {
+        throw new UnsupportedOperationException("提供方不支持按幂等键查询退款");
+    }
     VerifiedCallback verifyAndParse(byte[] rawBody, HttpHeaders headers);
 
     record CreatePaymentRequest(UUID orderId, Money amount, String idempotencyKey) {

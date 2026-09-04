@@ -123,7 +123,24 @@ class PaymentGatewayContractIT extends SharedContainers {
     }
 
     @Test
-    void toxiproxyDisconnectTimesOutAndRecoversAgainstRealHttpProviderBoundary() {
+    void providerRejectsNullOrderAndNonPositiveAmountsAsUtf8BadRequest() throws Exception {
+        HttpClient client = HttpClient.newHttpClient();
+        String key = "boundary-" + UUID.randomUUID();
+        HttpResponse<byte[]> nullOrder = client.send(HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + port + "/simulated-provider/payments"))
+            .header("Content-Type", "application/json; charset=UTF-8")
+            .POST(HttpRequest.BodyPublishers.ofString("{\"orderId\":null,\"amountFen\":1,\"idempotencyKey\":\"" + key + "\"}", StandardCharsets.UTF_8))
+            .build(), HttpResponse.BodyHandlers.ofByteArray());
+        assertThat(nullOrder.statusCode()).isEqualTo(400);
+        assertThat(new String(nullOrder.body(), StandardCharsets.UTF_8)).contains("请求参数无效");
+        HttpResponse<byte[]> nonPositive = client.send(HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + port + "/simulated-provider/refunds"))
+            .header("Content-Type", "application/json; charset=UTF-8")
+            .POST(HttpRequest.BodyPublishers.ofString("{\"orderId\":\"" + UUID.randomUUID() + "\",\"paymentProviderReference\":\"p\",\"amountFen\":0,\"idempotencyKey\":\"" + key + "\"}", StandardCharsets.UTF_8))
+            .build(), HttpResponse.BodyHandlers.ofByteArray());
+        assertThat(nonPositive.statusCode()).isEqualTo(400);
+    }
+
+    @Test
+    void toxiproxyDisconnectAndLatencyTimeoutsRecoverAgainstRealHttpProviderBoundary() throws Exception {
         org.testcontainers.containers.ToxiproxyContainer.ContainerProxy proxy =
             TOXIPROXY.getProxy(PAYMENT_PROVIDER_HTTP, 8080);
         PaymentGateway throughProxy = new SimulatedPaymentGateway(HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(1)).build(), objectMapper,
@@ -143,6 +160,14 @@ class PaymentGatewayContractIT extends SharedContainers {
         }
         assertThat(recovered).isNotNull();
         assertThat(recovered.status()).isEqualTo(PaymentGateway.PaymentStatus.Status.UNKNOWN);
+        var latency = proxy.toxics().latency("payment-latency", eu.rekawek.toxiproxy.model.ToxicDirection.DOWNSTREAM, 15_000);
+        try {
+            assertThatThrownBy(() -> throughProxy.queryPayment("probe"))
+                .isInstanceOf(SimulatedPaymentGateway.PaymentGatewayUnavailableException.class);
+        } finally {
+            latency.remove();
+        }
+        assertThat(throughProxy.queryPayment("probe").status()).isEqualTo(PaymentGateway.PaymentStatus.Status.UNKNOWN);
     }
 
     private PaymentGateway gateway() {

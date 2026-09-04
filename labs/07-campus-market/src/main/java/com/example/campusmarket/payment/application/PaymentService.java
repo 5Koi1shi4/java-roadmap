@@ -7,6 +7,8 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
 
 import java.util.Objects;
 import java.util.UUID;
@@ -21,13 +23,16 @@ public class PaymentService {
     private final PaymentGateway gateway;
     private final JdbcTemplate jdbc;
     private final String provider;
+    private final TransactionTemplate transactions;
 
     public PaymentService(JdbcPaymentRepository repository, PaymentGateway gateway, JdbcTemplate jdbc,
-                          @Value("${campus.market.payment.provider:simulated}") String provider) {
+                          @Value("${campus.market.payment.provider:simulated}") String provider,
+                          PlatformTransactionManager transactionManager) {
         this.repository = Objects.requireNonNull(repository, "支付仓储不能为空");
         this.gateway = Objects.requireNonNull(gateway, "支付网关不能为空");
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.provider = Objects.requireNonNull(provider, "支付提供方不能为空");
+        this.transactions = new TransactionTemplate(Objects.requireNonNull(transactionManager, "事务管理器不能为空"));
     }
 
     public PaymentResult createPayment(UUID orderId, String idempotencyKey) {
@@ -41,10 +46,23 @@ public class PaymentService {
             throw new IdempotencyConflictException();
         }
         if (existing.providerReference() != null) return new PaymentResult(paymentId, existing.providerReference(), existing.status());
-        PaymentGateway.PaymentCreated created = gateway.createPayment(new PaymentGateway.CreatePaymentRequest(orderId,
-            Money.ofFen(order.amountFen()), idempotencyKey));
-        repository.bindProviderPayment(paymentId, created.providerReference(), created.status().status());
-        return new PaymentResult(paymentId, created.providerReference(), created.status().status().name());
+        if (!repository.claimPaymentRequest(paymentId)) {
+            JdbcPaymentRepository.PaymentRecord claimed = repository.findPayment(paymentId);
+            return new PaymentResult(paymentId, claimed.providerReference(), claimed.status());
+        }
+        try {
+            PaymentGateway.PaymentCreated created = gateway.createPayment(new PaymentGateway.CreatePaymentRequest(orderId,
+                Money.ofFen(order.amountFen()), idempotencyKey));
+            if (created.status().amountFen() != order.amountFen()) throw new IllegalStateException("支付提供方金额不匹配");
+            repository.bindProviderPayment(paymentId, created.providerReference(), created.status().status());
+            repository.savePaymentResponse(paymentId, ("{\"paymentId\":\"" + paymentId + "\",\"providerReference\":\""
+                + created.providerReference() + "\",\"status\":\"" + created.status().status().name() + "\"}").getBytes(StandardCharsets.UTF_8));
+            return new PaymentResult(paymentId, created.providerReference(), created.status().status().name());
+        } catch (RuntimeException unavailable) {
+            repository.markPaymentUnknown(paymentId);
+            repository.savePaymentResponse(paymentId, ("{\"paymentId\":\"" + paymentId + "\",\"status\":\"UNKNOWN\"}").getBytes(StandardCharsets.UTF_8));
+            throw unavailable;
+        }
     }
 
     public PaymentResult queryPayment(UUID paymentId) {
@@ -53,19 +71,27 @@ public class PaymentService {
     }
 
     /** 主动对账：未知/待定状态只查询原 provider reference，不重新创建支付。 */
-    @Transactional
     public PaymentResult reconcilePayment(UUID paymentId) {
         JdbcPaymentRepository.PaymentRecord row = repository.findPayment(paymentId);
-        if (row == null || row.providerReference() == null ||
-            ("SUCCEEDED".equals(row.status()) || "FAILED".equals(row.status()))) return queryPayment(paymentId);
-        PaymentGateway.PaymentStatus status = gateway.queryPayment(row.providerReference());
-        if (status.status() == PaymentGateway.PaymentStatus.Status.SUCCEEDED) {
-            repository.markPaymentSucceededByReference(row.provider(), row.providerReference(), status.amountFen());
-            jdbc.update("UPDATE trade_order o JOIN payment_order p ON p.order_id=o.id SET o.paid_amount_fen=p.paid_amount_fen,o.status='AWAITING_HANDOFF',o.updated_at=CURRENT_TIMESTAMP(6) WHERE p.id=? AND o.status='PENDING_PAYMENT'", row.id().toString());
-        } else if (status.status() == PaymentGateway.PaymentStatus.Status.FAILED) {
-            jdbc.update("UPDATE payment_order SET status='FAILED',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('PENDING','UNKNOWN')", row.id().toString());
-        }
+        if (row == null || ("SUCCEEDED".equals(row.status()) || "FAILED".equals(row.status()))) return queryPayment(paymentId);
+        PaymentGateway.PaymentStatus status = row.providerReference() == null
+            ? gateway.queryPaymentByIdempotencyKey(row.idempotencyKey())
+            : gateway.queryPayment(row.providerReference());
+        if (status.amountFen() != row.amountFen()) return queryPayment(paymentId);
+        if (status.status() == PaymentGateway.PaymentStatus.Status.SUCCEEDED && status.providerReference() != null)
+            transactions().execute(ignored -> { if (repository.markPaymentSucceeded(row.id(), status.providerReference(), status.amountFen())) {
+                jdbc.update("UPDATE trade_order o JOIN payment_order p ON p.order_id=o.id SET o.paid_amount_fen=p.paid_amount_fen,o.status='AWAITING_HANDOFF',o.updated_at=CURRENT_TIMESTAMP(6) WHERE p.id=? AND o.status='PENDING_PAYMENT'", row.id().toString());
+                repository.insertPaymentEvent("PAYMENT_SUCCEEDED", row.id(), "{\"paymentId\":\"" + row.id() + "\",\"orderId\":\"" + row.orderId() + "\",\"amountFen\":" + status.amountFen() + "}"); }
+                return null; });
+        else if (status.status() == PaymentGateway.PaymentStatus.Status.FAILED)
+            transactions().execute(ignored -> { if (jdbc.update("UPDATE payment_order SET status='FAILED',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('PENDING','UNKNOWN')", row.id().toString()) == 1)
+                repository.insertPaymentEvent("PAYMENT_FAILED", row.id(), "{\"paymentId\":\"" + row.id() + "\"}"); return null; });
         return queryPayment(paymentId);
+    }
+
+    private TransactionTemplate transactions() {
+        if (transactions == null) throw new IllegalStateException("对账事务管理器未装配");
+        return transactions;
     }
 
     @Transactional

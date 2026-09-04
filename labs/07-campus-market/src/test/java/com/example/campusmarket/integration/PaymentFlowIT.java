@@ -7,9 +7,11 @@ import com.example.campusmarket.payment.application.RefundService;
 import com.example.campusmarket.payment.infrastructure.JdbcPaymentRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.TestPropertySource;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -20,13 +22,18 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** 支付成功推进订单、退款额度预占和重复回调幂等的真实 MySQL 流程测试。 */
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
 @ActiveProfiles("local")
+@TestPropertySource(properties = {"server.port=18081", "campus.market.payment.provider-url=http://localhost:18081/simulated-provider"})
 class PaymentFlowIT extends SharedContainers {
+    @LocalServerPort private int port;
     @Autowired private JdbcTemplate jdbc;
     @Autowired private PaymentService payments;
     @Autowired private RefundService refunds;
@@ -81,6 +88,53 @@ class PaymentFlowIT extends SharedContainers {
         assertThat(accepted).isLessThanOrEqualTo(3);
         assertThat(jdbc.queryForObject("SELECT reserved_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString()))
             .isLessThanOrEqualTo(100L);
+    }
+
+    @Test
+    void sameRefundIdempotencyKeyConcurrentlyClaimsOneReservationAndOneProviderRequest() throws Exception {
+        UUID payment = paidPayment(100);
+        UUID order = UUID.fromString(jdbc.queryForObject("SELECT order_id FROM payment_order WHERE id=?", String.class, payment.toString()));
+        jdbc.update("UPDATE payment_order SET provider_reference=? WHERE id=?", "sim-pay-paid-" + payment, payment.toString());
+        String key = "same-refund-" + UUID.randomUUID();
+        int workers = 8;
+        ExecutorService executor = Executors.newFixedThreadPool(workers);
+        CountDownLatch ready = new CountDownLatch(workers);
+        CountDownLatch start = new CountDownLatch(1);
+        List<java.util.concurrent.Future<RefundService.RefundResult>> results = new ArrayList<>();
+        for (int i = 0; i < workers; i++) {
+            results.add(executor.submit(() -> {
+                ready.countDown();
+                start.await(5, TimeUnit.SECONDS);
+                return refunds.requestRefund(order, key, com.example.campusmarket.shared.Money.ofFen(30));
+            }));
+        }
+        assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+        start.countDown();
+        UUID refundId = null;
+        for (var future : results) {
+            RefundService.RefundResult result = future.get(15, TimeUnit.SECONDS);
+            if (refundId == null) refundId = result.refundId();
+            assertThat(result.refundId()).isEqualTo(refundId);
+        }
+        executor.shutdownNow();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=? AND idempotency_key=?", Integer.class, order.toString(), key)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT reserved_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(30L);
+    }
+
+    @Test
+    void terminalRefundReconciliationSettlesReservationAndWritesOutbox() throws Exception {
+        UUID payment = paidPayment(100);
+        UUID order = UUID.fromString(jdbc.queryForObject("SELECT order_id FROM payment_order WHERE id=?", String.class, payment.toString()));
+        jdbc.update("UPDATE payment_order SET provider_reference=? WHERE id=?", "sim-pay-reconcile-" + payment, payment.toString());
+        RefundService.RefundResult requested = refunds.requestRefund(order, "reconcile-refund-" + payment, com.example.campusmarket.shared.Money.ofFen(30));
+        HttpClient client = HttpClient.newHttpClient();
+        client.send(HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + port + "/simulated-provider/refunds/" + requested.providerReference() + "/SUCCEEDED"))
+            .POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofByteArray());
+        RefundService.RefundResult settled = refunds.reconcileRefund(requested.refundId());
+        assertThat(settled.status()).isEqualTo("SUCCEEDED");
+        assertThat(jdbc.queryForObject("SELECT reserved_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(0L);
+        assertThat(jdbc.queryForObject("SELECT successful_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(30L);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='REFUND_SUCCEEDED' AND aggregate_id=?", Integer.class, requested.refundId().toString())).isEqualTo(1);
     }
 
     @Test

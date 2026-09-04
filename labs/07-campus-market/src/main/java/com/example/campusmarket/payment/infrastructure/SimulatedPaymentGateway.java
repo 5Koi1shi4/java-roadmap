@@ -67,6 +67,12 @@ public class SimulatedPaymentGateway implements PaymentGateway {
     }
 
     @Override
+    public PaymentStatus queryPaymentByIdempotencyKey(String idempotencyKey) {
+        JsonNode body = get("/payments/by-key/" + encode(idempotencyKey));
+        return new PaymentStatus(text(body, "providerReference"), paymentStatus(text(body, "status")), number(body, "amountFen"));
+    }
+
+    @Override
     public RefundCreated requestRefund(CreateRefundRequest request) {
         JsonNode body = post("/refunds", request.idempotencyKey(), object("orderId", request.orderId().toString(), "paymentProviderReference",
             request.paymentProviderReference(), "amountFen", request.amount().fen(), "idempotencyKey", request.idempotencyKey()));
@@ -76,6 +82,12 @@ public class SimulatedPaymentGateway implements PaymentGateway {
     @Override
     public RefundStatus queryRefund(String providerReference) {
         JsonNode body = get("/refunds/" + encode(providerReference));
+        return new RefundStatus(text(body, "providerReference"), RefundStatus.Status.valueOf(text(body, "status")), number(body, "amountFen"));
+    }
+
+    @Override
+    public RefundStatus queryRefundByIdempotencyKey(String idempotencyKey) {
+        JsonNode body = get("/refunds/by-key/" + encode(idempotencyKey));
         return new RefundStatus(text(body, "providerReference"), RefundStatus.Status.valueOf(text(body, "status")), number(body, "amountFen"));
     }
 
@@ -92,8 +104,14 @@ public class SimulatedPaymentGateway implements PaymentGateway {
         if (Math.abs(now - seconds) > 300) throw new InvalidCallbackException("回调已过期");
         String expected = hmac(timestamp + "\n" + nonce + "\n" + new String(rawBody, StandardCharsets.UTF_8));
         if (!constantTimeSignatureEquals(signature, expected)) throw new InvalidCallbackException("回调签名无效");
-        usedNonces.entrySet().removeIf(entry -> entry.getValue() <= now);
-        if (usedNonces.size() >= 10_000 || usedNonces.putIfAbsent(provider + ":" + nonce, now + 300) != null) throw new InvalidCallbackException("回调 nonce 已重放");
+        synchronized (usedNonces) {
+            usedNonces.entrySet().removeIf(entry -> entry.getValue() <= now);
+            String nonceKey = provider + ":" + nonce;
+            if (!usedNonces.containsKey(nonceKey) && usedNonces.size() >= 10_000) {
+                throw new InvalidCallbackException("回调 nonce 存储已满");
+            }
+            if (usedNonces.putIfAbsent(nonceKey, now + 300) != null) throw new InvalidCallbackException("回调 nonce 已重放");
+        }
         try {
             JsonNode json = mapper.readTree(rawBody);
             java.util.Set<String> allowed = java.util.Set.of("providerEventId", "type", "providerReference", "amountFen", "status", "occurredAt");
@@ -104,6 +122,8 @@ public class SimulatedPaymentGateway implements PaymentGateway {
             PaymentGateway.VerifiedCallback.CallbackType callbackType = PaymentGateway.VerifiedCallback.CallbackType.valueOf(type);
             String status = text(json, "status");
             if (!("SUCCEEDED".equals(status) || "FAILED".equals(status) || "PENDING".equals(status) || "UNKNOWN".equals(status))) throw new InvalidCallbackException("回调状态无效");
+            if (number(json, "amountFen") <= 0 || text(json, "providerReference").isBlank()
+                || text(json, "providerEventId").isBlank()) throw new InvalidCallbackException("回调字段边界无效");
             Instant occurred = json.get("occurredAt").isNumber() ? Instant.ofEpochSecond(json.get("occurredAt").longValue()) : Instant.parse(text(json, "occurredAt"));
             return new VerifiedCallback(provider, text(json, "providerEventId"), callbackType,
                 text(json, "providerReference"), number(json, "amountFen"), status, occurred, nonce);

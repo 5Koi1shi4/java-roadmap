@@ -76,8 +76,11 @@ public class PaymentWebhookController {
 
     @PostMapping(path = {"/api/orders/{orderId}/refunds", "/api/refunds"}, consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<byte[]> requestRefund(@PathVariable(required = false) java.util.UUID orderId,
-                                                @RequestBody RefundRequest request,
-                                                @RequestHeader("Idempotency-Key") String key) {
+        @RequestBody RefundRequest request,
+                                               @RequestHeader("Idempotency-Key") String key) {
+        if (request == null || request.amountFen() <= 0 || (orderId == null && request.orderId() == null)) {
+            return json(400, "{\"error\":\"退款请求无效\"}");
+        }
         java.util.UUID actualOrder = orderId == null ? request.orderId() : orderId;
         try {
             var result = refunds.requestRefund(actualOrder, key, Money.ofFen(request.amountFen()));
