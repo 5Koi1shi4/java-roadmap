@@ -91,12 +91,15 @@
 - `5082772`：分类协调超时、无损返还 cleanup attempt、显式校验目标索引并接入基础指标。
 - `d6bfc5f`：补齐 alias/reconciliation/cleanup 指标与真实并发证据，将 cleanup SQL 收敛到专用仓储。
 - `0c33aa0`：修复 connection-scoped cleanup 路径、共享指标注册表、异常身份与 owner/wait 日志，并显式注入 cleanup 仓储。
+- `e90c240`：抽出 rebuild intent 仓储，移除 ES adapter 的协议持久化 façade，并用 acquisition-attempt barrier 重写两项真实 named-lock 并发证据。
 
 最终修复后验证（2026-09-04 13:54–13:59，Asia/Shanghai）：
 
-- unit phase：51/51，失败 0、错误 0、跳过 0。
+- unit phase：53/53，失败 0、错误 0、跳过 0。
 - `SearchRebuildIT`：35/35，失败 0、错误 0、跳过 0。
 - 五套组合集成回归：59/59，失败 0、错误 0、跳过 0；其中 InventoryIT 6、ListingMediaIT 8、ProductSearchIT 5、SearchRebuildIT 35、SchemaIT 5。
 - Failsafe summary：completed 59、failures 0、errors 0、skipped 0。
+
+fix2 的独立 `SearchRebuildIT` 运行同样为 35/35（233.9 秒）；最终组合运行中的该套件为 35/35（193.4 秒）。两个循环依赖测试已改为在释放 A/cleanup 前由 hook 证明 B/cutover 已开始 `GET_LOCK`，同时断言其临界区尚未进入。
 
 本补充仍不替代第二次独立 Standards/Spec 复审；只有复审无 Critical/Important，Task 7 才可解除 BLOCKED。
