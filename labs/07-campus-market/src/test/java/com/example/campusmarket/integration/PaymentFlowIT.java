@@ -5,6 +5,7 @@ import com.example.campusmarket.payment.application.PaymentGateway;
 import com.example.campusmarket.payment.application.PaymentService;
 import com.example.campusmarket.payment.application.RefundService;
 import com.example.campusmarket.payment.infrastructure.JdbcPaymentRepository;
+import com.example.campusmarket.payment.application.PaymentReconciliationScheduler;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.web.server.LocalServerPort;
@@ -31,13 +32,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** 支付成功推进订单、退款额度预占和重复回调幂等的真实 MySQL 流程测试。 */
 @SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
 @ActiveProfiles("local")
-@TestPropertySource(properties = {"server.port=18081", "campus.market.payment.provider-url=http://localhost:18081/simulated-provider"})
+@TestPropertySource(properties = {"server.port=18081", "campus.market.payment.provider-url=http://localhost:18081/simulated-provider", "campus.market.payment.reconciliation.enabled=true"})
 class PaymentFlowIT extends SharedContainers {
     @LocalServerPort private int port;
     @Autowired private JdbcTemplate jdbc;
     @Autowired private PaymentService payments;
     @Autowired private RefundService refunds;
     @Autowired private JdbcPaymentRepository repository;
+    @Autowired private PaymentReconciliationScheduler reconciliation;
 
     @Test
     void paymentCallbackMovesPendingOrderToAwaitingHandoffOnlyOnce() throws Exception {
@@ -138,6 +140,24 @@ class PaymentFlowIT extends SharedContainers {
     }
 
     @Test
+    void pendingPaymentIsReconciledByRealSchedulerWithoutCreatingAnotherRequest() throws Exception {
+        UUID payment = UUID.randomUUID();
+        UUID order = UUID.randomUUID();
+        UUID seller = user(); UUID buyer = user(); UUID listing = UUID.randomUUID();
+        jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,?,100,0,'SOLD_OUT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", listing.toString(), seller.toString(), "教材", "描述", "教材");
+        jdbc.update("INSERT INTO trade_order (id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,paid_amount_fen,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,100,1,100,0,'PENDING_PAYMENT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", order.toString(), buyer.toString(), seller.toString(), listing.toString(), "教材", "描述");
+        String key = "scheduler-payment-" + payment;
+        PaymentGateway.PaymentCreated created = new com.example.campusmarket.payment.infrastructure.SimulatedPaymentGateway(
+            HttpClient.newHttpClient(), new com.fasterxml.jackson.databind.ObjectMapper(), "simulated", "http://localhost:" + port + "/simulated-provider", "local-only-payment-secret-change-me")
+            .createPayment(new PaymentGateway.CreatePaymentRequest(order, com.example.campusmarket.shared.Money.ofFen(100), key));
+        jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,status,provider_reference,next_reconcile_at,created_at,updated_at) VALUES (?,?,?,?,100,'PENDING',?,DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", payment.toString(), order.toString(), "simulated", key, created.providerReference());
+        HttpClient.newHttpClient().send(HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + port + "/simulated-provider/payments/" + created.providerReference() + "/SUCCEEDED")).POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofByteArray());
+        assertThat(reconciliation.runOnce(20)).isGreaterThanOrEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, payment.toString())).isEqualTo("SUCCEEDED");
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("AWAITING_HANDOFF");
+    }
+
+    @Test
     void refundCallbackMismatchAndOutOfOrderEventsCannotConsumeAnotherRefundReservation() {
         UUID payment = paidPayment(100);
         UUID order = UUID.fromString(jdbc.queryForObject("SELECT order_id FROM payment_order WHERE id=?", String.class, payment.toString()));
@@ -153,10 +173,12 @@ class PaymentFlowIT extends SharedContainers {
             PaymentGateway.VerifiedCallback.CallbackType.REFUND, "provider-first", 20, "SUCCEEDED", Instant.now(), UUID.randomUUID().toString());
         refunds.handleCallback(wrongAmount, "{\"wrong\":true}".getBytes(StandardCharsets.UTF_8));
         assertThat(jdbc.queryForObject("SELECT reserved_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(80L);
+        assertThat(jdbc.queryForObject("SELECT status FROM payment_callback_event WHERE provider_event_id=?", String.class, "event-wrong-" + first)).isEqualTo("FAILED");
         PaymentGateway.VerifiedCallback wrongReference = new PaymentGateway.VerifiedCallback("simulated", "event-unknown-reference-" + first,
             PaymentGateway.VerifiedCallback.CallbackType.REFUND, "provider-not-linked", 40, "SUCCEEDED", Instant.now(), UUID.randomUUID().toString());
         refunds.handleCallback(wrongReference, "{\"unknownReference\":true}".getBytes(StandardCharsets.UTF_8));
         assertThat(jdbc.queryForObject("SELECT reserved_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(80L);
+        assertThat(jdbc.queryForObject("SELECT status FROM payment_callback_event WHERE provider_event_id=?", String.class, "event-unknown-reference-" + first)).isEqualTo("FAILED");
         jdbc.update("UPDATE refund_order SET provider_reference='provider-second' WHERE id=?", second.toString());
         PaymentGateway.VerifiedCallback secondSuccess = new PaymentGateway.VerifiedCallback("simulated", "event-second-" + second,
             PaymentGateway.VerifiedCallback.CallbackType.REFUND, "provider-second", 40, "SUCCEEDED", Instant.now(), UUID.randomUUID().toString());

@@ -2,6 +2,7 @@ package com.example.campusmarket.payment.application;
 
 import com.example.campusmarket.payment.infrastructure.JdbcPaymentRepository;
 import com.example.campusmarket.shared.Money;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
@@ -23,14 +24,16 @@ public class RefundService {
     private final PaymentGateway gateway;
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
+    private final ObjectMapper mapper;
     private final ConcurrentHashMap<String, Object> idempotencyLocks = new ConcurrentHashMap<>();
 
     public RefundService(JdbcPaymentRepository repository, PaymentGateway gateway, JdbcTemplate jdbc,
-                         PlatformTransactionManager transactionManager) {
+                         PlatformTransactionManager transactionManager, ObjectMapper mapper) {
         this.repository = Objects.requireNonNull(repository, "支付仓储不能为空");
         this.gateway = Objects.requireNonNull(gateway, "支付网关不能为空");
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.transactions = new TransactionTemplate(Objects.requireNonNull(transactionManager, "事务管理器不能为空"));
+        this.mapper = Objects.requireNonNull(mapper, "JSON序列化器不能为空");
     }
 
     public RefundResult requestRefund(UUID orderId, String idempotencyKey, Money amount) {
@@ -39,19 +42,26 @@ public class RefundService {
 
     public RefundResult queryRefund(UUID refundId) {
         JdbcPaymentRepository.RefundRecord row = repository.findRefund(refundId);
-        return row == null ? null : new RefundResult(row.id(), row.providerReference(), row.status());
+        return row == null ? null : new RefundResult(row.id(), row.providerReference(), row.status(), row.responseUtf8());
     }
 
     public RefundResult reconcileRefund(UUID refundId) {
+        String token = UUID.randomUUID().toString();
+        if (!repository.claimRefundReconciliationDirect(refundId, "direct-refund-reconciler", token)) return queryRefund(refundId);
+        return reconcileRefund(refundId, "direct-refund-reconciler", token);
+    }
+
+    public RefundResult reconcileRefund(UUID refundId, String owner, String token) {
         JdbcPaymentRepository.RefundRecord row = repository.findRefund(refundId);
         if (row == null || "SUCCEEDED".equals(row.status()) || "FAILED".equals(row.status())) return queryRefund(refundId);
         PaymentGateway.RefundStatus result = row.providerReference() == null
             ? gateway.queryRefundByIdempotencyKey(row.idempotencyKey()) : gateway.queryRefund(row.providerReference());
-        if (result.amountFen() != row.amountFen()) return queryRefund(refundId);
-        if (result.amountFen() == row.amountFen() && result.status() == PaymentGateway.RefundStatus.Status.SUCCEEDED && result.providerReference() != null)
-            transactions.execute(ignored -> { settleTerminal(row, "SUCCEEDED", result.providerReference()); return null; });
-        else if (result.amountFen() == row.amountFen() && result.status() == PaymentGateway.RefundStatus.Status.FAILED)
-            transactions.execute(ignored -> { settleTerminal(row, "FAILED", result.providerReference()); return null; });
+        if (result.amountFen() != row.amountFen() || result.providerReference() == null
+            || (row.providerReference() != null && !row.providerReference().equals(result.providerReference()))) return queryRefund(refundId);
+        if (result.status() == PaymentGateway.RefundStatus.Status.SUCCEEDED)
+            transactions.execute(ignored -> { settleTerminal(row, "SUCCEEDED", result.providerReference(), owner, token); return null; });
+        else if (result.status() == PaymentGateway.RefundStatus.Status.FAILED)
+            transactions.execute(ignored -> { settleTerminal(row, "FAILED", result.providerReference(), owner, token); return null; });
         return queryRefund(refundId);
     }
 
@@ -78,8 +88,9 @@ public class RefundService {
         return transactions.execute(status -> {
             RefundResult result = finish(intent.refundId(), intent.paymentId(), amount.fen(),
                 created.providerReference(), created.status());
-            repository.saveRefundResponse(intent.refundId(), ("{\"refundId\":\"" + intent.refundId() + "\",\"providerReference\":\""
-                + created.providerReference() + "\",\"status\":\"" + created.status().name() + "\"}").getBytes(StandardCharsets.UTF_8));
+            byte[] response = response(result.refundId(), result.providerReference(), result.status());
+            repository.saveRefundResponse(intent.refundId(), response);
+            result = new RefundResult(result.refundId(), result.providerReference(), result.status(), response);
             return result;
         });
     }
@@ -95,13 +106,13 @@ public class RefundService {
         JdbcPaymentRepository.RefundRecord existing = repository.findRefundByKey(orderId, idempotencyKey);
         if (existing != null) {
             if (existing.amountFen() != amount.fen() || (existing.requestHash() != null && !MessageDigest.isEqual(existing.requestHash(), requestHash))) throw new IdempotencyConflictException();
-            return new RefundIntent(null, null, null, new RefundResult(existing.id(), existing.providerReference(), existing.status()));
+                return new RefundIntent(null, null, null, new RefundResult(existing.id(), existing.providerReference(), existing.status(), existing.responseUtf8()));
         }
         if (!repository.reserveRefund(payment.id(), amount.fen())) {
             JdbcPaymentRepository.RefundRecord concurrent = repository.findRefundByKey(orderId, idempotencyKey);
             if (concurrent != null && concurrent.amountFen() == amount.fen()
                 && (concurrent.requestHash() == null || MessageDigest.isEqual(concurrent.requestHash(), requestHash))) {
-                return new RefundIntent(null, null, null, new RefundResult(concurrent.id(), concurrent.providerReference(), concurrent.status()));
+                return new RefundIntent(null, null, null, new RefundResult(concurrent.id(), concurrent.providerReference(), concurrent.status(), concurrent.responseUtf8()));
             }
             throw new RefundLimitExceededException();
         }
@@ -114,7 +125,7 @@ public class RefundService {
             if (raced == null) throw new IdempotencyConflictException("退款幂等记录未找到");
             if (raced.amountFen() != amount.fen()) throw new IdempotencyConflictException("退款金额不一致");
             if (raced.requestHash() != null && !MessageDigest.isEqual(raced.requestHash(), requestHash)) throw new IdempotencyConflictException("退款请求指纹不一致");
-            return new RefundIntent(null, null, null, new RefundResult(raced.id(), raced.providerReference(), raced.status()));
+            return new RefundIntent(null, null, null, new RefundResult(raced.id(), raced.providerReference(), raced.status(), raced.responseUtf8()));
         }
         repository.claimRefundRequest(claim.id());
         return new RefundIntent(claim.id(), payment.id(), payment.providerReference(), null);
@@ -124,22 +135,23 @@ public class RefundService {
         String storedStatus = status == PaymentGateway.RefundStatus.Status.PENDING ? "PROCESSING" : status.name();
         int changed = jdbc.update("UPDATE refund_order SET status=?,provider_reference=COALESCE(?,provider_reference),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN')", storedStatus, reference, refundId.toString());
         if (changed == 1 && status == PaymentGateway.RefundStatus.Status.SUCCEEDED) {
-            repository.completeRefund(paymentId, amountFen);
-            repository.insertPaymentEvent("REFUND_SUCCEEDED", refundId, "{\"refundId\":\"" + refundId + "\",\"amountFen\":" + amountFen + "}");
+            if (!repository.completeRefund(paymentId, amountFen)) throw new IllegalStateException("退款额度结转失败，等待对账");
+            repository.insertPaymentEvent("REFUND_SUCCEEDED", refundId, json(java.util.Map.of("refundId", refundId, "amountFen", amountFen)));
         }
         if (changed == 1 && status == PaymentGateway.RefundStatus.Status.FAILED) {
-            repository.releaseRefund(paymentId, amountFen);
-            repository.insertPaymentEvent("REFUND_FAILED", refundId, "{\"refundId\":\"" + refundId + "\",\"amountFen\":" + amountFen + "}");
+            if (!repository.releaseRefund(paymentId, amountFen)) throw new IllegalStateException("退款额度释放失败，等待对账");
+            repository.insertPaymentEvent("REFUND_FAILED", refundId, json(java.util.Map.of("refundId", refundId, "amountFen", amountFen)));
         }
-        if (changed == 1 && status == PaymentGateway.RefundStatus.Status.UNKNOWN) repository.saveRefundResponse(refundId, ("{\"refundId\":\"" + refundId + "\",\"status\":\"UNKNOWN\"}").getBytes(StandardCharsets.UTF_8));
+        if (changed == 1 && status == PaymentGateway.RefundStatus.Status.UNKNOWN) repository.saveRefundResponse(refundId, response(refundId, reference, "UNKNOWN"));
         return new RefundResult(refundId, reference, storedStatus);
     }
 
-    private void settleTerminal(JdbcPaymentRepository.RefundRecord row, String status, String reference) {
-        if (jdbc.update("UPDATE refund_order SET status=?,provider_reference=COALESCE(?,provider_reference),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND (provider_reference=? OR provider_reference IS NULL) AND amount_fen=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN')", status, reference, row.id().toString(), row.providerReference(), row.amountFen()) == 1) {
-            if ("SUCCEEDED".equals(status)) repository.completeRefund(row.paymentId(), row.amountFen());
-            else repository.releaseRefund(row.paymentId(), row.amountFen());
-            repository.insertPaymentEvent("REFUND_" + status, row.id(), "{\"refundId\":\"" + row.id() + "\",\"amountFen\":" + row.amountFen() + "}");
+    private void settleTerminal(JdbcPaymentRepository.RefundRecord row, String status, String reference, String owner, String token) {
+        int changed = jdbc.update("UPDATE refund_order SET status=?,provider_reference=COALESCE(?,provider_reference),reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND (provider_reference=? OR (provider_reference IS NULL AND ? IS NOT NULL)) AND amount_fen=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN') AND reconcile_owner=? AND reconcile_token=?", status, reference, row.id().toString(), row.providerReference(), reference, row.amountFen(), owner, token);
+        if (changed == 1) {
+            boolean settled = "SUCCEEDED".equals(status) ? repository.completeRefund(row.paymentId(), row.amountFen()) : repository.releaseRefund(row.paymentId(), row.amountFen());
+            if (!settled) throw new IllegalStateException("退款聚合结转失败，等待重试");
+            repository.insertPaymentEvent("REFUND_" + status, row.id(), json(java.util.Map.of("refundId", row.id(), "amountFen", row.amountFen())));
         }
     }
 
@@ -153,23 +165,33 @@ public class RefundService {
         if (refund == null) { repository.failCallback(callback.provider(), callback.providerEventId()); return; }
         if (callback.amountFen() != refund.amountFen()) { repository.failCallback(callback.provider(), callback.providerEventId()); return; }
         if ("SUCCEEDED".equals(callback.status())) {
-            if (jdbc.update("UPDATE refund_order SET status='SUCCEEDED',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND provider=? AND provider_reference=? AND amount_fen=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN')", refund.id().toString(), callback.provider(), callback.providerReference(), callback.amountFen()) == 1 && repository.completeRefund(refund.paymentId(), refund.amountFen())) {
-                repository.insertPaymentEvent("REFUND_SUCCEEDED", refund.id(),
-                    "{\"refundId\":\"" + refund.id() + "\",\"orderId\":\"" + refund.orderId() + "\",\"amountFen\":" + refund.amountFen() + "}");
+            if (jdbc.update("UPDATE refund_order SET status='SUCCEEDED',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND provider=? AND provider_reference=? AND amount_fen=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN')", refund.id().toString(), callback.provider(), callback.providerReference(), callback.amountFen()) == 1) {
+                if (!repository.completeRefund(refund.paymentId(), refund.amountFen())) { jdbc.update("UPDATE refund_order SET status='UNKNOWN',updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", refund.id().toString()); repository.failCallback(callback.provider(), callback.providerEventId()); return; }
+                repository.insertPaymentEvent("REFUND_SUCCEEDED", refund.id(), json(java.util.Map.of("refundId", refund.id(), "orderId", refund.orderId(), "amountFen", refund.amountFen())));
             }
         } else if ("FAILED".equals(callback.status())) {
             if (jdbc.update("UPDATE refund_order SET status='FAILED',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND provider=? AND provider_reference=? AND amount_fen=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN')", refund.id().toString(), callback.provider(), callback.providerReference(), callback.amountFen()) == 1 && repository.releaseRefund(refund.paymentId(), refund.amountFen())) {
+                repository.insertPaymentEvent("REFUND_FAILED", refund.id(), json(java.util.Map.of("refundId", refund.id(), "orderId", refund.orderId(), "amountFen", refund.amountFen())));
             }
         }
         repository.completeCallback(callback.provider(), callback.providerEventId());
     }
 
-    public record RefundResult(UUID refundId, String providerReference, String status) {}
+    public record RefundResult(UUID refundId, String providerReference, String status, byte[] responseUtf8) {
+        public RefundResult(UUID refundId, String providerReference, String status) { this(refundId, providerReference, status, null); }
+    }
     private record RefundIntent(UUID refundId, UUID paymentId, String paymentReference, RefundResult existing) {}
     public static class RefundLimitExceededException extends RuntimeException { }
     public static class IdempotencyConflictException extends RuntimeException { public IdempotencyConflictException() { } public IdempotencyConflictException(String message) { super(message); } }
     private static byte[] digest(String value) {
         try { return MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)); }
         catch (Exception e) { throw new IllegalStateException("SHA-256不可用", e); }
+    }
+    private byte[] response(UUID id, String reference, String status) {
+        try { return mapper.writeValueAsBytes(java.util.Map.of("refundId", id, "providerReference", reference == null ? "" : reference, "status", status)); }
+        catch (Exception e) { throw new IllegalStateException("退款响应序列化失败", e); }
+    }
+    private String json(Object value) {
+        try { return mapper.writeValueAsString(value); } catch (Exception e) { throw new IllegalStateException("退款事件序列化失败", e); }
     }
 }

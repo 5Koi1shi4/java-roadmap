@@ -46,6 +46,22 @@ class PaymentGatewayContractIT extends SharedContainers {
     }
 
     @Test
+    void referenceStatusUpdateIsVisibleThroughIdempotencyKeyQuery() throws Exception {
+        PaymentGateway gateway = gateway();
+        String key = "status-sync-" + UUID.randomUUID();
+        UUID order = UUID.randomUUID();
+        PaymentGateway.PaymentCreated created = gateway.createPayment(new PaymentGateway.CreatePaymentRequest(
+            order, com.example.campusmarket.shared.Money.ofFen(77), key));
+        HttpClient client = HttpClient.newHttpClient();
+        HttpResponse<byte[]> changed = client.send(HttpRequest.newBuilder(java.net.URI.create(
+            "http://localhost:" + port + "/simulated-provider/payments/" + created.providerReference() + "/SUCCEEDED"))
+            .POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofByteArray());
+        assertThat(changed.statusCode()).isEqualTo(200);
+        assertThat(gateway.queryPaymentByIdempotencyKey(key).status())
+            .isEqualTo(PaymentGateway.PaymentStatus.Status.SUCCEEDED);
+    }
+
+    @Test
     void rejectsExpiredAndReplayedSignedCallback() throws Exception {
         PaymentGateway gateway = gateway();
         String nonce = UUID.randomUUID().toString();
@@ -75,6 +91,20 @@ class PaymentGatewayContractIT extends SharedContainers {
         assertThatThrownBy(() -> gateway.requestRefund(new PaymentGateway.CreateRefundRequest(
             order, "different-reference", com.example.campusmarket.shared.Money.ofFen(321), key)))
             .isInstanceOf(SimulatedPaymentGateway.PaymentGatewayUnavailableException.class);
+    }
+
+    @Test
+    void refundReferenceStatusUpdateIsVisibleThroughIdempotencyKeyQuery() throws Exception {
+        PaymentGateway gateway = gateway();
+        String key = "refund-status-sync-" + UUID.randomUUID();
+        PaymentGateway.RefundCreated created = gateway.requestRefund(new PaymentGateway.CreateRefundRequest(
+            UUID.randomUUID(), "sim-pay-ref-" + UUID.randomUUID(), com.example.campusmarket.shared.Money.ofFen(88), key));
+        HttpResponse<byte[]> changed = HttpClient.newHttpClient().send(HttpRequest.newBuilder(java.net.URI.create(
+            "http://localhost:" + port + "/simulated-provider/refunds/" + created.providerReference() + "/FAILED"))
+            .POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofByteArray());
+        assertThat(changed.statusCode()).isEqualTo(200);
+        assertThat(gateway.queryRefundByIdempotencyKey(key).status())
+            .isEqualTo(PaymentGateway.RefundStatus.Status.FAILED);
     }
 
     @Test

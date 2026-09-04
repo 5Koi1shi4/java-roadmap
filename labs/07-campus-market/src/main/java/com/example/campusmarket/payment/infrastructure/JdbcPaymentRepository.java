@@ -86,21 +86,37 @@ public class JdbcPaymentRepository {
     }
 
     public boolean claimPaymentReconciliation(UUID paymentId) {
-        return jdbc.update("UPDATE payment_order SET next_reconcile_at=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='UNKNOWN' AND (next_reconcile_at IS NULL OR next_reconcile_at<=CURRENT_TIMESTAMP(6))", paymentId.toString()) == 1;
+        return claimPaymentReconciliation(paymentId, "payment-reconciler", UUID.randomUUID().toString());
+    }
+
+    public boolean claimPaymentReconciliationDirect(UUID paymentId, String owner, String token) {
+        return jdbc.update("UPDATE payment_order SET reconcile_owner=?,reconcile_token=?,reconcile_lease_until=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('PENDING','UNKNOWN') AND (reconcile_owner IS NULL OR reconcile_lease_until IS NULL OR reconcile_lease_until<=CURRENT_TIMESTAMP(6))", owner, token, paymentId.toString()) == 1;
+    }
+
+    public boolean claimPaymentReconciliation(UUID paymentId, String owner, String token) {
+        return jdbc.update("UPDATE payment_order SET reconcile_owner=?,reconcile_token=?,reconcile_lease_until=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),next_reconcile_at=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('PENDING','UNKNOWN') AND ((reconcile_owner IS NULL AND (next_reconcile_at IS NULL OR next_reconcile_at<=CURRENT_TIMESTAMP(6))) OR (reconcile_lease_until IS NULL OR reconcile_lease_until<=CURRENT_TIMESTAMP(6)))", owner, token, paymentId.toString()) == 1;
     }
 
     public java.util.List<UUID> duePaymentReconciliations(int limit) {
-        return jdbc.query("SELECT id FROM payment_order WHERE status='UNKNOWN' AND (next_reconcile_at IS NULL OR next_reconcile_at<=CURRENT_TIMESTAMP(6)) ORDER BY COALESCE(next_reconcile_at,created_at),created_at LIMIT ?",
+        return jdbc.query("SELECT id FROM payment_order WHERE status IN ('PENDING','UNKNOWN') AND (next_reconcile_at IS NULL OR next_reconcile_at<=CURRENT_TIMESTAMP(6)) AND (reconcile_lease_until IS NULL OR reconcile_lease_until<=CURRENT_TIMESTAMP(6)) ORDER BY COALESCE(next_reconcile_at,created_at),created_at LIMIT ?",
             (rs, rowNum) -> UUID.fromString(rs.getString(1)), limit);
     }
 
     public java.util.List<UUID> dueRefundReconciliations(int limit) {
-        return jdbc.query("SELECT id FROM refund_order WHERE status='UNKNOWN' AND (next_reconcile_at IS NULL OR next_reconcile_at<=CURRENT_TIMESTAMP(6)) ORDER BY COALESCE(next_reconcile_at,created_at),created_at LIMIT ?",
+        return jdbc.query("SELECT id FROM refund_order WHERE status IN ('PROCESSING','UNKNOWN','REQUESTED') AND (next_reconcile_at IS NULL OR next_reconcile_at<=CURRENT_TIMESTAMP(6)) AND (reconcile_lease_until IS NULL OR reconcile_lease_until<=CURRENT_TIMESTAMP(6)) ORDER BY COALESCE(next_reconcile_at,created_at),created_at LIMIT ?",
             (rs, rowNum) -> UUID.fromString(rs.getString(1)), limit);
     }
 
     public boolean claimRefundReconciliation(UUID refundId) {
-        return jdbc.update("UPDATE refund_order SET next_reconcile_at=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='UNKNOWN' AND (next_reconcile_at IS NULL OR next_reconcile_at<=CURRENT_TIMESTAMP(6))", refundId.toString()) == 1;
+        return claimRefundReconciliation(refundId, "refund-reconciler", UUID.randomUUID().toString());
+    }
+
+    public boolean claimRefundReconciliationDirect(UUID refundId, String owner, String token) {
+        return jdbc.update("UPDATE refund_order SET reconcile_owner=?,reconcile_token=?,reconcile_lease_until=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('PROCESSING','UNKNOWN','REQUESTED') AND (reconcile_owner IS NULL OR reconcile_lease_until IS NULL OR reconcile_lease_until<=CURRENT_TIMESTAMP(6))", owner, token, refundId.toString()) == 1;
+    }
+
+    public boolean claimRefundReconciliation(UUID refundId, String owner, String token) {
+        return jdbc.update("UPDATE refund_order SET reconcile_owner=?,reconcile_token=?,reconcile_lease_until=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),next_reconcile_at=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('PROCESSING','UNKNOWN','REQUESTED') AND ((reconcile_owner IS NULL AND (next_reconcile_at IS NULL OR next_reconcile_at<=CURRENT_TIMESTAMP(6))) OR (reconcile_lease_until IS NULL OR reconcile_lease_until<=CURRENT_TIMESTAMP(6)))", owner, token, refundId.toString()) == 1;
     }
 
     public boolean markPaymentUnknown(UUID paymentId) {
@@ -112,7 +128,20 @@ public class JdbcPaymentRepository {
     }
 
     public boolean markPaymentSucceeded(UUID paymentId, String reference, long amountFen) {
-        return jdbc.update("UPDATE payment_order SET provider_reference=?,paid_amount_fen=amount_fen,status='SUCCEEDED',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND amount_fen=? AND status IN ('PENDING','UNKNOWN')", reference, paymentId.toString(), amountFen) == 1;
+        return jdbc.update("UPDATE payment_order SET provider_reference=?,paid_amount_fen=amount_fen,status='SUCCEEDED',reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND amount_fen=? AND status IN ('PENDING','UNKNOWN') AND (provider_reference=? OR provider_reference IS NULL)", reference, paymentId.toString(), amountFen, reference) == 1;
+    }
+
+    public boolean markPaymentSucceeded(UUID paymentId, String expectedReference, String reference, long amountFen,
+                                        String owner, String token) {
+        String predicate = expectedReference == null ? "provider_reference IS NULL" : "provider_reference=?";
+        Object[] args = expectedReference == null
+            ? new Object[]{reference, paymentId.toString(), amountFen, owner, token}
+            : new Object[]{reference, paymentId.toString(), expectedReference, amountFen, owner, token};
+        return jdbc.update("UPDATE payment_order SET provider_reference=?,paid_amount_fen=amount_fen,status='SUCCEEDED',reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND " + predicate + " AND amount_fen=? AND status IN ('PENDING','UNKNOWN') AND reconcile_owner=? AND reconcile_token=?", args) == 1;
+    }
+
+    public boolean markPaymentFailed(UUID paymentId, String expectedReference, String owner, String token) {
+        return jdbc.update("UPDATE payment_order SET status='FAILED',reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND provider_reference=? AND status IN ('PENDING','UNKNOWN') AND reconcile_owner=? AND reconcile_token=?", paymentId.toString(), expectedReference, owner, token) == 1;
     }
 
     /** 在同一支付聚合行上串行化并校验 successful + reserved + requested <= paid。 */

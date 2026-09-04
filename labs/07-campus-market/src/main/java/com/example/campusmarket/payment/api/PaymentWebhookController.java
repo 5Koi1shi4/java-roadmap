@@ -15,6 +15,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import com.example.campusmarket.shared.Money;
 import org.springframework.dao.DataAccessException;
+import org.springframework.web.bind.MissingRequestHeaderException;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 
 @RestController
 @Profile("!test")
@@ -54,9 +56,10 @@ public class PaymentWebhookController {
                                                 @RequestHeader("Idempotency-Key") String key) {
         try {
             PaymentService.PaymentResult result = payments.createPayment(orderId, key);
-            return json(201, "{\"paymentId\":\"" + result.paymentId() + "\",\"providerReference\":\""
-                + result.providerReference() + "\",\"status\":\"" + result.status() + "\"}");
+            return result.responseUtf8() == null ? json(201, "{\"paymentId\":\"" + result.paymentId() + "\",\"providerReference\":\""
+                + result.providerReference() + "\",\"status\":\"" + result.status() + "\"}") : bytes(201, result.responseUtf8());
         } catch (IllegalArgumentException e) { return json(400, "{\"error\":\"支付请求无效\"}"); }
+        catch (PaymentService.IdempotencyConflictException e) { return json(409, "{\"error\":\"幂等冲突\"}"); }
         catch (IllegalStateException e) { return json(409, "{\"error\":\"订单不可支付\"}"); }
     }
 
@@ -64,15 +67,15 @@ public class PaymentWebhookController {
     public ResponseEntity<byte[]> queryPayment(@PathVariable java.util.UUID paymentId) {
         JdbcPaymentQuery result = query(paymentId);
         if (result == null) return json(404, "{\"error\":\"支付不存在\"}");
-        return json(200, "{\"paymentId\":\"" + result.id() + "\",\"providerReference\":\""
-            + result.reference() + "\",\"status\":\"" + result.status() + "\"}");
+        return result.raw() == null ? json(200, "{\"paymentId\":\"" + result.id() + "\",\"providerReference\":\""
+            + result.reference() + "\",\"status\":\"" + result.status() + "\"}") : bytes(200, result.raw());
     }
 
     private JdbcPaymentQuery query(java.util.UUID id) {
         var row = payments.queryPayment(id);
-        return row == null ? null : new JdbcPaymentQuery(row.paymentId(), row.providerReference(), row.status());
+        return row == null ? null : new JdbcPaymentQuery(row.paymentId(), row.providerReference(), row.status(), row.responseUtf8());
     }
-    private record JdbcPaymentQuery(java.util.UUID id, String reference, String status) {}
+    private record JdbcPaymentQuery(java.util.UUID id, String reference, String status, byte[] raw) {}
 
     @PostMapping(path = {"/api/orders/{orderId}/refunds", "/api/refunds"}, consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<byte[]> requestRefund(@PathVariable(required = false) java.util.UUID orderId,
@@ -85,8 +88,8 @@ public class PaymentWebhookController {
         try {
             var result = refunds.requestRefund(actualOrder, key, Money.ofFen(request.amountFen()));
             int status = "UNKNOWN".equals(result.status()) ? 202 : 201;
-            return json(status, "{\"refundId\":\"" + result.refundId() + "\",\"providerReference\":\""
-                + result.providerReference() + "\",\"status\":\"" + result.status() + "\"}");
+            return result.responseUtf8() == null ? json(status, "{\"refundId\":\"" + result.refundId() + "\",\"providerReference\":\""
+                + result.providerReference() + "\",\"status\":\"" + result.status() + "\"}") : bytes(status, result.responseUtf8());
         } catch (RefundService.RefundLimitExceededException | RefundService.IdempotencyConflictException e) {
             return json(409, "{\"error\":\"退款额度或幂等冲突\"}");
         } catch (IllegalArgumentException e) { return json(400, "{\"error\":\"退款请求无效\"}"); }
@@ -97,18 +100,25 @@ public class PaymentWebhookController {
     public ResponseEntity<byte[]> queryRefund(@PathVariable java.util.UUID refundId) {
         var result = refunds.queryRefund(refundId);
         if (result == null) return json(404, "{\"error\":\"退款不存在\"}");
-        return json(200, "{\"refundId\":\"" + result.refundId() + "\",\"providerReference\":\""
-            + result.providerReference() + "\",\"status\":\"" + result.status() + "\"}");
+        return result.responseUtf8() == null ? json(200, "{\"refundId\":\"" + result.refundId() + "\",\"providerReference\":\""
+            + result.providerReference() + "\",\"status\":\"" + result.status() + "\"}") : bytes(200, result.responseUtf8());
     }
 
     @ExceptionHandler(DataAccessException.class)
     ResponseEntity<byte[]> databaseFailure(DataAccessException ignored) {
         return json(503, "{\"error\":\"支付依赖暂不可用\"}");
     }
+    @ExceptionHandler({MissingRequestHeaderException.class, HttpMessageNotReadableException.class})
+    ResponseEntity<byte[]> protocolFailure(Exception ignored) {
+        return json(400, "{\"error\":\"请求参数无效\"}");
+    }
     public record RefundRequest(java.util.UUID orderId, long amountFen) {}
 
     private static ResponseEntity<byte[]> json(int status, String body) {
         return ResponseEntity.status(status).contentType(MediaType.parseMediaType("application/json; charset=UTF-8"))
             .body(body.getBytes(StandardCharsets.UTF_8));
+    }
+    private static ResponseEntity<byte[]> bytes(int status, byte[] body) {
+        return ResponseEntity.status(status).contentType(MediaType.parseMediaType("application/json; charset=UTF-8")).body(body);
     }
 }
