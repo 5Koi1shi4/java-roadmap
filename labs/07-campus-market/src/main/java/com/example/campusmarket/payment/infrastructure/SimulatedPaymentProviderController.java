@@ -28,6 +28,8 @@ public class SimulatedPaymentProviderController {
     private final Map<String, RefundEntry> refunds = new ConcurrentHashMap<>();
     private final Map<String, PaymentEntry> paymentsByKey = new ConcurrentHashMap<>();
     private final Map<String, RefundEntry> refundsByKey = new ConcurrentHashMap<>();
+    private final Object paymentIndexLock = new Object();
+    private final Object refundIndexLock = new Object();
 
     public SimulatedPaymentProviderController(ObjectMapper objectMapper,
                                                @Value("${campus.market.payment.provider:simulated}") String provider,
@@ -46,40 +48,49 @@ public class SimulatedPaymentProviderController {
             throw new IllegalArgumentException("支付请求无效");
         }
         String ref = "sim-pay-" + UUID.nameUUIDFromBytes(request.idempotencyKey().getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        PaymentEntry entry = paymentsByKey.compute(request.idempotencyKey(), (ignored, prior) -> {
-            if (prior != null && (!prior.orderId().equals(request.orderId()) || prior.amountFen() != request.amountFen())) {
+        synchronized (paymentIndexLock) {
+            PaymentEntry entry = paymentsByKey.get(request.idempotencyKey());
+            if (entry != null && (!entry.orderId().equals(request.orderId()) || entry.amountFen() != request.amountFen()))
                 throw new IdempotencyConflictException();
+            if (entry == null) {
+                entry = new PaymentEntry(request.orderId(), request.amountFen(), "PENDING", request.idempotencyKey());
+                paymentsByKey.put(request.idempotencyKey(), entry);
+                payments.put(ref, entry);
             }
-            return prior == null ? new PaymentEntry(request.orderId(), request.amountFen(), "PENDING", request.idempotencyKey()) : prior;
-        });
-        payments.putIfAbsent(ref, entry);
-        return new PaymentResponse(provider, ref, entry.status(), entry.amountFen());
+            return new PaymentResponse(provider, ref, entry.status(), entry.amountFen());
+        }
     }
 
     @GetMapping("/payments/{reference}")
     public PaymentResponse queryPayment(@PathVariable String reference) {
-        PaymentEntry entry = payments.get(reference);
-        if (entry == null) return new PaymentResponse(provider, reference, "UNKNOWN", 0);
-        return new PaymentResponse(provider, reference, entry.status(), entry.amountFen());
+        synchronized (paymentIndexLock) {
+            PaymentEntry entry = payments.get(reference);
+            if (entry == null) return new PaymentResponse(provider, reference, "UNKNOWN", 0);
+            return new PaymentResponse(provider, reference, entry.status(), entry.amountFen());
+        }
     }
 
     @GetMapping("/payments/by-key/{idempotencyKey}")
     public PaymentResponse queryPaymentByKey(@PathVariable String idempotencyKey) {
-        PaymentEntry entry = paymentsByKey.get(idempotencyKey);
-        if (entry == null) return new PaymentResponse(provider, "unknown", "UNKNOWN", 0);
-        String ref = "sim-pay-" + UUID.nameUUIDFromBytes(idempotencyKey.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        return new PaymentResponse(provider, ref, entry.status(), entry.amountFen());
+        synchronized (paymentIndexLock) {
+            PaymentEntry entry = paymentsByKey.get(idempotencyKey);
+            if (entry == null) return new PaymentResponse(provider, "unknown", "UNKNOWN", 0);
+            String ref = "sim-pay-" + UUID.nameUUIDFromBytes(idempotencyKey.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return new PaymentResponse(provider, ref, entry.status(), entry.amountFen());
+        }
     }
 
     @PostMapping("/payments/{reference}/{status}")
     public PaymentResponse setPaymentStatus(@PathVariable String reference, @PathVariable String status) {
         validateStatus(status);
-        PaymentEntry old = payments.get(reference);
-        if (old == null) return new PaymentResponse(provider, reference, "UNKNOWN", 0);
-        PaymentEntry updated = new PaymentEntry(old.orderId(), old.amountFen(), status, old.idempotencyKey());
-        payments.compute(reference, (ignored, current) -> current == old ? updated : current);
-        paymentsByKey.compute(old.idempotencyKey(), (ignored, current) -> current == old ? updated : current);
-        return new PaymentResponse(provider, reference, status, old.amountFen());
+        synchronized (paymentIndexLock) {
+            PaymentEntry old = payments.get(reference);
+            if (old == null) return new PaymentResponse(provider, reference, "UNKNOWN", 0);
+            PaymentEntry updated = new PaymentEntry(old.orderId(), old.amountFen(), status, old.idempotencyKey());
+            payments.put(reference, updated);
+            paymentsByKey.put(old.idempotencyKey(), updated);
+            return new PaymentResponse(provider, reference, updated.status(), updated.amountFen());
+        }
     }
 
     @PostMapping(path = "/refunds", consumes = MediaType.APPLICATION_JSON_VALUE)
@@ -90,39 +101,49 @@ public class SimulatedPaymentProviderController {
             throw new IllegalArgumentException("退款请求无效");
         }
         String ref = "sim-refund-" + UUID.nameUUIDFromBytes(request.idempotencyKey().getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        RefundEntry entry = refundsByKey.compute(request.idempotencyKey(), (ignored, prior) -> {
-            if (prior != null && (prior.amountFen() != request.amountFen()
-                || !prior.paymentReference().equals(request.paymentProviderReference()))) throw new IdempotencyConflictException();
-            return prior == null ? new RefundEntry(request.amountFen(), "PENDING", request.paymentProviderReference(), request.idempotencyKey()) : prior;
-        });
-        refunds.putIfAbsent(ref, entry);
-        return new RefundResponse(provider, ref, entry.status(), entry.amountFen());
+        synchronized (refundIndexLock) {
+            RefundEntry entry = refundsByKey.get(request.idempotencyKey());
+            if (entry != null && (entry.amountFen() != request.amountFen()
+                || !entry.paymentReference().equals(request.paymentProviderReference()))) throw new IdempotencyConflictException();
+            if (entry == null) {
+                entry = new RefundEntry(request.amountFen(), "PENDING", request.paymentProviderReference(), request.idempotencyKey());
+                refundsByKey.put(request.idempotencyKey(), entry);
+                refunds.put(ref, entry);
+            }
+            return new RefundResponse(provider, ref, entry.status(), entry.amountFen());
+        }
     }
 
     @GetMapping("/refunds/{reference}")
     public RefundResponse queryRefund(@PathVariable String reference) {
-        RefundEntry entry = refunds.get(reference);
-        if (entry == null) return new RefundResponse(provider, reference, "UNKNOWN", 0);
-        return new RefundResponse(provider, reference, entry.status(), entry.amountFen());
+        synchronized (refundIndexLock) {
+            RefundEntry entry = refunds.get(reference);
+            if (entry == null) return new RefundResponse(provider, reference, "UNKNOWN", 0);
+            return new RefundResponse(provider, reference, entry.status(), entry.amountFen());
+        }
     }
 
     @GetMapping("/refunds/by-key/{idempotencyKey}")
     public RefundResponse queryRefundByKey(@PathVariable String idempotencyKey) {
-        RefundEntry entry = refundsByKey.get(idempotencyKey);
-        if (entry == null) return new RefundResponse(provider, "unknown", "UNKNOWN", 0);
-        String ref = "sim-refund-" + UUID.nameUUIDFromBytes(idempotencyKey.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        return new RefundResponse(provider, ref, entry.status(), entry.amountFen());
+        synchronized (refundIndexLock) {
+            RefundEntry entry = refundsByKey.get(idempotencyKey);
+            if (entry == null) return new RefundResponse(provider, "unknown", "UNKNOWN", 0);
+            String ref = "sim-refund-" + UUID.nameUUIDFromBytes(idempotencyKey.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return new RefundResponse(provider, ref, entry.status(), entry.amountFen());
+        }
     }
 
     @PostMapping("/refunds/{reference}/{status}")
     public RefundResponse setRefundStatus(@PathVariable String reference, @PathVariable String status) {
         validateStatus(status);
-        RefundEntry old = refunds.get(reference);
-        if (old == null) return new RefundResponse(provider, reference, "UNKNOWN", 0);
-        RefundEntry updated = new RefundEntry(old.amountFen(), status, old.paymentReference(), old.idempotencyKey());
-        refunds.compute(reference, (ignored, current) -> current == old ? updated : current);
-        refundsByKey.compute(old.idempotencyKey(), (ignored, current) -> current == old ? updated : current);
-        return new RefundResponse(provider, reference, status, old.amountFen());
+        synchronized (refundIndexLock) {
+            RefundEntry old = refunds.get(reference);
+            if (old == null) return new RefundResponse(provider, reference, "UNKNOWN", 0);
+            RefundEntry updated = new RefundEntry(old.amountFen(), status, old.paymentReference(), old.idempotencyKey());
+            refunds.put(reference, updated);
+            refundsByKey.put(old.idempotencyKey(), updated);
+            return new RefundResponse(provider, reference, updated.status(), updated.amountFen());
+        }
     }
 
     /** 测试控制接口：生成带签名的回调所需字段，但回调投递由测试/客户端执行。 */

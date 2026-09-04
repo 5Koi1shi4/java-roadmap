@@ -70,8 +70,9 @@ public class PaymentService {
             return new PaymentResult(paymentId, created.providerReference(), created.status().status().name(), response);
         } catch (RuntimeException unavailable) {
             repository.markPaymentUnknown(paymentId);
-            repository.savePaymentResponse(paymentId, response(paymentId, null, "UNKNOWN"));
-            throw unavailable;
+            byte[] response = response(paymentId, null, "UNKNOWN");
+            repository.savePaymentResponse(paymentId, response);
+            return new PaymentResult(paymentId, null, "UNKNOWN", response);
         }
     }
 
@@ -96,12 +97,12 @@ public class PaymentService {
         if (status.amountFen() != row.amountFen() || status.providerReference() == null
             || (row.providerReference() != null && !row.providerReference().equals(status.providerReference()))) return queryPayment(paymentId);
         if (status.status() == PaymentGateway.PaymentStatus.Status.SUCCEEDED)
-            transactions().execute(ignored -> { if (repository.markPaymentSucceeded(paymentId, row.providerReference() == null ? status.providerReference() : row.providerReference(), status.providerReference(), status.amountFen(), owner, token)) {
+            transactions().execute(ignored -> { if (repository.markPaymentSucceeded(paymentId, row.providerReference(), status.providerReference(), status.amountFen(), owner, token)) {
                 jdbc.update("UPDATE trade_order o JOIN payment_order p ON p.order_id=o.id SET o.paid_amount_fen=p.paid_amount_fen,o.status='AWAITING_HANDOFF',o.updated_at=CURRENT_TIMESTAMP(6) WHERE p.id=? AND o.status='PENDING_PAYMENT'", row.id().toString());
                 repository.insertPaymentEvent("PAYMENT_SUCCEEDED", row.id(), json(java.util.Map.of("paymentId", row.id(), "orderId", row.orderId(), "amountFen", status.amountFen()))); }
                 return null; });
         else if (status.status() == PaymentGateway.PaymentStatus.Status.FAILED)
-            transactions().execute(ignored -> { if (repository.markPaymentFailed(paymentId, row.providerReference() == null ? status.providerReference() : row.providerReference(), owner, token))
+            transactions().execute(ignored -> { if (repository.markPaymentFailed(paymentId, row.providerReference(), status.providerReference(), status.amountFen(), owner, token))
                 repository.insertPaymentEvent("PAYMENT_FAILED", row.id(), json(java.util.Map.of("paymentId", row.id()))); return null; });
         return queryPayment(paymentId);
     }

@@ -10,6 +10,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.context.annotation.Profile;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
@@ -25,11 +26,13 @@ public class PaymentWebhookController {
     private final PaymentGateway gateway;
     private final PaymentService payments;
     private final RefundService refunds;
+    private final ObjectMapper mapper;
 
-    public PaymentWebhookController(PaymentGateway gateway, PaymentService payments, RefundService refunds) {
+    public PaymentWebhookController(PaymentGateway gateway, PaymentService payments, RefundService refunds, ObjectMapper mapper) {
         this.gateway = Objects.requireNonNull(gateway, "支付网关不能为空");
         this.payments = Objects.requireNonNull(payments, "支付服务不能为空");
         this.refunds = Objects.requireNonNull(refunds, "退款服务不能为空");
+        this.mapper = Objects.requireNonNull(mapper, "JSON序列化器不能为空");
     }
 
     @PostMapping(path = "/api/payment-webhooks/{provider}", consumes = MediaType.APPLICATION_JSON_VALUE)
@@ -56,9 +59,11 @@ public class PaymentWebhookController {
                                                 @RequestBody(required = false) byte[] rawRequest,
                                                 @RequestHeader("Idempotency-Key") String key) {
         try {
+            if (rawRequest == null || rawRequest.length == 0 || key == null || key.isBlank()) return json(400, "{\"error\":\"请求参数无效\"}");
             PaymentService.PaymentResult result = payments.createPayment(orderId, key, rawRequest);
-            return result.responseUtf8() == null ? json(201, "{\"paymentId\":\"" + result.paymentId() + "\",\"providerReference\":\""
-                + result.providerReference() + "\",\"status\":\"" + result.status() + "\"}") : bytes(201, result.responseUtf8());
+            int status = "UNKNOWN".equals(result.status()) ? 503 : 201;
+            return result.responseUtf8() == null ? json(status, "{\"paymentId\":\"" + result.paymentId() + "\",\"providerReference\":\""
+                + result.providerReference() + "\",\"status\":\"" + result.status() + "\"}") : bytes(status, result.responseUtf8());
         } catch (IllegalArgumentException e) { return json(400, "{\"error\":\"支付请求无效\"}"); }
         catch (PaymentService.IdempotencyConflictException e) { return json(409, "{\"error\":\"幂等冲突\"}"); }
         catch (IllegalStateException e) { return json(409, "{\"error\":\"订单不可支付\"}"); }
@@ -80,15 +85,20 @@ public class PaymentWebhookController {
 
     @PostMapping(path = {"/api/orders/{orderId}/refunds", "/api/refunds"}, consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<byte[]> requestRefund(@PathVariable(required = false) java.util.UUID orderId,
-        @RequestBody RefundRequest request,
+        @RequestBody(required = false) byte[] rawBody,
                                                @RequestHeader("Idempotency-Key") String key) {
-        if (request == null || request.amountFen() <= 0 || (orderId == null && request.orderId() == null)) {
+        if (rawBody == null || rawBody.length == 0 || key == null || key.isBlank()) {
             return json(400, "{\"error\":\"退款请求无效\"}");
         }
+        RefundRequest request;
+        try { request = mapper.readValue(rawBody, RefundRequest.class); }
+        catch (Exception invalidJson) { return json(400, "{\"error\":\"退款请求无效\"}"); }
+        if (request == null || request.amountFen() <= 0 || (orderId == null && request.orderId() == null))
+            return json(400, "{\"error\":\"退款请求无效\"}");
         java.util.UUID actualOrder = orderId == null ? request.orderId() : orderId;
         try {
-            var result = refunds.requestRefund(actualOrder, key, Money.ofFen(request.amountFen()));
-            int status = "UNKNOWN".equals(result.status()) ? 202 : 201;
+            var result = refunds.requestRefund(actualOrder, key, Money.ofFen(request.amountFen()), rawBody);
+            int status = "UNKNOWN".equals(result.status()) ? 503 : 201;
             return result.responseUtf8() == null ? json(status, "{\"refundId\":\"" + result.refundId() + "\",\"providerReference\":\""
                 + result.providerReference() + "\",\"status\":\"" + result.status() + "\"}") : bytes(status, result.responseUtf8());
         } catch (RefundService.RefundLimitExceededException | RefundService.IdempotencyConflictException e) {

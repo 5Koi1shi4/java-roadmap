@@ -37,7 +37,11 @@ public class RefundService {
     }
 
     public RefundResult requestRefund(UUID orderId, String idempotencyKey, Money amount) {
-        return requestRefund(orderId, idempotencyKey, amount, "ORDER", null);
+        return requestRefund(orderId, idempotencyKey, amount, "ORDER", null, new byte[0]);
+    }
+
+    public RefundResult requestRefund(UUID orderId, String idempotencyKey, Money amount, byte[] rawRequest) {
+        return requestRefund(orderId, idempotencyKey, amount, "ORDER", null, rawRequest);
     }
 
     public RefundResult queryRefund(UUID refundId) {
@@ -66,24 +70,33 @@ public class RefundService {
     }
 
     public RefundResult requestRefund(UUID orderId, String idempotencyKey, Money amount, String sourceType, UUID sourceId) {
+        return requestRefund(orderId, idempotencyKey, amount, sourceType, sourceId, new byte[0]);
+    }
+
+    public RefundResult requestRefund(UUID orderId, String idempotencyKey, Money amount, String sourceType, UUID sourceId, byte[] rawRequest) {
         String lockKey = orderId + "|" + idempotencyKey;
         Object lock = idempotencyLocks.computeIfAbsent(lockKey, ignored -> new Object());
         synchronized (lock) {
-            return requestRefundInternal(orderId, idempotencyKey, amount, sourceType, sourceId);
+            return requestRefundInternal(orderId, idempotencyKey, amount, sourceType, sourceId, rawRequest);
         }
     }
 
-    private RefundResult requestRefundInternal(UUID orderId, String idempotencyKey, Money amount, String sourceType, UUID sourceId) {
-        byte[] requestHash = digest(orderId + "|" + idempotencyKey + "|" + amount.fen() + "|" + sourceType + "|" + sourceId);
-        RefundIntent intent = transactions.execute(status -> prepare(orderId, idempotencyKey, amount, sourceType, sourceId, requestHash));
+    private RefundResult requestRefundInternal(UUID orderId, String idempotencyKey, Money amount, String sourceType, UUID sourceId, byte[] rawRequest) {
+        byte[] body = rawRequest == null ? new byte[0] : rawRequest.clone();
+        RefundIntent intent = transactions.execute(status -> prepare(orderId, idempotencyKey, amount, sourceType, sourceId, body));
         if (intent.existing() != null) return intent.existing();
         PaymentGateway.RefundCreated created;
         try {
             created = gateway.requestRefund(new PaymentGateway.CreateRefundRequest(orderId,
                 intent.paymentReference(), amount, idempotencyKey));
         } catch (RuntimeException failure) {
-            return transactions.execute(status -> finish(intent.refundId(), intent.paymentId(), amount.fen(), null,
-                PaymentGateway.RefundStatus.Status.UNKNOWN));
+            return transactions.execute(status -> {
+                RefundResult result = finish(intent.refundId(), intent.paymentId(), amount.fen(), null,
+                    PaymentGateway.RefundStatus.Status.UNKNOWN);
+                byte[] response = response(result.refundId(), result.providerReference(), result.status());
+                repository.saveRefundResponse(intent.refundId(), response);
+                return new RefundResult(result.refundId(), result.providerReference(), result.status(), response);
+            });
         }
         return transactions.execute(status -> {
             RefundResult result = finish(intent.refundId(), intent.paymentId(), amount.fen(),
@@ -95,13 +108,16 @@ public class RefundService {
         });
     }
 
-    private RefundIntent prepare(UUID orderId, String idempotencyKey, Money amount, String sourceType, UUID sourceId, byte[] requestHash) {
+    private RefundIntent prepare(UUID orderId, String idempotencyKey, Money amount, String sourceType, UUID sourceId, byte[] rawRequest) {
         JdbcPaymentRepository.PaymentRecord payment = jdbc.query("SELECT id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status FROM payment_order WHERE order_id=? AND status='SUCCEEDED' ORDER BY created_at DESC LIMIT 1",
             rs -> rs.next() ? new JdbcPaymentRepository.PaymentRecord(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),
                 rs.getString("provider"), rs.getString("idempotency_key"), rs.getLong("amount_fen"), rs.getLong("paid_amount_fen"),
                 rs.getString("provider_reference"), rs.getString("status")) : null, orderId.toString());
         if (payment == null || payment.providerReference() == null) throw new IllegalStateException("订单尚未支付成功");
         if (amount.fen() <= 0 || amount.fen() > payment.paidAmountFen()) throw new IllegalArgumentException("退款金额超出实付金额");
+        byte[] requestHash = digest(payment.provider() + "|CNY|" + payment.providerReference() + "|" + orderId + "|"
+            + amount.fen() + "|" + sourceType + "|" + sourceId + "|" + idempotencyKey + "|" +
+            java.util.Base64.getEncoder().encodeToString(rawRequest));
         // 幂等重试先复用原退款记录，避免重复占额或第二次调用提供方。
         JdbcPaymentRepository.RefundRecord existing = repository.findRefundByKey(orderId, idempotencyKey);
         if (existing != null) {
@@ -134,24 +150,25 @@ public class RefundService {
     private RefundResult finish(UUID refundId, UUID paymentId, long amountFen, String reference, PaymentGateway.RefundStatus.Status status) {
         String storedStatus = status == PaymentGateway.RefundStatus.Status.PENDING ? "PROCESSING" : status.name();
         int changed = jdbc.update("UPDATE refund_order SET status=?,provider_reference=COALESCE(?,provider_reference),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN')", storedStatus, reference, refundId.toString());
-        if (changed == 1 && status == PaymentGateway.RefundStatus.Status.SUCCEEDED) {
+        if (changed != 1) throw new IllegalStateException("退款状态更新 CAS 失败，等待重试");
+        if (status == PaymentGateway.RefundStatus.Status.SUCCEEDED) {
             if (!repository.completeRefund(paymentId, amountFen)) throw new IllegalStateException("退款额度结转失败，等待对账");
             repository.insertPaymentEvent("REFUND_SUCCEEDED", refundId, json(java.util.Map.of("refundId", refundId, "amountFen", amountFen)));
         }
-        if (changed == 1 && status == PaymentGateway.RefundStatus.Status.FAILED) {
+        if (status == PaymentGateway.RefundStatus.Status.FAILED) {
             if (!repository.releaseRefund(paymentId, amountFen)) throw new IllegalStateException("退款额度释放失败，等待对账");
             repository.insertPaymentEvent("REFUND_FAILED", refundId, json(java.util.Map.of("refundId", refundId, "amountFen", amountFen)));
         }
-        if (changed == 1 && status == PaymentGateway.RefundStatus.Status.UNKNOWN) repository.saveRefundResponse(refundId, response(refundId, reference, "UNKNOWN"));
+        if (status == PaymentGateway.RefundStatus.Status.UNKNOWN) repository.saveRefundResponse(refundId, response(refundId, reference, "UNKNOWN"));
         return new RefundResult(refundId, reference, storedStatus);
     }
 
     private void settleTerminal(JdbcPaymentRepository.RefundRecord row, String status, String reference, String owner, String token) {
-        if (repository.markRefundTerminal(row.id(), row.providerReference(), reference, status, row.amountFen(), owner, token)) {
-            boolean settled = "SUCCEEDED".equals(status) ? repository.completeRefund(row.paymentId(), row.amountFen()) : repository.releaseRefund(row.paymentId(), row.amountFen());
-            if (!settled) throw new IllegalStateException("退款聚合结转失败，等待重试");
-            repository.insertPaymentEvent("REFUND_" + status, row.id(), json(java.util.Map.of("refundId", row.id(), "amountFen", row.amountFen())));
-        }
+        if (!repository.markRefundTerminal(row.id(), row.providerReference(), reference, status, row.amountFen(), owner, token))
+            throw new IllegalStateException("退款状态结算 CAS 失败，等待重试");
+        boolean settled = "SUCCEEDED".equals(status) ? repository.completeRefund(row.paymentId(), row.amountFen()) : repository.releaseRefund(row.paymentId(), row.amountFen());
+        if (!settled) throw new IllegalStateException("退款聚合结转失败，等待重试");
+        repository.insertPaymentEvent("REFUND_" + status, row.id(), json(java.util.Map.of("refundId", row.id(), "amountFen", row.amountFen())));
     }
 
     @Transactional
@@ -161,19 +178,27 @@ public class RefundService {
         JdbcPaymentRepository.RefundRecord refund = jdbc.query("SELECT id,order_id,payment_order_id,provider,idempotency_key,amount_fen,provider_reference,status FROM refund_order WHERE provider=? AND provider_reference=?",
             rs -> rs.next() ? new JdbcPaymentRepository.RefundRecord(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")), UUID.fromString(rs.getString("payment_order_id")), rs.getString("provider"), rs.getString("idempotency_key"), rs.getLong("amount_fen"), rs.getString("provider_reference"), rs.getString("status")) : null,
             callback.provider(), callback.providerReference());
-        if (refund == null) { repository.failCallback(callback.provider(), callback.providerEventId()); return; }
-        if (callback.amountFen() != refund.amountFen()) { repository.failCallback(callback.provider(), callback.providerEventId()); return; }
-        if ("SUCCEEDED".equals(callback.status())) {
-            if (jdbc.update("UPDATE refund_order SET status='SUCCEEDED',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND provider=? AND provider_reference=? AND amount_fen=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN')", refund.id().toString(), callback.provider(), callback.providerReference(), callback.amountFen()) == 1) {
-                if (!repository.completeRefund(refund.paymentId(), refund.amountFen())) { jdbc.update("UPDATE refund_order SET status='UNKNOWN',updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", refund.id().toString()); repository.failCallback(callback.provider(), callback.providerEventId()); return; }
-                repository.insertPaymentEvent("REFUND_SUCCEEDED", refund.id(), json(java.util.Map.of("refundId", refund.id(), "orderId", refund.orderId(), "amountFen", refund.amountFen())));
-            }
-        } else if ("FAILED".equals(callback.status())) {
-            if (jdbc.update("UPDATE refund_order SET status='FAILED',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND provider=? AND provider_reference=? AND amount_fen=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN')", refund.id().toString(), callback.provider(), callback.providerReference(), callback.amountFen()) == 1 && repository.releaseRefund(refund.paymentId(), refund.amountFen())) {
-                repository.insertPaymentEvent("REFUND_FAILED", refund.id(), json(java.util.Map.of("refundId", refund.id(), "orderId", refund.orderId(), "amountFen", refund.amountFen())));
-            }
+        if (refund == null) {
+            if (!repository.failCallback(callback.provider(), callback.providerEventId())) throw new IllegalStateException("退款回调失败 CAS 失败，等待重试");
+            return;
         }
-        repository.completeCallback(callback.provider(), callback.providerEventId());
+        if (callback.amountFen() != refund.amountFen()) {
+            if (!repository.failCallback(callback.provider(), callback.providerEventId())) throw new IllegalStateException("退款回调失败 CAS 失败，等待重试");
+            return;
+        }
+        if ("SUCCEEDED".equals(callback.status())) {
+            int changed = jdbc.update("UPDATE refund_order SET status='SUCCEEDED',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND provider=? AND provider_reference=? AND amount_fen=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN')", refund.id().toString(), callback.provider(), callback.providerReference(), callback.amountFen());
+            if (changed != 1) throw new IllegalStateException("退款状态结算 CAS 失败，等待重试");
+            if (!repository.completeRefund(refund.paymentId(), refund.amountFen())) throw new IllegalStateException("退款额度结转失败，等待重试");
+            repository.insertPaymentEvent("REFUND_SUCCEEDED", refund.id(), json(java.util.Map.of("refundId", refund.id(), "orderId", refund.orderId(), "amountFen", refund.amountFen())));
+        } else if ("FAILED".equals(callback.status())) {
+            int changed = jdbc.update("UPDATE refund_order SET status='FAILED',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND provider=? AND provider_reference=? AND amount_fen=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN')", refund.id().toString(), callback.provider(), callback.providerReference(), callback.amountFen());
+            if (changed != 1) throw new IllegalStateException("退款状态结算 CAS 失败，等待重试");
+            if (!repository.releaseRefund(refund.paymentId(), refund.amountFen())) throw new IllegalStateException("退款额度释放失败，等待重试");
+            repository.insertPaymentEvent("REFUND_FAILED", refund.id(), json(java.util.Map.of("refundId", refund.id(), "orderId", refund.orderId(), "amountFen", refund.amountFen())));
+        }
+        if (!repository.completeCallback(callback.provider(), callback.providerEventId()))
+            throw new IllegalStateException("退款回调完成 CAS 失败，等待重试");
     }
 
     public record RefundResult(UUID refundId, String providerReference, String status, byte[] responseUtf8) {

@@ -150,7 +150,22 @@ public class JdbcPaymentRepository {
     }
 
     public boolean markPaymentFailed(UUID paymentId, String expectedReference, String owner, String token) {
-        return jdbc.update("UPDATE payment_order SET status='FAILED',reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND provider_reference=? AND status IN ('PENDING','UNKNOWN') AND reconcile_owner=? AND reconcile_token=?", paymentId.toString(), expectedReference, owner, token) == 1;
+        return markPaymentFailed(paymentId, expectedReference, expectedReference, -1L, owner, token);
+    }
+
+    public boolean markPaymentFailed(UUID paymentId, String expectedReference, String reference, long amountFen,
+                                     String owner, String token) {
+        String predicate = expectedReference == null ? "provider_reference IS NULL" : "provider_reference=?";
+        String amountPredicate = amountFen < 0 ? "" : " AND amount_fen=?";
+        Object[] args;
+        if (expectedReference == null) {
+            args = amountFen < 0 ? new Object[]{reference, paymentId.toString(), owner, token}
+                : new Object[]{reference, paymentId.toString(), amountFen, owner, token};
+        } else {
+            args = amountFen < 0 ? new Object[]{reference, paymentId.toString(), expectedReference, owner, token}
+                : new Object[]{reference, paymentId.toString(), expectedReference, amountFen, owner, token};
+        }
+        return jdbc.update("UPDATE payment_order SET provider_reference=COALESCE(?,provider_reference),status='FAILED',reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND " + predicate + amountPredicate + " AND status IN ('PENDING','UNKNOWN') AND reconcile_owner=? AND reconcile_token=?", args) == 1;
     }
 
     /** 在同一支付聚合行上串行化并校验 successful + reserved + requested <= paid。 */

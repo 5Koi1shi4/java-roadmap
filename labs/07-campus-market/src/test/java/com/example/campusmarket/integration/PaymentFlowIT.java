@@ -162,6 +162,97 @@ class PaymentFlowIT extends SharedContainers {
     }
 
     @Test
+    void noReferencePendingPaymentReconcilesByProviderKeyAndBindsReturnedReference() throws Exception {
+        UUID payment = UUID.randomUUID();
+        UUID order = UUID.randomUUID();
+        UUID seller = user(); UUID buyer = user(); UUID listing = UUID.randomUUID();
+        jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,?,100,0,'SOLD_OUT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", listing.toString(), seller.toString(), "教材", "描述", "教材");
+        jdbc.update("INSERT INTO trade_order (id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,paid_amount_fen,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,100,1,100,0,'PENDING_PAYMENT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", order.toString(), buyer.toString(), seller.toString(), listing.toString(), "教材", "描述");
+        String key = "no-reference-" + payment;
+        PaymentGateway.PaymentCreated created = new com.example.campusmarket.payment.infrastructure.SimulatedPaymentGateway(
+            HttpClient.newHttpClient(), new com.fasterxml.jackson.databind.ObjectMapper(), "simulated", "http://localhost:" + port + "/simulated-provider", "local-only-payment-secret-change-me")
+            .createPayment(new PaymentGateway.CreatePaymentRequest(order, com.example.campusmarket.shared.Money.ofFen(100), key));
+        jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,status,next_reconcile_at,created_at,updated_at) VALUES (?,?,?,?,100,'UNKNOWN',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", payment.toString(), order.toString(), "simulated", key);
+        HttpClient.newHttpClient().send(HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + port + "/simulated-provider/payments/" + created.providerReference() + "/SUCCEEDED")).POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofByteArray());
+
+        assertThat(reconciliation.runOnce(20)).isGreaterThanOrEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, payment.toString())).isEqualTo("SUCCEEDED");
+        assertThat(jdbc.queryForObject("SELECT provider_reference FROM payment_order WHERE id=?", String.class, payment.toString())).isEqualTo(created.providerReference());
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("AWAITING_HANDOFF");
+    }
+
+    @Test
+    void paymentReconciliationWrongAmountOrReferenceDoesNotAdvanceFunds() throws Exception {
+        UUID seller = user(); UUID buyer = user(); UUID listing = UUID.randomUUID();
+        UUID order = UUID.randomUUID(); UUID payment = UUID.randomUUID(); String key = "wrong-amount-" + payment;
+        jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,?,100,0,'SOLD_OUT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", listing.toString(), seller.toString(), "教材", "描述", "教材");
+        jdbc.update("INSERT INTO trade_order (id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,paid_amount_fen,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,100,1,99,0,'PENDING_PAYMENT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", order.toString(), buyer.toString(), seller.toString(), listing.toString(), "教材", "描述");
+        PaymentGateway.PaymentCreated created = new com.example.campusmarket.payment.infrastructure.SimulatedPaymentGateway(HttpClient.newHttpClient(), new com.fasterxml.jackson.databind.ObjectMapper(), "simulated", "http://localhost:" + port + "/simulated-provider", "local-only-payment-secret-change-me").createPayment(new PaymentGateway.CreatePaymentRequest(order, com.example.campusmarket.shared.Money.ofFen(100), key));
+        jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,status,next_reconcile_at,created_at,updated_at) VALUES (?,?,?,?,99,'UNKNOWN',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", payment.toString(), order.toString(), "simulated", key);
+        HttpClient.newHttpClient().send(HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + port + "/simulated-provider/payments/" + created.providerReference() + "/SUCCEEDED")).POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofByteArray());
+        reconciliation.runOnce(20);
+        assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, payment.toString())).isEqualTo("UNKNOWN");
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("PENDING_PAYMENT");
+    }
+
+    @Test
+    void refundCallbackAggregateCasFailureRollsBackRefundCallbackAndOutbox() {
+        UUID payment = paidPayment(100);
+        UUID order = UUID.fromString(jdbc.queryForObject("SELECT order_id FROM payment_order WHERE id=?", String.class, payment.toString()));
+        UUID refund = UUID.randomUUID();
+        jdbc.update("INSERT INTO refund_order (id,order_id,payment_order_id,provider,idempotency_key,source_type,paid_amount_fen,amount_fen,reserved_refund_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,?,'ORDER',?,?,0,?,'REQUESTED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", refund.toString(), order.toString(), payment.toString(), "simulated", "callback-cas-" + refund, 100, 40, "callback-ref-" + refund);
+        PaymentGateway.VerifiedCallback callback = new PaymentGateway.VerifiedCallback("simulated", "callback-cas-event-" + refund,
+            PaymentGateway.VerifiedCallback.CallbackType.REFUND, "callback-ref-" + refund, 40, "SUCCEEDED", Instant.now(), "callback-cas-nonce-" + refund);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> refunds.handleCallback(callback, "{\"cas\":true}".getBytes(StandardCharsets.UTF_8)))
+            .isInstanceOf(IllegalStateException.class);
+        assertThat(jdbc.queryForObject("SELECT status FROM refund_order WHERE id=?", String.class, refund.toString())).isEqualTo("REQUESTED");
+        assertThat(jdbc.queryForObject("SELECT reserved_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(0L);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM payment_callback_event WHERE provider_event_id=?", Integer.class, callback.providerEventId())).isEqualTo(0);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id=?", Integer.class, refund.toString())).isEqualTo(0);
+    }
+
+    @Test
+    void failedRefundCallbackAggregateCasFailureAlsoRollsBack() {
+        UUID payment = paidPayment(100);
+        UUID order = UUID.fromString(jdbc.queryForObject("SELECT order_id FROM payment_order WHERE id=?", String.class, payment.toString()));
+        UUID refund = UUID.randomUUID();
+        jdbc.update("INSERT INTO refund_order (id,order_id,payment_order_id,provider,idempotency_key,source_type,paid_amount_fen,amount_fen,reserved_refund_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,?,'ORDER',?,?,0,?,'REQUESTED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", refund.toString(), order.toString(), payment.toString(), "simulated", "callback-failed-cas-" + refund, 100, 40, "callback-failed-ref-" + refund);
+        PaymentGateway.VerifiedCallback callback = new PaymentGateway.VerifiedCallback("simulated", "callback-failed-cas-event-" + refund,
+            PaymentGateway.VerifiedCallback.CallbackType.REFUND, "callback-failed-ref-" + refund, 40, "FAILED", Instant.now(), "callback-failed-cas-nonce-" + refund);
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> refunds.handleCallback(callback, "{\"cas\":\"failed\"}".getBytes(StandardCharsets.UTF_8)))
+            .isInstanceOf(IllegalStateException.class);
+        assertThat(jdbc.queryForObject("SELECT status FROM refund_order WHERE id=?", String.class, refund.toString())).isEqualTo("REQUESTED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM payment_callback_event WHERE provider_event_id=?", Integer.class, callback.providerEventId())).isEqualTo(0);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id=?", Integer.class, refund.toString())).isEqualTo(0);
+    }
+
+    @Test
+    void paymentAndRefundApisRejectMissingBodyAndBlankKeyAsUtf8BadRequest() throws Exception {
+        UUID userId = user();
+        String bearer = "Bearer " + jwtService.issue(new AuthenticatedUser(userId, Set.of("ROLE_USER")));
+        UUID order = UUID.randomUUID(); UUID seller = user(); UUID listing = UUID.randomUUID();
+        jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,?,100,0,'SOLD_OUT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", listing.toString(), seller.toString(), "教材", "描述", "教材");
+        jdbc.update("INSERT INTO trade_order (id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,paid_amount_fen,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,100,1,100,0,'PENDING_PAYMENT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", order.toString(), userId.toString(), seller.toString(), listing.toString(), "教材", "描述");
+        HttpClient client = HttpClient.newHttpClient();
+        HttpResponse<byte[]> missing = client.send(HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + port + "/api/orders/" + order + "/payments"))
+            .header("Authorization", bearer).header("Idempotency-Key", "missing-body-" + order).header("Content-Type", "application/json; charset=UTF-8")
+            .POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofByteArray());
+        assertThat(missing.statusCode()).isEqualTo(400);
+        assertThat(missing.headers().firstValue("Content-Type")).contains("charset=UTF-8");
+        HttpResponse<byte[]> blank = client.send(HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + port + "/api/orders/" + order + "/payments"))
+            .header("Authorization", bearer).header("Idempotency-Key", "   ").header("Content-Type", "application/json; charset=UTF-8")
+            .POST(HttpRequest.BodyPublishers.ofString("{}", StandardCharsets.UTF_8)).build(), HttpResponse.BodyHandlers.ofByteArray());
+        assertThat(blank.statusCode()).isEqualTo(400);
+        assertThat(new String(blank.body(), StandardCharsets.UTF_8)).contains("请求参数无效");
+        HttpResponse<byte[]> refundMissing = client.send(HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + port + "/api/refunds"))
+            .header("Authorization", bearer).header("Idempotency-Key", "refund-missing-" + order).header("Content-Type", "application/json; charset=UTF-8")
+            .POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofByteArray());
+        assertThat(refundMissing.statusCode()).isEqualTo(400);
+    }
+
+    @Test
     void paymentAndRefundApisReplayPersistedUtf8BytesAndRejectDifferentRefundBody() throws Exception {
         UUID userId = user();
         String bearer = "Bearer " + jwtService.issue(new AuthenticatedUser(userId, Set.of("ROLE_USER")));
@@ -193,7 +284,7 @@ class PaymentFlowIT extends SharedContainers {
         HttpRequest refundRequest = HttpRequest.newBuilder(java.net.URI.create(refundUri)).header("Authorization", bearer).header("Idempotency-Key", refundKey).header("Content-Type", "application/json; charset=UTF-8").POST(HttpRequest.BodyPublishers.ofString("{\"orderId\":\"" + refundOrder + "\",\"amountFen\":30}", StandardCharsets.UTF_8)).build();
         HttpResponse<byte[]> firstRefund = client.send(refundRequest, HttpResponse.BodyHandlers.ofByteArray());
         HttpResponse<byte[]> replayRefund = client.send(HttpRequest.newBuilder(java.net.URI.create(refundUri)).header("Authorization", bearer).header("Idempotency-Key", refundKey).header("Content-Type", "application/json; charset=UTF-8").POST(HttpRequest.BodyPublishers.ofString("{\"orderId\":\"" + refundOrder + "\",\"amountFen\":30}", StandardCharsets.UTF_8)).build(), HttpResponse.BodyHandlers.ofByteArray());
-        HttpResponse<byte[]> conflictRefund = client.send(HttpRequest.newBuilder(java.net.URI.create(refundUri)).header("Authorization", bearer).header("Idempotency-Key", refundKey).header("Content-Type", "application/json; charset=UTF-8").POST(HttpRequest.BodyPublishers.ofString("{\"orderId\":\"" + refundOrder + "\",\"amountFen\":31}", StandardCharsets.UTF_8)).build(), HttpResponse.BodyHandlers.ofByteArray());
+        HttpResponse<byte[]> conflictRefund = client.send(HttpRequest.newBuilder(java.net.URI.create(refundUri)).header("Authorization", bearer).header("Idempotency-Key", refundKey).header("Content-Type", "application/json; charset=UTF-8").POST(HttpRequest.BodyPublishers.ofString("{\"amountFen\":30,\"orderId\":\"" + refundOrder + "\"}", StandardCharsets.UTF_8)).build(), HttpResponse.BodyHandlers.ofByteArray());
         assertThat(firstRefund.statusCode()).isEqualTo(201);
         assertThat(replayRefund.statusCode()).isEqualTo(firstRefund.statusCode());
         assertThat(replayRefund.body()).containsExactly(firstRefund.body());
