@@ -2,8 +2,8 @@ package com.example.campusmarket.payment.application;
 
 import com.example.campusmarket.payment.infrastructure.JdbcPaymentRepository;
 import com.example.campusmarket.shared.Money;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -12,7 +12,7 @@ import java.util.UUID;
 
 /** 退款申请与额度预占；未知网关结果只进入查询，不自动创建第二笔退款。 */
 @Service
-@ConditionalOnBean(JdbcTemplate.class)
+@Profile("!test")
 public class RefundService {
     private final JdbcPaymentRepository repository;
     private final PaymentGateway gateway;

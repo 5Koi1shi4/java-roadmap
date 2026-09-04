@@ -4,6 +4,7 @@ import com.example.campusmarket.payment.application.PaymentGateway;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
@@ -35,6 +36,7 @@ public class SimulatedPaymentGateway implements PaymentGateway {
     private final byte[] secret;
     private final Set<String> usedNonces = ConcurrentHashMap.newKeySet();
 
+    @Autowired
     public SimulatedPaymentGateway(ObjectMapper mapper,
                                    @Value("${campus.market.payment.provider:simulated}") String provider,
                                    @Value("${campus.market.payment.provider-url:http://localhost:8080/simulated-provider}") String baseUrl,
@@ -46,7 +48,7 @@ public class SimulatedPaymentGateway implements PaymentGateway {
         this.http = http;
         this.mapper = mapper;
         this.provider = require(provider, "支付提供方");
-        this.baseUri = URI.create(require(baseUrl, "模拟提供方地址").replaceAll("/$", ""));
+        this.baseUri = URI.create(require(baseUrl, "模拟提供方地址").replaceAll("/$", "") + "/");
         this.secret = require(secret, "支付签名密钥").getBytes(StandardCharsets.UTF_8);
     }
 
@@ -106,7 +108,7 @@ public class SimulatedPaymentGateway implements PaymentGateway {
     private JsonNode post(String path, ObjectNodeBuilder fields) {
         try {
             byte[] data = mapper.writeValueAsBytes(fields.values);
-            HttpResponse<byte[]> response = http.send(HttpRequest.newBuilder(baseUri.resolve(path))
+            HttpResponse<byte[]> response = http.send(HttpRequest.newBuilder(endpoint(path))
                 .timeout(Duration.ofSeconds(10)).header("Content-Type", "application/json; charset=UTF-8")
                 .POST(HttpRequest.BodyPublishers.ofByteArray(data)).build(), HttpResponse.BodyHandlers.ofByteArray());
             return decode(response);
@@ -114,7 +116,7 @@ public class SimulatedPaymentGateway implements PaymentGateway {
     }
     private JsonNode get(String path) {
         try {
-            HttpResponse<byte[]> response = http.send(HttpRequest.newBuilder(baseUri.resolve(path)).timeout(Duration.ofSeconds(10)).GET().build(), HttpResponse.BodyHandlers.ofByteArray());
+            HttpResponse<byte[]> response = http.send(HttpRequest.newBuilder(endpoint(path)).timeout(Duration.ofSeconds(10)).GET().build(), HttpResponse.BodyHandlers.ofByteArray());
             return decode(response);
         } catch (Exception e) { throw new PaymentGatewayUnavailableException(e); }
     }
@@ -144,6 +146,7 @@ public class SimulatedPaymentGateway implements PaymentGateway {
     private static PaymentStatus.Status paymentStatus(String status) { try { return PaymentStatus.Status.valueOf(status); } catch (Exception e) { return PaymentStatus.Status.UNKNOWN; } }
     private static String require(String value, String name) { if (value == null || value.isBlank()) throw new IllegalArgumentException(name + "不能为空"); return value; }
     private static String encode(String value) { return value.replace("/", "%2F"); }
+    private URI endpoint(String path) { return baseUri.resolve(path.startsWith("/") ? path.substring(1) : path); }
     private static ObjectNodeBuilder object(Object... fields) { return new ObjectNodeBuilder(fields); }
     private static final class ObjectNodeBuilder { final java.util.Map<String,Object> values = new java.util.LinkedHashMap<>(); ObjectNodeBuilder(Object... f) { for (int i=0;i<f.length;i+=2) values.put((String)f[i], f[i+1]); } }
     public static class InvalidCallbackException extends RuntimeException { public InvalidCallbackException(String m) { super(m); } }

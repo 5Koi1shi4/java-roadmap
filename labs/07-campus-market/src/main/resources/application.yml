@@ -79,3 +79,5 @@ campus:
   market:
     mail:
       simulation-enabled: true
+    payment:
+      simulation-enabled: true

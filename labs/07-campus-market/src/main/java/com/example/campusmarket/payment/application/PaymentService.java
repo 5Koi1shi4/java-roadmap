@@ -2,8 +2,8 @@ package com.example.campusmarket.payment.application;
 
 import com.example.campusmarket.payment.infrastructure.JdbcPaymentRepository;
 import com.example.campusmarket.shared.Money;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -13,7 +13,7 @@ import java.util.UUID;
 
 /** 支付创建与验签回调编排；数据库事务不包住外部网关调用。 */
 @Service
-@ConditionalOnBean(JdbcTemplate.class)
+@Profile("!test")
 public class PaymentService {
     private final JdbcPaymentRepository repository;
     private final PaymentGateway gateway;

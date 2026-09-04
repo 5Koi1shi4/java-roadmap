@@ -18,7 +18,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** 支付成功推进订单、退款额度预占和重复回调幂等的真实 MySQL 流程测试。 */
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.NONE)
+@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("local")
 class PaymentFlowIT extends SharedContainers {
     @Autowired private JdbcTemplate jdbc;

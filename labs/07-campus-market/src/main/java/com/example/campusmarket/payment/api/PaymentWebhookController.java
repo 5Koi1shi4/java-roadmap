@@ -9,12 +9,13 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.context.annotation.Profile;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 
 @RestController
-@ConditionalOnBean({PaymentService.class, RefundService.class})
+@Profile("!test")
 @RequestMapping(produces = "application/json; charset=UTF-8")
 public class PaymentWebhookController {
     private final PaymentGateway gateway;

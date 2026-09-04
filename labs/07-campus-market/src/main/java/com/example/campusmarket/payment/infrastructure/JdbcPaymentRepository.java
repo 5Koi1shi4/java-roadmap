@@ -5,6 +5,7 @@ import com.example.campusmarket.shared.Money;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.context.annotation.Profile;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -15,6 +16,7 @@ import java.util.UUID;
 
 /** 支付数据访问；金额预占在 payment_order 聚合行上使用单条条件 UPDATE。 */
 @Repository
+@Profile("!test")
 public class JdbcPaymentRepository {
     private final JdbcTemplate jdbc;
 
