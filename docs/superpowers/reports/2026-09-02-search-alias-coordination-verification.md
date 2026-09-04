@@ -1,8 +1,8 @@
 # 搜索别名协调协议重设计验证报告
 
-日期：2026-09-04  
-分支：`learning/campus-market`  
-设计基线：`8e29c80`  
+日期：2026-09-04
+分支：`learning/campus-market`
+设计基线：`8e29c80`
 计划基线：`5b09cb1`
 
 ## 结论边界
@@ -83,3 +83,20 @@
 - Task 3 质量审查的 Minor：一个负向并发断言使用 200 ms `await`，在极端慢机器上理论上可能假通过；三次完整回归与确定性正向屏障未发现功能故障。
 - Flyway 对 MySQL 8.4 输出“高于已测试 8.1”的升级提示，但 12 个迁移均校验并成功运行；后续依赖升级时应重新验证。
 - 最终是否可关闭原 Task 7 BLOCKED 状态，以独立 Standards/Spec 审查无 Critical/Important 为准。
+
+## 独立终审修复补充
+
+首次整分支终审发现协调锁超时会消耗 cleanup 业务 attempt、可观测性不完整、别名切换前未显式校验 target、关键并发证据不足、职责交叉及英文注释等问题，因此 verdict 为 `NOT APPROVED`。随后以严格 TDD 完成三次聚焦修复提交：
+
+- `5082772`：分类协调超时、无损返还 cleanup attempt、显式校验目标索引并接入基础指标。
+- `d6bfc5f`：补齐 alias/reconciliation/cleanup 指标与真实并发证据，将 cleanup SQL 收敛到专用仓储。
+- `0c33aa0`：修复 connection-scoped cleanup 路径、共享指标注册表、异常身份与 owner/wait 日志，并显式注入 cleanup 仓储。
+
+最终修复后验证（2026-09-04 13:54–13:59，Asia/Shanghai）：
+
+- unit phase：51/51，失败 0、错误 0、跳过 0。
+- `SearchRebuildIT`：35/35，失败 0、错误 0、跳过 0。
+- 五套组合集成回归：59/59，失败 0、错误 0、跳过 0；其中 InventoryIT 6、ListingMediaIT 8、ProductSearchIT 5、SearchRebuildIT 35、SchemaIT 5。
+- Failsafe summary：completed 59、failures 0、errors 0、skipped 0。
+
+本补充仍不替代第二次独立 Standards/Spec 复审；只有复审无 Critical/Important，Task 7 才可解除 BLOCKED。
