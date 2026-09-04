@@ -13,6 +13,8 @@ import org.springframework.context.annotation.Profile;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
+import com.example.campusmarket.shared.Money;
+import org.springframework.dao.DataAccessException;
 
 @RestController
 @Profile("!test")
@@ -67,12 +69,40 @@ public class PaymentWebhookController {
     }
 
     private JdbcPaymentQuery query(java.util.UUID id) {
-        try {
-            var row = payments.queryPayment(id);
-            return row == null ? null : new JdbcPaymentQuery(row.paymentId(), row.providerReference(), row.status());
-        } catch (RuntimeException e) { return null; }
+        var row = payments.queryPayment(id);
+        return row == null ? null : new JdbcPaymentQuery(row.paymentId(), row.providerReference(), row.status());
     }
     private record JdbcPaymentQuery(java.util.UUID id, String reference, String status) {}
+
+    @PostMapping(path = {"/api/orders/{orderId}/refunds", "/api/refunds"}, consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<byte[]> requestRefund(@PathVariable(required = false) java.util.UUID orderId,
+                                                @RequestBody RefundRequest request,
+                                                @RequestHeader("Idempotency-Key") String key) {
+        java.util.UUID actualOrder = orderId == null ? request.orderId() : orderId;
+        try {
+            var result = refunds.requestRefund(actualOrder, key, Money.ofFen(request.amountFen()));
+            int status = "UNKNOWN".equals(result.status()) ? 202 : 201;
+            return json(status, "{\"refundId\":\"" + result.refundId() + "\",\"providerReference\":\""
+                + result.providerReference() + "\",\"status\":\"" + result.status() + "\"}");
+        } catch (RefundService.RefundLimitExceededException | RefundService.IdempotencyConflictException e) {
+            return json(409, "{\"error\":\"退款额度或幂等冲突\"}");
+        } catch (IllegalArgumentException e) { return json(400, "{\"error\":\"退款请求无效\"}"); }
+        catch (IllegalStateException e) { return json(409, "{\"error\":\"订单不可退款\"}"); }
+    }
+
+    @GetMapping(path = "/api/refunds/{refundId}")
+    public ResponseEntity<byte[]> queryRefund(@PathVariable java.util.UUID refundId) {
+        var result = refunds.queryRefund(refundId);
+        if (result == null) return json(404, "{\"error\":\"退款不存在\"}");
+        return json(200, "{\"refundId\":\"" + result.refundId() + "\",\"providerReference\":\""
+            + result.providerReference() + "\",\"status\":\"" + result.status() + "\"}");
+    }
+
+    @ExceptionHandler(DataAccessException.class)
+    ResponseEntity<byte[]> databaseFailure(DataAccessException ignored) {
+        return json(503, "{\"error\":\"支付依赖暂不可用\"}");
+    }
+    public record RefundRequest(java.util.UUID orderId, long amountFen) {}
 
     private static ResponseEntity<byte[]> json(int status, String body) {
         return ResponseEntity.status(status).contentType(MediaType.parseMediaType("application/json; charset=UTF-8"))

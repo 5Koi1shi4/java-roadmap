@@ -25,16 +25,20 @@ public class JdbcPaymentRepository {
     }
 
     public UUID insertPendingPayment(UUID orderId, String provider, String idempotencyKey, Money amount) {
+        return insertPendingPayment(orderId, provider, idempotencyKey, amount, null);
+    }
+
+    public UUID insertPendingPayment(UUID orderId, String provider, String idempotencyKey, Money amount, byte[] requestHash) {
         UUID id = UUID.randomUUID();
         jdbc.update("""
-            INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,status,created_at,updated_at)
-            VALUES (?,?,?,?,?,'PENDING',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
+            INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,request_hash,status,created_at,updated_at)
+            VALUES (?,?,?,?,?,?,'PENDING',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
             ON DUPLICATE KEY UPDATE id=id
-            """, id.toString(), orderId.toString(), provider, idempotencyKey, amount.fen());
-        PaymentRecord row = jdbc.query("SELECT id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status FROM payment_order WHERE provider=? AND idempotency_key=?",
+            """, id.toString(), orderId.toString(), provider, idempotencyKey, amount.fen(), requestHash);
+        PaymentRecord row = jdbc.query("SELECT id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,request_hash FROM payment_order WHERE provider=? AND idempotency_key=?",
             rs -> rs.next() ? new PaymentRecord(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),
             rs.getString("provider"), rs.getString("idempotency_key"), rs.getLong("amount_fen"), rs.getLong("paid_amount_fen"),
-                rs.getString("provider_reference"), rs.getString("status")) : null, provider, idempotencyKey);
+                rs.getString("provider_reference"), rs.getString("status"), rs.getBytes("request_hash")) : null, provider, idempotencyKey);
         if (row == null || !row.orderId().equals(orderId) || row.amountFen() != amount.fen()) {
             throw new IllegalArgumentException("支付幂等键与请求不一致");
         }
@@ -42,18 +46,18 @@ public class JdbcPaymentRepository {
     }
 
     public PaymentRecord findPayment(UUID paymentId) {
-        return jdbc.query("SELECT id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status FROM payment_order WHERE id=?",
+        return jdbc.query("SELECT id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,request_hash FROM payment_order WHERE id=?",
             rs -> rs.next() ? new PaymentRecord(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),
                 rs.getString("provider"), rs.getString("idempotency_key"), rs.getLong("amount_fen"),
-                rs.getLong("paid_amount_fen"), rs.getString("provider_reference"), rs.getString("status")) : null,
+                rs.getLong("paid_amount_fen"), rs.getString("provider_reference"), rs.getString("status"), rs.getBytes("request_hash")) : null,
             paymentId.toString());
     }
 
     public PaymentRecord findPaymentByReference(String provider, String reference) {
-        return jdbc.query("SELECT id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status FROM payment_order WHERE provider=? AND provider_reference=?",
+        return jdbc.query("SELECT id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,request_hash FROM payment_order WHERE provider=? AND provider_reference=?",
             rs -> rs.next() ? new PaymentRecord(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),
                 rs.getString("provider"), rs.getString("idempotency_key"), rs.getLong("amount_fen"),
-                rs.getLong("paid_amount_fen"), rs.getString("provider_reference"), rs.getString("status")) : null,
+                rs.getLong("paid_amount_fen"), rs.getString("provider_reference"), rs.getString("status"), rs.getBytes("request_hash")) : null,
             provider, reference);
     }
 
@@ -125,7 +129,7 @@ public class JdbcPaymentRepository {
                 INSERT INTO payment_callback_event (id,provider,provider_event_id,payload,payload_digest,signature_valid,status,received_at)
                 VALUES (?,?,?,CAST(? AS JSON),? ,TRUE,'RECEIVED',CURRENT_TIMESTAMP(6))
                 """, UUID.randomUUID().toString(), callback.provider(), callback.providerEventId(),
-                new String(rawBody, StandardCharsets.UTF_8), digest(rawBody)) == 1;
+                sanitizedPayload(callback), digest(rawBody)) == 1;
         } catch (DuplicateKeyException duplicate) {
             return false;
         }
@@ -145,12 +149,24 @@ public class JdbcPaymentRepository {
     }
 
     public record PaymentRecord(UUID id, UUID orderId, String provider, String idempotencyKey,
-                                long amountFen, long paidAmountFen, String providerReference, String status) {}
+                                long amountFen, long paidAmountFen, String providerReference, String status,
+                                byte[] requestHash) {
+        public PaymentRecord(UUID id, UUID orderId, String provider, String idempotencyKey,
+                             long amountFen, long paidAmountFen, String providerReference, String status) {
+            this(id, orderId, provider, idempotencyKey, amountFen, paidAmountFen, providerReference, status, null);
+        }
+    }
     public record RefundRecord(UUID id, UUID orderId, UUID paymentId, String provider, String idempotencyKey,
                                long amountFen, String providerReference, String status) {}
 
     private static byte[] digest(byte[] body) {
         try { return MessageDigest.getInstance("SHA-256").digest(body); }
         catch (Exception e) { throw new IllegalStateException("SHA-256不可用", e); }
+    }
+    private static String sanitizedPayload(PaymentGateway.VerifiedCallback callback) {
+        return "{\"provider\":\"" + callback.provider() + "\",\"providerEventId\":\"" + callback.providerEventId()
+            + "\",\"type\":\"" + callback.type() + "\",\"providerReference\":\"" + callback.providerReference()
+            + "\",\"amountFen\":" + callback.amountFen() + ",\"status\":\"" + callback.status()
+            + "\",\"occurredAt\":\"" + callback.occurredAt() + "\"}";
     }
 }

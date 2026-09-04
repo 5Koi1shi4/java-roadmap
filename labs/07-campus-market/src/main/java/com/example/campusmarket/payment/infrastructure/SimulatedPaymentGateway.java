@@ -34,7 +34,7 @@ public class SimulatedPaymentGateway implements PaymentGateway {
     private final URI baseUri;
     private final String provider;
     private final byte[] secret;
-    private final Set<String> usedNonces = ConcurrentHashMap.newKeySet();
+    private final ConcurrentHashMap<String, Long> usedNonces = new ConcurrentHashMap<>();
 
     @Autowired
     public SimulatedPaymentGateway(ObjectMapper mapper,
@@ -54,7 +54,7 @@ public class SimulatedPaymentGateway implements PaymentGateway {
 
     @Override
     public PaymentCreated createPayment(CreatePaymentRequest request) {
-        JsonNode body = post("/payments", object("orderId", request.orderId().toString(), "amountFen", request.amount().fen(),
+        JsonNode body = post("/payments", request.idempotencyKey(), object("orderId", request.orderId().toString(), "amountFen", request.amount().fen(),
             "idempotencyKey", request.idempotencyKey()));
         return new PaymentCreated(text(body, "providerReference"), new PaymentStatus(text(body, "providerReference"),
             paymentStatus(text(body, "status")), number(body, "amountFen")));
@@ -68,7 +68,7 @@ public class SimulatedPaymentGateway implements PaymentGateway {
 
     @Override
     public RefundCreated requestRefund(CreateRefundRequest request) {
-        JsonNode body = post("/refunds", object("orderId", request.orderId().toString(), "paymentProviderReference",
+        JsonNode body = post("/refunds", request.idempotencyKey(), object("orderId", request.orderId().toString(), "paymentProviderReference",
             request.paymentProviderReference(), "amountFen", request.amount().fen(), "idempotencyKey", request.idempotencyKey()));
         return new RefundCreated(text(body, "providerReference"), RefundStatus.Status.valueOf(text(body, "status")));
     }
@@ -92,24 +92,31 @@ public class SimulatedPaymentGateway implements PaymentGateway {
         if (Math.abs(now - seconds) > 300) throw new InvalidCallbackException("回调已过期");
         String expected = hmac(timestamp + "\n" + nonce + "\n" + new String(rawBody, StandardCharsets.UTF_8));
         if (!constantTimeSignatureEquals(signature, expected)) throw new InvalidCallbackException("回调签名无效");
-        if (!usedNonces.add(nonce)) throw new InvalidCallbackException("回调 nonce 已重放");
+        usedNonces.entrySet().removeIf(entry -> entry.getValue() <= now);
+        if (usedNonces.size() >= 10_000 || usedNonces.putIfAbsent(provider + ":" + nonce, now + 300) != null) throw new InvalidCallbackException("回调 nonce 已重放");
         try {
             JsonNode json = mapper.readTree(rawBody);
+            java.util.Set<String> allowed = java.util.Set.of("providerEventId", "type", "providerReference", "amountFen", "status", "occurredAt");
+            java.util.Iterator<String> names = json.fieldNames();
+            while (names.hasNext()) if (!allowed.contains(names.next())) throw new InvalidCallbackException("回调包含未知字段");
             requireFields(json, "providerEventId", "type", "providerReference", "amountFen", "status", "occurredAt");
             String type = text(json, "type");
             PaymentGateway.VerifiedCallback.CallbackType callbackType = PaymentGateway.VerifiedCallback.CallbackType.valueOf(type);
+            String status = text(json, "status");
+            if (!("SUCCEEDED".equals(status) || "FAILED".equals(status) || "PENDING".equals(status) || "UNKNOWN".equals(status))) throw new InvalidCallbackException("回调状态无效");
             Instant occurred = json.get("occurredAt").isNumber() ? Instant.ofEpochSecond(json.get("occurredAt").longValue()) : Instant.parse(text(json, "occurredAt"));
             return new VerifiedCallback(provider, text(json, "providerEventId"), callbackType,
-                text(json, "providerReference"), number(json, "amountFen"), text(json, "status"), occurred, nonce);
+                text(json, "providerReference"), number(json, "amountFen"), status, occurred, nonce);
         } catch (InvalidCallbackException e) { throw e; }
         catch (Exception e) { throw new InvalidCallbackException("回调 JSON 无效"); }
     }
 
-    private JsonNode post(String path, ObjectNodeBuilder fields) {
+    private JsonNode post(String path, String idempotencyKey, ObjectNodeBuilder fields) {
         try {
             byte[] data = mapper.writeValueAsBytes(fields.values);
             HttpResponse<byte[]> response = http.send(HttpRequest.newBuilder(endpoint(path))
                 .timeout(Duration.ofSeconds(10)).header("Content-Type", "application/json; charset=UTF-8")
+                .header("Idempotency-Key", idempotencyKey)
                 .POST(HttpRequest.BodyPublishers.ofByteArray(data)).build(), HttpResponse.BodyHandlers.ofByteArray());
             return decode(response);
         } catch (Exception e) { throw new PaymentGatewayUnavailableException(e); }
@@ -143,7 +150,10 @@ public class SimulatedPaymentGateway implements PaymentGateway {
     private static String text(JsonNode node, String name) { if (!node.hasNonNull(name)) throw new InvalidCallbackException("字段缺失: " + name); return node.get(name).asText(); }
     private static long number(JsonNode node, String name) { if (!node.has(name) || !node.get(name).canConvertToLong()) throw new InvalidCallbackException("金额字段无效"); return node.get(name).longValue(); }
     private static void requireFields(JsonNode node, String... fields) { for (String field : fields) text(node, field); }
-    private static PaymentStatus.Status paymentStatus(String status) { try { return PaymentStatus.Status.valueOf(status); } catch (Exception e) { return PaymentStatus.Status.UNKNOWN; } }
+    private static PaymentStatus.Status paymentStatus(String status) {
+        try { return PaymentStatus.Status.valueOf(status); }
+        catch (Exception e) { throw new PaymentGatewayUnavailableException("提供方状态无效"); }
+    }
     private static String require(String value, String name) { if (value == null || value.isBlank()) throw new IllegalArgumentException(name + "不能为空"); return value; }
     private static String encode(String value) { return value.replace("/", "%2F"); }
     private URI endpoint(String path) { return baseUri.resolve(path.startsWith("/") ? path.substring(1) : path); }
