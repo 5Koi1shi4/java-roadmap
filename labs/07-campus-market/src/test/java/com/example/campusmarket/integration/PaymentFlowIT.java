@@ -230,11 +230,16 @@ class PaymentFlowIT extends SharedContainers {
     void immediateProviderSuccessAndFailureSettlePaymentAndOrderAtomically() {
         provider.setNextPaymentStatusForTest("SUCCEEDED");
         UUID successOrder = pendingOrder();
-        PaymentService.PaymentResult success = payments.createPayment(successOrder, "immediate-success-" + successOrder, "{}".getBytes(StandardCharsets.UTF_8));
+        String successKey = "immediate-success-" + successOrder;
+        byte[] requestBody = "{}".getBytes(StandardCharsets.UTF_8);
+        PaymentService.PaymentResult success = payments.createPayment(successOrder, successKey, requestBody);
         assertThat(success.status()).isEqualTo("SUCCEEDED");
         assertThat(jdbc.queryForObject("SELECT paid_amount_fen FROM payment_order WHERE id=?", Long.class, success.paymentId().toString())).isEqualTo(100L);
         assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, successOrder.toString())).isEqualTo("AWAITING_HANDOFF");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='PAYMENT_SUCCEEDED' AND aggregate_id=?", Integer.class, success.paymentId().toString())).isEqualTo(1);
+        PaymentService.PaymentResult replay = payments.createPayment(successOrder, successKey, requestBody);
+        assertThat(replay.status()).isEqualTo("SUCCEEDED");
+        assertThat(replay.responseUtf8()).containsExactly(success.responseUtf8());
 
         provider.setNextPaymentStatusForTest("FAILED");
         UUID failedOrder = pendingOrder();
@@ -243,6 +248,61 @@ class PaymentFlowIT extends SharedContainers {
         assertThat(jdbc.queryForObject("SELECT paid_amount_fen FROM payment_order WHERE id=?", Long.class, failed.paymentId().toString())).isEqualTo(0L);
         assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, failedOrder.toString())).isEqualTo("PENDING_PAYMENT");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='PAYMENT_FAILED' AND aggregate_id=?", Integer.class, failed.paymentId().toString())).isEqualTo(1);
+    }
+
+    @Test
+    void unknownPaymentRetryNeverCreatesAgain() throws Exception {
+        provider.resetRequestCountersForTest();
+        UUID order = pendingOrder();
+        String key = "unknown-retry-" + order;
+        provider.blockNextPaymentCreateForTest();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        var first = executor.submit(() -> payments.createPayment(order, key, "{}".getBytes(StandardCharsets.UTF_8)));
+        try {
+            assertThat(provider.awaitPaymentCreateEnteredForTest(10, TimeUnit.SECONDS)).isTrue();
+            PaymentService.PaymentResult unknown = first.get(20, TimeUnit.SECONDS);
+            assertThat(unknown.status()).isEqualTo("UNKNOWN");
+            assertThat(provider.paymentCreateRequestCountForTest()).isEqualTo(1);
+
+            String paymentId = unknown.paymentId().toString();
+            String reference = "sim-pay-" + UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8));
+            client().send(HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + port + "/simulated-provider/payments/" + reference + "/SUCCEEDED"))
+                .POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofByteArray());
+            jdbc.update("UPDATE payment_order SET next_reconcile_at=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),reconcile_lease_until=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE id=?", paymentId);
+
+            PaymentService.PaymentResult retry = payments.createPayment(order, key, "{}".getBytes(StandardCharsets.UTF_8));
+            assertThat(retry.status()).isEqualTo("UNKNOWN");
+            reconciliation.runOnce(20);
+            assertThat(provider.paymentCreateRequestCountForTest()).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, paymentId)).isEqualTo("SUCCEEDED");
+        } finally {
+            provider.releaseBlockedPaymentCreateForTest();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void immediatePaymentSuccessRollsBackWhenOrderCasFails() throws Exception {
+        provider.resetRequestCountersForTest();
+        provider.setNextPaymentStatusForTest("SUCCEEDED");
+        UUID order = pendingOrder();
+        String key = "payment-order-cas-" + order;
+        provider.blockNextPaymentCreateForTest();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        var request = executor.submit(() -> payments.createPayment(order, key, "{}".getBytes(StandardCharsets.UTF_8)));
+        try {
+            assertThat(provider.awaitPaymentCreateEnteredForTest(10, TimeUnit.SECONDS)).isTrue();
+            String paymentId = jdbc.queryForObject("SELECT id FROM payment_order WHERE order_id=?", String.class, order.toString());
+            jdbc.update("UPDATE trade_order SET status='CANCELLED' WHERE id=?", order.toString());
+            provider.releaseBlockedPaymentCreateForTest();
+            assertThat(request.get(15, TimeUnit.SECONDS).status()).isNotEqualTo("SUCCEEDED");
+            assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, paymentId)).isNotEqualTo("SUCCEEDED");
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='PAYMENT_SUCCEEDED' AND aggregate_id=?", Integer.class, paymentId)).isZero();
+            assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isNotEqualTo("AWAITING_HANDOFF");
+        } finally {
+            provider.releaseBlockedPaymentCreateForTest();
+            executor.shutdownNow();
+        }
     }
 
     @Test

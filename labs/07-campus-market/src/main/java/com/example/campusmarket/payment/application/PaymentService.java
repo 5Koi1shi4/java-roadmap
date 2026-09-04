@@ -43,11 +43,20 @@ public class PaymentService {
     }
 
     public PaymentResult createPayment(UUID orderId, String idempotencyKey, byte[] rawRequest) {
-        OrderAmount order = jdbc.query("SELECT total_amount_fen FROM trade_order WHERE id=? AND status='PENDING_PAYMENT'",
-            rs -> rs.next() ? new OrderAmount(rs.getLong(1)) : null, orderId.toString());
+        OrderAmount order = jdbc.query("SELECT total_amount_fen,status FROM trade_order WHERE id=?",
+            rs -> rs.next() ? new OrderAmount(rs.getLong(1), rs.getString(2)) : null, orderId.toString());
         if (order == null) throw new IllegalStateException("订单不存在或不可支付");
         byte[] requestHash = digest(orderId + ":" + order.amountFen() + ":" + provider + ":CNY:" + idempotencyKey + ":" +
             java.util.Base64.getEncoder().encodeToString(rawRequest == null ? new byte[0] : rawRequest));
+        JdbcPaymentRepository.PaymentRecord existingForOrder = repository.findPaymentByOrderAndKey(orderId, provider, idempotencyKey);
+        if (existingForOrder != null && existingForOrder.requestHash() != null
+            && !MessageDigest.isEqual(existingForOrder.requestHash(), requestHash)) {
+            throw new IdempotencyConflictException();
+        }
+        if (!"PENDING_PAYMENT".equals(order.status())) {
+            if (existingForOrder == null) throw new IllegalStateException("订单不存在或不可支付");
+            return toPaymentResult(existingForOrder);
+        }
         UUID paymentId = repository.insertPendingPayment(orderId, provider, idempotencyKey, Money.ofFen(order.amountFen()), requestHash);
         JdbcPaymentRepository.PaymentRecord existing = repository.findPayment(paymentId);
         if (existing.requestHash() != null && !MessageDigest.isEqual(existing.requestHash(), requestHash)) {
@@ -58,7 +67,7 @@ public class PaymentService {
         if (existing.providerReference() != null) return new PaymentResult(paymentId, existing.providerReference(), existing.status(), existing.responseUtf8());
         String owner = "payment-request-" + UUID.randomUUID();
         String token = UUID.randomUUID().toString();
-        if (!repository.claimPaymentRequest(paymentId, owner, token)) {
+        if (!repository.claimInitialPaymentAttempt(paymentId, owner, token)) {
             JdbcPaymentRepository.PaymentRecord claimed = repository.findPayment(paymentId);
             return new PaymentResult(paymentId, claimed.providerReference(), claimed.status(), claimed.responseUtf8());
         }
@@ -70,7 +79,8 @@ public class PaymentService {
             boolean committed = transactions.execute(ignored -> {
                 if (!repository.bindProviderPayment(paymentId, created.providerReference(), created.status().status(), owner, token)) return false;
                 if (created.status().status() == PaymentGateway.PaymentStatus.Status.SUCCEEDED) {
-                    advanceOrderAfterSuccess(paymentId, orderId);
+                    if (!advanceOrderAfterSuccess(paymentId, orderId))
+                        throw new IllegalStateException("订单支付结转 CAS 失败，等待对账");
                     repository.insertPaymentEvent("PAYMENT_SUCCEEDED", paymentId,
                         json(java.util.Map.of("paymentId", paymentId, "orderId", orderId, "amountFen", created.status().amountFen())));
                 } else if (created.status().status() == PaymentGateway.PaymentStatus.Status.FAILED) {
@@ -92,6 +102,10 @@ public class PaymentService {
 
     public PaymentResult queryPayment(UUID paymentId) {
         JdbcPaymentRepository.PaymentRecord row = repository.findPayment(paymentId);
+        return toPaymentResult(row);
+    }
+
+    private PaymentResult toPaymentResult(JdbcPaymentRepository.PaymentRecord row) {
         return row == null ? null : new PaymentResult(row.id(), row.providerReference(), row.status(), row.responseUtf8());
     }
 
@@ -112,13 +126,17 @@ public class PaymentService {
             || (row.providerReference() != null && !row.providerReference().equals(status.providerReference()))) return queryPayment(paymentId);
         if (status.status() == PaymentGateway.PaymentStatus.Status.SUCCEEDED)
             transactions().execute(ignored -> { if (repository.markPaymentSucceeded(paymentId, row.providerReference(), status.providerReference(), status.amountFen(), owner, token)) {
-                repository.savePaymentResponse(paymentId, response(paymentId, status.providerReference(), "SUCCEEDED"));
-                advanceOrderAfterSuccess(paymentId, row.orderId());
+                if (!advanceOrderAfterSuccess(paymentId, row.orderId())) throw new IllegalStateException("订单支付结转 CAS 失败，等待对账");
+                byte[] response = response(paymentId, status.providerReference(), "SUCCEEDED");
+                if (!repository.savePaymentResponseAndRelease(paymentId, response, owner, token))
+                    throw new IllegalStateException("支付响应落库 CAS 失败，等待对账");
                 repository.insertPaymentEvent("PAYMENT_SUCCEEDED", row.id(), json(java.util.Map.of("paymentId", row.id(), "orderId", row.orderId(), "amountFen", status.amountFen()))); }
                 return null; });
         else if (status.status() == PaymentGateway.PaymentStatus.Status.FAILED)
             transactions().execute(ignored -> { if (repository.markPaymentFailed(paymentId, row.providerReference(), status.providerReference(), status.amountFen(), owner, token)) {
-                repository.savePaymentResponse(paymentId, response(paymentId, status.providerReference(), "FAILED"));
+                byte[] response = response(paymentId, status.providerReference(), "FAILED");
+                if (!repository.savePaymentResponseAndRelease(paymentId, response, owner, token))
+                    throw new IllegalStateException("支付响应落库 CAS 失败，等待对账");
                 repository.insertPaymentEvent("PAYMENT_FAILED", row.id(), json(java.util.Map.of("paymentId", row.id()))); }
                 return null; });
         return queryPayment(paymentId);
@@ -129,9 +147,8 @@ public class PaymentService {
         return transactions;
     }
 
-    private void advanceOrderAfterSuccess(UUID paymentId, UUID orderId) {
-        jdbc.update("UPDATE trade_order o JOIN payment_order p ON p.order_id=o.id SET o.paid_amount_fen=p.paid_amount_fen,o.status='AWAITING_HANDOFF',o.updated_at=CURRENT_TIMESTAMP(6) WHERE p.id=? AND o.id=? AND o.status='PENDING_PAYMENT'",
-            paymentId.toString(), orderId.toString());
+    private boolean advanceOrderAfterSuccess(UUID paymentId, UUID orderId) {
+        return repository.advanceOrderAfterPayment(paymentId, orderId) == 1;
     }
 
     @Transactional
@@ -143,8 +160,8 @@ public class PaymentService {
             if (changed) {
                 JdbcPaymentRepository.PaymentRecord payment = repository.findPaymentByReference(callback.provider(), callback.providerReference());
                 if (payment != null) repository.savePaymentResponse(payment.id(), response(payment.id(), callback.providerReference(), "SUCCEEDED"));
-                jdbc.update("UPDATE trade_order o JOIN payment_order p ON p.order_id=o.id SET o.paid_amount_fen=p.paid_amount_fen,o.status='AWAITING_HANDOFF',o.updated_at=CURRENT_TIMESTAMP(6) WHERE p.provider=? AND p.provider_reference=? AND o.status='PENDING_PAYMENT'",
-                    callback.provider(), callback.providerReference());
+                if (repository.advanceOrderAfterPayment(payment.id(), payment.orderId()) != 1)
+                    throw new IllegalStateException("订单支付结转 CAS 失败，等待对账");
                 if (payment != null) {
                     repository.insertPaymentEvent("PAYMENT_SUCCEEDED", payment.id(),
                         json(java.util.Map.of("paymentId", payment.id(), "orderId", payment.orderId(), "amountFen", callback.amountFen())));
@@ -159,7 +176,7 @@ public class PaymentService {
         public PaymentResult(UUID paymentId, String providerReference, String status) { this(paymentId, providerReference, status, null); }
     }
     public record CallbackResult(boolean idempotentSuccess, boolean firstSeen) {}
-    private record OrderAmount(long amountFen) {}
+    private record OrderAmount(long amountFen, String status) {}
     private static byte[] digest(String value) {
         try { return MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)); }
         catch (Exception e) { throw new IllegalStateException("SHA-256不可用", e); }

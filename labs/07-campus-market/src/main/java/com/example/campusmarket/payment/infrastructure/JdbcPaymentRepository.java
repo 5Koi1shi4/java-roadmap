@@ -56,6 +56,14 @@ public class JdbcPaymentRepository {
             paymentId.toString());
     }
 
+    public PaymentRecord findPaymentByOrderAndKey(UUID orderId, String provider, String idempotencyKey) {
+        return jdbc.query("SELECT id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,request_hash,response_utf8 FROM payment_order WHERE order_id=? AND provider=? AND idempotency_key=?",
+            rs -> rs.next() ? new PaymentRecord(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),
+                rs.getString("provider"), rs.getString("idempotency_key"), rs.getLong("amount_fen"), rs.getLong("paid_amount_fen"),
+                rs.getString("provider_reference"), rs.getString("status"), rs.getBytes("request_hash"), rs.getBytes("response_utf8")) : null,
+            orderId.toString(), provider, idempotencyKey);
+    }
+
     public PaymentRecord findPaymentByReference(String provider, String reference) {
         return jdbc.query("SELECT id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,request_hash,response_utf8 FROM payment_order WHERE provider=? AND provider_reference=?",
             rs -> rs.next() ? new PaymentRecord(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),
@@ -97,6 +105,12 @@ public class JdbcPaymentRepository {
                 "next_reconcile_at=CASE WHEN status='UNKNOWN' THEN DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 30 SECOND) ELSE NULL END," +
                 "updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND reconcile_owner=? AND reconcile_token=? AND reconcile_lease_until>CURRENT_TIMESTAMP(6)",
             responseUtf8, paymentId.toString(), owner, token) == 1;
+    }
+
+    /** 支付成功时将订单从待支付 CAS 推进为待交付；调用方事务负责回滚终态。 */
+    public int advanceOrderAfterPayment(UUID paymentId, UUID orderId) {
+        return jdbc.update("UPDATE trade_order o JOIN payment_order p ON p.order_id=o.id SET o.paid_amount_fen=p.paid_amount_fen,o.status='AWAITING_HANDOFF',o.updated_at=CURRENT_TIMESTAMP(6) WHERE p.id=? AND o.id=? AND o.status='PENDING_PAYMENT'",
+            paymentId.toString(), orderId.toString());
     }
 
     /** 为首次 provider IO 建立短时租约，应用并发请求只有一个 owner。 */
@@ -188,7 +202,7 @@ public class JdbcPaymentRepository {
         Object[] args = expectedReference == null
             ? new Object[]{reference, paymentId.toString(), amountFen, owner, token}
             : new Object[]{reference, paymentId.toString(), expectedReference, amountFen, owner, token};
-        return jdbc.update("UPDATE payment_order SET provider_reference=?,paid_amount_fen=amount_fen,status='SUCCEEDED',reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND " + predicate + " AND amount_fen=? AND status IN ('PENDING','UNKNOWN') AND reconcile_owner=? AND reconcile_token=?", args) == 1;
+        return jdbc.update("UPDATE payment_order SET provider_reference=?,paid_amount_fen=amount_fen,status='SUCCEEDED',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND " + predicate + " AND amount_fen=? AND status IN ('PENDING','UNKNOWN') AND reconcile_owner=? AND reconcile_token=? AND reconcile_lease_until>CURRENT_TIMESTAMP(6)", args) == 1;
     }
 
     public boolean markPaymentFailed(UUID paymentId, String expectedReference, String owner, String token) {
@@ -207,7 +221,7 @@ public class JdbcPaymentRepository {
             args = amountFen < 0 ? new Object[]{reference, paymentId.toString(), expectedReference, owner, token}
                 : new Object[]{reference, paymentId.toString(), expectedReference, amountFen, owner, token};
         }
-        return jdbc.update("UPDATE payment_order SET provider_reference=COALESCE(?,provider_reference),status='FAILED',reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND " + predicate + amountPredicate + " AND status IN ('PENDING','UNKNOWN') AND reconcile_owner=? AND reconcile_token=?", args) == 1;
+        return jdbc.update("UPDATE payment_order SET provider_reference=COALESCE(?,provider_reference),status='FAILED',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND " + predicate + amountPredicate + " AND status IN ('PENDING','UNKNOWN') AND reconcile_owner=? AND reconcile_token=? AND reconcile_lease_until>CURRENT_TIMESTAMP(6)", args) == 1;
     }
 
     /** 在同一支付聚合行上串行化并校验 successful + reserved + requested <= paid。 */

@@ -221,6 +221,7 @@ public class SimulatedPaymentProviderController {
     }
 
     public int paymentCreateRequestCountForTest() { return paymentCreateRequests.get(); }
+    public int paymentCreateRequestCount() { return paymentCreateRequests.get(); }
     public int refundCreateRequestCountForTest() { return refundCreateRequests.get(); }
 
     public void blockNextPaymentCreateForTest() {
