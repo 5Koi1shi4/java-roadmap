@@ -36,7 +36,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** 支付成功推进订单、退款额度预占和重复回调幂等的真实 MySQL 流程测试。 */
 @SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
 @ActiveProfiles("local")
-@TestPropertySource(properties = {"server.port=18081", "campus.market.payment.provider-url=http://localhost:18081/simulated-provider", "campus.market.payment.reconciliation.enabled=true"})
+@TestPropertySource(properties = {"server.port=18081", "campus.market.payment.provider-url=http://localhost:18081/simulated-provider",
+    "campus.market.payment.reconciliation.enabled=true", "campus.market.payment.reconciliation.initial-delay-ms=86400000",
+    "campus.market.payment.reconciliation.fixed-delay-ms=86400000"})
 class PaymentFlowIT extends SharedContainers {
     @LocalServerPort private int port;
     @Autowired private JdbcTemplate jdbc;
@@ -403,7 +405,7 @@ class PaymentFlowIT extends SharedContainers {
 
             PaymentService.PaymentResult retry = payments.createPayment(order, key, "{}".getBytes(StandardCharsets.UTF_8));
             assertThat(retry.status()).isEqualTo("UNKNOWN");
-            reconciliation.runOne(UUID.fromString(paymentId));
+            assertThat(reconciliation.runOne(UUID.fromString(paymentId))).isEqualTo(1);
             assertThat(provider.paymentCreateRequestCountForTest()).isEqualTo(1);
             assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, paymentId)).isEqualTo("SUCCEEDED");
         } finally {
@@ -471,39 +473,108 @@ class PaymentFlowIT extends SharedContainers {
     }
 
     @Test
-    void lateProviderCallbackWithoutLocalReferenceUsesOrderAndCompensatesExactlyOnce() {
+    void lateProviderCallbackWithoutLocalReferenceUsesSignedHttpOrderAndCompensatesExactlyOnce() throws Exception {
         UUID order = pendingOrder();
         UUID payment = UUID.randomUUID();
         String reference = "late-callback-" + payment;
         jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,status,created_at,updated_at) VALUES (?,?,?,?,100,'UNKNOWN',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
             payment.toString(), order.toString(), "simulated", "late-callback-key-" + payment);
         jdbc.update("UPDATE trade_order SET status='CANCELLED',version=version+1 WHERE id=?", order.toString());
-        PaymentGateway.VerifiedCallback callback = new PaymentGateway.VerifiedCallback("simulated", "late-callback-event-" + payment,
-            PaymentGateway.VerifiedCallback.CallbackType.PAYMENT, reference, 100, "SUCCEEDED", Instant.now(), UUID.randomUUID().toString(), order);
-
-        assertThat(payments.handleCallback(callback, "{}".getBytes(StandardCharsets.UTF_8)).firstSeen()).isTrue();
+        String body = paymentCallbackBody("late-callback-event-" + payment, reference, 100, order);
+        HttpResponse<byte[]> response = postSignedWebhook(body);
+        assertThat(response.statusCode()).isEqualTo(200);
         assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, payment.toString())).isEqualTo("SUCCEEDED");
         assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("CANCELLED");
         String refund = jdbc.queryForObject("SELECT id FROM refund_order WHERE order_id=?", String.class, order.toString());
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='REFUND_REQUESTED' AND aggregate_id=?", Integer.class, refund)).isEqualTo(1);
-        assertThat(payments.handleCallback(callback, "{}".getBytes(StandardCharsets.UTF_8)).firstSeen()).isFalse();
+        assertThat(jdbc.queryForObject("SELECT status FROM payment_callback_event WHERE provider_event_id=?", String.class,
+            "late-callback-event-" + payment)).isEqualTo("COMPLETED");
+        HttpResponse<byte[]> replay = postSignedWebhook(body);
+        assertThat(replay.statusCode()).isEqualTo(200);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, order.toString())).isEqualTo(1);
     }
 
     @Test
-    void providerCallbackWithoutLocalReferenceAdvancesAnActiveOrder() {
+    void providerCallbackWithoutLocalReferenceAdvancesAnActiveOrderThroughSignedHttp() throws Exception {
         UUID order = pendingOrder();
         UUID payment = UUID.randomUUID();
         String reference = "active-callback-" + payment;
         jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,status,created_at,updated_at) VALUES (?,?,?,?,100,'UNKNOWN',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
             payment.toString(), order.toString(), "simulated", "active-callback-key-" + payment);
-        PaymentGateway.VerifiedCallback callback = new PaymentGateway.VerifiedCallback("simulated", "active-callback-event-" + payment,
-            PaymentGateway.VerifiedCallback.CallbackType.PAYMENT, reference, 100, "SUCCEEDED", Instant.now(), UUID.randomUUID().toString(), order);
-
-        assertThat(payments.handleCallback(callback, "{}".getBytes(StandardCharsets.UTF_8)).firstSeen()).isTrue();
+        String body = paymentCallbackBody("active-callback-event-" + payment, reference, 100, order);
+        HttpResponse<byte[]> response = postSignedWebhook(body);
+        assertThat(response.statusCode()).isEqualTo(200);
         assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, payment.toString())).isEqualTo("SUCCEEDED");
         assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("AWAITING_HANDOFF");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, order.toString())).isZero();
+        assertThat(jdbc.queryForObject("SELECT status FROM payment_callback_event WHERE provider_event_id=?", String.class,
+            "active-callback-event-" + payment)).isEqualTo("COMPLETED");
+    }
+
+    @Test
+    void signedCallbackRejectsCrossOrderReferenceAndAmountWithoutMutatingUnknownPayment() throws Exception {
+        UUID firstOrder = pendingOrder();
+        UUID secondOrder = pendingOrder();
+        UUID firstPayment = UUID.randomUUID();
+        UUID secondPayment = UUID.randomUUID();
+        String sharedReference = "cross-order-reference-" + firstPayment;
+        jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,status,provider_reference,created_at,updated_at) VALUES (?,?,?,?,100,'UNKNOWN',?,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            firstPayment.toString(), firstOrder.toString(), "simulated", "cross-first-" + firstPayment, sharedReference);
+        jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,status,created_at,updated_at) VALUES (?,?,?,?,100,'UNKNOWN',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            secondPayment.toString(), secondOrder.toString(), "simulated", "cross-second-" + secondPayment);
+
+        String conflict = paymentCallbackBody("cross-order-event-" + secondPayment, sharedReference, 100, secondOrder);
+        HttpResponse<byte[]> conflictResponse = postSignedWebhook(conflict);
+        assertThat(conflictResponse.statusCode()).isEqualTo(200);
+        assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, secondPayment.toString())).isEqualTo("UNKNOWN");
+        assertThat(jdbc.queryForObject("SELECT provider_reference FROM payment_order WHERE id=?", String.class, secondPayment.toString())).isNull();
+
+        UUID wrongOrder = UUID.randomUUID();
+        String wrongOrderBody = paymentCallbackBody("wrong-order-event-" + secondPayment,
+            "unused-order-reference-" + secondPayment, 100, wrongOrder);
+        HttpResponse<byte[]> wrongOrderResponse = postSignedWebhook(wrongOrderBody);
+        assertThat(wrongOrderResponse.statusCode()).isEqualTo(200);
+        assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, secondPayment.toString())).isEqualTo("UNKNOWN");
+        assertThat(jdbc.queryForObject("SELECT status FROM payment_callback_event WHERE provider_event_id=?", String.class,
+            "wrong-order-event-" + secondPayment)).isEqualTo("COMPLETED");
+
+        String wrongAmount = paymentCallbackBody("wrong-amount-event-" + secondPayment, "unused-reference-" + secondPayment, 101, secondOrder);
+        HttpResponse<byte[]> wrongAmountResponse = postSignedWebhook(wrongAmount);
+        assertThat(wrongAmountResponse.statusCode()).isEqualTo(200);
+        assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, secondPayment.toString())).isEqualTo("UNKNOWN");
+        assertThat(jdbc.queryForObject("SELECT provider_reference FROM payment_order WHERE id=?", String.class, secondPayment.toString())).isNull();
+    }
+
+    @Test
+    void signedCallbackAndReconciliationConcurrentlySettleOneUnknownPayment() throws Exception {
+        UUID order = pendingOrder();
+        UUID payment = UUID.randomUUID();
+        String key = "callback-reconcile-race-" + payment;
+        String reference = "sim-pay-" + UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,status,next_reconcile_at,created_at,updated_at) VALUES (?,?,?,?,100,'UNKNOWN',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            payment.toString(), order.toString(), "simulated", key);
+        client().send(HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + port + "/simulated-provider/payments"))
+            .header("Content-Type", "application/json; charset=UTF-8")
+            .POST(HttpRequest.BodyPublishers.ofString("{\"orderId\":\"" + order + "\",\"amountFen\":100,\"idempotencyKey\":\"" + key + "\"}", StandardCharsets.UTF_8))
+            .build(), HttpResponse.BodyHandlers.ofByteArray());
+        client().send(HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + port + "/simulated-provider/payments/" + reference + "/SUCCEEDED"))
+            .POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofByteArray());
+        String body = paymentCallbackBody("callback-reconcile-race-event-" + payment, reference, 100, order);
+        var gate = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            var callback = pool.submit(() -> { gate.await(); return postSignedWebhook(body).statusCode(); });
+            var reconcile = pool.submit(() -> { gate.await(); return reconciliation.runOne(payment); });
+            gate.countDown();
+            assertThat(callback.get(20, TimeUnit.SECONDS)).isEqualTo(200);
+            assertThat(reconcile.get(20, TimeUnit.SECONDS)).isIn(0, 1);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, payment.toString())).isEqualTo("SUCCEEDED");
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("AWAITING_HANDOFF");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='PAYMENT_SUCCEEDED' AND aggregate_id=?", Integer.class, payment.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT status FROM payment_callback_event WHERE provider_event_id=?", String.class, "callback-reconcile-race-event-" + payment)).isEqualTo("COMPLETED");
     }
 
     @Test
@@ -840,6 +911,26 @@ class PaymentFlowIT extends SharedContainers {
 
     private HttpClient client() {
         return HttpClient.newHttpClient();
+    }
+
+    private HttpResponse<byte[]> postSignedWebhook(String body) throws Exception {
+        long timestamp = Instant.now().getEpochSecond();
+        String nonce = UUID.randomUUID().toString();
+        javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+        mac.init(new javax.crypto.spec.SecretKeySpec("local-only-payment-secret-change-me".getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+        String signature = java.util.HexFormat.of().formatHex(mac.doFinal((timestamp + "\n" + nonce + "\n" + body).getBytes(StandardCharsets.UTF_8)));
+        return client().send(HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + port + "/api/payment-webhooks/simulated"))
+            .header("Content-Type", "application/json; charset=UTF-8")
+            .header("X-Payment-Timestamp", Long.toString(timestamp))
+            .header("X-Payment-Nonce", nonce)
+            .header("X-Payment-Signature", signature)
+            .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8)).build(), HttpResponse.BodyHandlers.ofByteArray());
+    }
+
+    private String paymentCallbackBody(String eventId, String reference, long amountFen, UUID orderId) {
+        return "{\"providerEventId\":\"" + eventId + "\",\"type\":\"PAYMENT\",\"providerReference\":\""
+            + reference + "\",\"amountFen\":" + amountFen + ",\"status\":\"SUCCEEDED\",\"occurredAt\":\""
+            + Instant.now() + "\",\"orderId\":\"" + orderId + "\"}";
     }
 
     private UUID user() {

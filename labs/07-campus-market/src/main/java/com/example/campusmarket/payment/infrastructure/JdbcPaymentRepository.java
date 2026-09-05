@@ -392,6 +392,13 @@ public class JdbcPaymentRepository {
 
     /** 回调未携带本地 reference 时，使用 provider、订单和金额唯一锁定 UNKNOWN 支付。 */
     public UUID recordPaymentSuccessByOrder(UUID orderId, String provider, String providerReference, long amountFen) {
+        PaymentRecord referenceOwner = jdbc.query("SELECT id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,request_hash,response_utf8 "
+                + "FROM payment_order WHERE provider=? AND provider_reference=? FOR UPDATE",
+            rs -> rs.next() ? new PaymentRecord(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),
+                rs.getString("provider"), rs.getString("idempotency_key"), rs.getLong("amount_fen"), rs.getLong("paid_amount_fen"),
+                rs.getString("provider_reference"), rs.getString("status"), rs.getBytes("request_hash"), rs.getBytes("response_utf8")) : null,
+            provider, providerReference);
+        if (referenceOwner != null) return null;
         List<PaymentRecord> payments = jdbc.query("SELECT id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,request_hash,response_utf8 "
                 + "FROM payment_order WHERE order_id=? AND provider=? AND amount_fen=? AND provider_reference IS NULL "
                 + "AND status='UNKNOWN' ORDER BY created_at,id FOR UPDATE",

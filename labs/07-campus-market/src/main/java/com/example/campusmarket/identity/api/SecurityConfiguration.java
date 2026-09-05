@@ -33,7 +33,7 @@ public class SecurityConfiguration {
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
                 .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
-                .requestMatchers("/api/auth/**", "/actuator/health", "/simulated-provider/**", "/api/simulated-provider/**").permitAll()
+                .requestMatchers("/api/auth/**", "/api/payment-webhooks/**", "/actuator/health", "/simulated-provider/**", "/api/simulated-provider/**").permitAll()
                 .requestMatchers("/api/admin/**").hasRole("ADMIN")
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                 .anyRequest().authenticated())

@@ -27,7 +27,8 @@ public final class PaymentReconciliationScheduler {
         this.refunds = refunds;
     }
 
-    @Scheduled(fixedDelayString = "${campus.market.payment.reconciliation.fixed-delay-ms:1000}")
+    @Scheduled(initialDelayString = "${campus.market.payment.reconciliation.initial-delay-ms:0}",
+        fixedDelayString = "${campus.market.payment.reconciliation.fixed-delay-ms:1000}")
     public void dispatch() {
         runOnce(50);
     }
