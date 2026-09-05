@@ -153,7 +153,7 @@ public class JdbcOrderLifecycleRepository {
         if (owner == null || owner.isBlank() || limit <= 0 || limit > 1000 || lease == null || lease.isNegative() || lease.isZero())
             throw new IllegalArgumentException("截止任务领取参数无效");
         Instant now = databaseNow();
-        List<DeadlineClaim> candidates = jdbc.query("SELECT id,order_id,deadline_type,due_at FROM order_deadline_claim "
+        List<DeadlineClaim> candidates = jdbc.query("SELECT id,order_id,deadline_type,due_at,attempt_count FROM order_deadline_claim "
                 + "WHERE (status='NEW' AND due_at <= ?) OR (status='PROCESSING' AND lease_until <= ?) "
                 + "ORDER BY due_at,id LIMIT ? FOR UPDATE SKIP LOCKED",
             (rs, row) -> new DeadlineClaim(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),

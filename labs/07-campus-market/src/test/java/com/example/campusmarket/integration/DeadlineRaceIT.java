@@ -9,6 +9,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.TestPropertySource;
 
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -20,6 +21,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** MySQL 截止时间条件与库存/退款事件原子性的真实集成测试。 */
 @SpringBootTest(classes = CampusMarketApplication.class)
 @ActiveProfiles("local")
+@TestPropertySource(properties = {"campus.market.order.deadline.initial-delay-ms=86400000"})
 class DeadlineRaceIT extends SharedContainers {
     @Autowired JdbcTemplate jdbc;
     @Autowired DeadlineScheduler scheduler;

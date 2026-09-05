@@ -27,7 +27,7 @@ public final class DeadlineScheduler {
         this.lifecycle = Objects.requireNonNull(lifecycle, "订单生命周期服务不能为空");
     }
 
-    @Scheduled(fixedDelayString = "${campus.market.order.deadline.fixed-delay-ms:1000}")
+    @Scheduled(initialDelayString = "${campus.market.order.deadline.initial-delay-ms:0}", fixedDelayString = "${campus.market.order.deadline.fixed-delay-ms:1000}")
     public void dispatch() { runOnce(50); }
 
     public int runOnce(int limit) {
