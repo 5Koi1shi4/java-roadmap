@@ -83,7 +83,12 @@ public interface PaymentGateway {
 
     record VerifiedCallback(String provider, String providerEventId, CallbackType type,
                             String providerReference, long amountFen, String status,
-                            Instant occurredAt, String nonce) {
+                            Instant occurredAt, String nonce, UUID orderId) {
+        public VerifiedCallback(String provider, String providerEventId, CallbackType type,
+                                String providerReference, long amountFen, String status,
+                                Instant occurredAt, String nonce) {
+            this(provider, providerEventId, type, providerReference, amountFen, status, occurredAt, nonce, null);
+        }
         public VerifiedCallback {
             requireKey(provider, "支付提供方");
             requireReference(providerEventId);

@@ -17,6 +17,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.dao.DataAccessException;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
@@ -41,6 +42,8 @@ public final class HandoffController {
             return response(result, result.success() ? HttpStatus.OK : HttpStatus.CONFLICT);
         } catch (IdempotentCommandService.IdempotencyConflictException e) { return idempotencyConflict(); }
           catch (OrderLifecycleService.OrderNotFoundException e) { return notFound(); }
+          catch (OrderLifecycleService.ForbiddenParticipantException e) { return forbidden(); }
+          catch (DataAccessException | org.springframework.transaction.TransactionException e) { return unavailable(); }
           catch (IllegalArgumentException e) { return error(HttpStatus.BAD_REQUEST, "请求参数无效"); }
     }
 
@@ -53,6 +56,8 @@ public final class HandoffController {
             return response(result, result.success() ? HttpStatus.OK : HttpStatus.CONFLICT);
         } catch (IdempotentCommandService.IdempotencyConflictException e) { return idempotencyConflict(); }
           catch (OrderLifecycleService.OrderNotFoundException e) { return notFound(); }
+          catch (OrderLifecycleService.ForbiddenParticipantException e) { return forbidden(); }
+          catch (DataAccessException | org.springframework.transaction.TransactionException e) { return unavailable(); }
           catch (IllegalArgumentException e) { return error(HttpStatus.BAD_REQUEST, "请求参数无效"); }
     }
 
@@ -72,8 +77,15 @@ public final class HandoffController {
     @ExceptionHandler(OrderLifecycleService.OrderNotFoundException.class)
     public ResponseEntity<byte[]> notFound() { return error(HttpStatus.NOT_FOUND, "订单不存在"); }
 
+    public ResponseEntity<byte[]> forbidden() { return error(HttpStatus.FORBIDDEN, "无权执行该角色操作"); }
+
+    public ResponseEntity<byte[]> unavailable() { return error(HttpStatus.SERVICE_UNAVAILABLE, "服务暂不可用"); }
+
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<byte[]> malformedRequest() { return error(HttpStatus.BAD_REQUEST, "请求格式无效"); }
+
+    @ExceptionHandler({DataAccessException.class, org.springframework.transaction.TransactionException.class})
+    public ResponseEntity<byte[]> infrastructureFailure() { return unavailable(); }
 
     private static boolean validKey(String key) {
         return key != null && !key.isBlank() && key.length() <= 191 && key.chars().noneMatch(Character::isISOControl);

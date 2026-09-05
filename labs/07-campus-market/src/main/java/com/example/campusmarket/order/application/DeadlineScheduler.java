@@ -41,7 +41,8 @@ public final class DeadlineScheduler {
                 try {
                     repository.retryOrFailClaim(claim, failure.getMessage() == null ? failure.getClass().getSimpleName() : failure.getMessage());
                 } catch (RuntimeException fencingFailure) {
-                    LOG.warn("截止任务失败事实落库失败，等待租约接管 orderId={} claimId={}", claim.orderId(), claim.id(), fencingFailure);
+                    LOG.warn("截止任务失败事实落库失败，等待租约接管 orderId={} claimId={} failureClass={}",
+                        claim.orderId(), claim.id(), fencingFailure.getClass().getSimpleName());
                 }
             }
         }

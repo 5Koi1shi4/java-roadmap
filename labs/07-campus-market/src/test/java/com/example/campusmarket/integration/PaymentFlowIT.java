@@ -471,6 +471,42 @@ class PaymentFlowIT extends SharedContainers {
     }
 
     @Test
+    void lateProviderCallbackWithoutLocalReferenceUsesOrderAndCompensatesExactlyOnce() {
+        UUID order = pendingOrder();
+        UUID payment = UUID.randomUUID();
+        String reference = "late-callback-" + payment;
+        jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,status,created_at,updated_at) VALUES (?,?,?,?,100,'UNKNOWN',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            payment.toString(), order.toString(), "simulated", "late-callback-key-" + payment);
+        jdbc.update("UPDATE trade_order SET status='CANCELLED',version=version+1 WHERE id=?", order.toString());
+        PaymentGateway.VerifiedCallback callback = new PaymentGateway.VerifiedCallback("simulated", "late-callback-event-" + payment,
+            PaymentGateway.VerifiedCallback.CallbackType.PAYMENT, reference, 100, "SUCCEEDED", Instant.now(), UUID.randomUUID().toString(), order);
+
+        assertThat(payments.handleCallback(callback, "{}".getBytes(StandardCharsets.UTF_8)).firstSeen()).isTrue();
+        assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, payment.toString())).isEqualTo("SUCCEEDED");
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("CANCELLED");
+        String refund = jdbc.queryForObject("SELECT id FROM refund_order WHERE order_id=?", String.class, order.toString());
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='REFUND_REQUESTED' AND aggregate_id=?", Integer.class, refund)).isEqualTo(1);
+        assertThat(payments.handleCallback(callback, "{}".getBytes(StandardCharsets.UTF_8)).firstSeen()).isFalse();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, order.toString())).isEqualTo(1);
+    }
+
+    @Test
+    void providerCallbackWithoutLocalReferenceAdvancesAnActiveOrder() {
+        UUID order = pendingOrder();
+        UUID payment = UUID.randomUUID();
+        String reference = "active-callback-" + payment;
+        jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,status,created_at,updated_at) VALUES (?,?,?,?,100,'UNKNOWN',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            payment.toString(), order.toString(), "simulated", "active-callback-key-" + payment);
+        PaymentGateway.VerifiedCallback callback = new PaymentGateway.VerifiedCallback("simulated", "active-callback-event-" + payment,
+            PaymentGateway.VerifiedCallback.CallbackType.PAYMENT, reference, 100, "SUCCEEDED", Instant.now(), UUID.randomUUID().toString(), order);
+
+        assertThat(payments.handleCallback(callback, "{}".getBytes(StandardCharsets.UTF_8)).firstSeen()).isTrue();
+        assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, payment.toString())).isEqualTo("SUCCEEDED");
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("AWAITING_HANDOFF");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, order.toString())).isZero();
+    }
+
+    @Test
     void immediatePaymentSuccessRollsBackWhenOrderCasFails() throws Exception {
         provider.resetRequestCountersForTest();
         provider.setNextPaymentStatusForTest("SUCCEEDED");

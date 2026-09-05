@@ -38,7 +38,7 @@ public final class PaymentReconciliationScheduler {
             String token = UUID.randomUUID().toString();
             if (repository.claimPaymentReconciliation(id, "payment-reconciler", token)) {
                 try { payments.reconcilePayment(id, "payment-reconciler", token); } catch (RuntimeException failure) {
-                    LOG.warn("支付对账失败，保留 UNKNOWN 供下次重试 paymentId={}", id, failure);
+                    LOG.warn("支付对账失败，保留 UNKNOWN 供下次重试 paymentId={} failureClass={}", id, failure.getClass().getSimpleName());
                 }
                 processed++;
             }
@@ -47,7 +47,7 @@ public final class PaymentReconciliationScheduler {
             String token = UUID.randomUUID().toString();
             if (repository.claimRefundReconciliation(id, "refund-reconciler", token)) {
                 try { refunds.reconcileRefund(id, "refund-reconciler", token); } catch (RuntimeException failure) {
-                    LOG.warn("退款对账失败，保留状态供下次重试 refundId={}", id, failure);
+                    LOG.warn("退款对账失败，保留状态供下次重试 refundId={} failureClass={}", id, failure.getClass().getSimpleName());
                 }
                 processed++;
             }
@@ -60,7 +60,7 @@ public final class PaymentReconciliationScheduler {
         String token = UUID.randomUUID().toString();
         if (!repository.claimPaymentReconciliation(paymentId, "payment-reconciler", token)) return 0;
         try { payments.reconcilePayment(paymentId, "payment-reconciler", token); }
-        catch (RuntimeException failure) { LOG.warn("指定支付对账失败 paymentId={}", paymentId, failure); }
+        catch (RuntimeException failure) { LOG.warn("指定支付对账失败 paymentId={} failureClass={}", paymentId, failure.getClass().getSimpleName()); }
         return 1;
     }
 }

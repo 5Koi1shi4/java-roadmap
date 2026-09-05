@@ -20,7 +20,7 @@ class OrderLifecycleTest {
             OrderStatus.AWAITING_HANDOFF, new OrderStatus[]{OrderStatus.AWAITING_RECEIPT, OrderStatus.REFUNDING_CANCEL},
             OrderStatus.REFUNDING_CANCEL, new OrderStatus[]{OrderStatus.REFUNDED},
             OrderStatus.AWAITING_RECEIPT, new OrderStatus[]{OrderStatus.AFTERSALE_WINDOW, OrderStatus.DISPUTED},
-            OrderStatus.AFTERSALE_WINDOW, new OrderStatus[]{OrderStatus.DISPUTED},
+            OrderStatus.AFTERSALE_WINDOW, new OrderStatus[]{OrderStatus.DISPUTED, OrderStatus.SETTLED},
             OrderStatus.DISPUTED, new OrderStatus[]{OrderStatus.AFTERSALE_WINDOW, OrderStatus.REFUNDED}
         );
         for (OrderStatus from : OrderStatus.values()) {

@@ -52,13 +52,45 @@ class HandoffHttpIT extends SharedContainers {
         assertThat(new String(response.body(), StandardCharsets.UTF_8)).contains("订单");
     }
 
+    @Test
+    void authenticatedWrongRoleIs403ForHandoffAndReceipt() throws Exception {
+        UUID seller = user(); UUID buyer = user();
+        UUID handoffOrder = insertOrder(seller, buyer, "AWAITING_HANDOFF");
+        HttpResponse<byte[]> handoff = request(handoffOrder, buyer, "http-403-handoff-" + handoffOrder, "{}");
+        assertThat(handoff.statusCode()).isEqualTo(403);
+
+        UUID receiptOrder = insertOrder(seller, buyer, "AWAITING_RECEIPT");
+        HttpResponse<byte[]> stateConflict = request(receiptOrder, seller, "http-409-state-" + receiptOrder, "{}");
+        assertThat(stateConflict.statusCode()).isEqualTo(409);
+        HttpResponse<byte[]> receipt = requestReceipt(receiptOrder, seller, "http-403-receipt-" + receiptOrder, "{}");
+        assertThat(receipt.statusCode()).isEqualTo(403);
+    }
+
     private HttpResponse<byte[]> request(UUID order, UUID actor, String key, String body) throws Exception {
-        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/orders/" + order + "/handoff"))
+        return requestPath("/handoff", order, actor, key, body);
+    }
+
+    private HttpResponse<byte[]> requestReceipt(UUID order, UUID actor, String key, String body) throws Exception {
+        return requestPath("/receipt", order, actor, key, body);
+    }
+
+    private HttpResponse<byte[]> requestPath(String path, UUID order, UUID actor, String key, String body) throws Exception {
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/orders/" + order + path))
             .header("Authorization", "Bearer " + jwtService.issue(new AuthenticatedUser(actor, Set.of("ROLE_USER"))))
             .header("Content-Type", "application/json; charset=UTF-8");
         if (key != null) builder.header("Idempotency-Key", key);
         return HttpClient.newHttpClient().send(builder.POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8)).build(),
             HttpResponse.BodyHandlers.ofByteArray());
+    }
+
+    private UUID insertOrder(UUID seller, UUID buyer, String status) {
+        UUID listing = UUID.randomUUID(); UUID order = UUID.randomUUID();
+        jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,?,100,0,'SOLD_OUT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            listing.toString(), seller.toString(), "教材", "描述", "教材");
+        String receipt = "AWAITING_RECEIPT".equals(status) ? "DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 1 HOUR)" : "NULL";
+        jdbc.update("INSERT INTO trade_order (id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,paid_amount_fen,status,version,handoff_deadline,receipt_deadline,created_at,updated_at) VALUES (?,?,?,?,?,?,100,1,100,100,?,0,DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 1 HOUR)," + receipt + ",CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            order.toString(), buyer.toString(), seller.toString(), listing.toString(), "教材", "描述", status);
+        return order;
     }
 
     private UUID user() {

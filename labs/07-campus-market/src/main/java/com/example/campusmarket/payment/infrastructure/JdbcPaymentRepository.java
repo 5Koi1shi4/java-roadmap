@@ -12,6 +12,9 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -365,7 +368,9 @@ public class JdbcPaymentRepository {
         int paymentChanged = jdbc.update("UPDATE payment_order SET provider_reference=?,paid_amount_fen=amount_fen,status='SUCCEEDED',"
                 + "reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) "
                 + "WHERE id=? AND order_id=? AND amount_fen=? AND (provider_reference=? OR provider_reference IS NULL) "
-                + "AND ((status='SUCCEEDED' AND reconcile_owner IS NULL) OR (status IN ('PENDING','UNKNOWN','SUCCEEDED') AND reconcile_owner=? AND reconcile_token=? AND reconcile_lease_until>CURRENT_TIMESTAMP(6)))",
+                + "AND ((status='SUCCEEDED' AND reconcile_owner IS NULL) "
+                + "OR (status IN ('PENDING','UNKNOWN','SUCCEEDED') AND reconcile_owner=? AND reconcile_token=? AND reconcile_lease_until>CURRENT_TIMESTAMP(6)) "
+                + "OR (status='UNKNOWN' AND provider_reference IS NULL))",
             providerReference, paymentId.toString(), orderId.toString(), amountFen, providerReference, owner, token);
         if (paymentChanged == 0) {
             PaymentRecord payment = findPayment(paymentId);
@@ -383,6 +388,33 @@ public class JdbcPaymentRepository {
                 + "ON DUPLICATE KEY UPDATE id=id",
             eventId.toString(), eventId.toString(), "REFUND_REQUESTED", refundId.toString(), 1L, payload);
         return refundId;
+    }
+
+    /** 回调未携带本地 reference 时，使用 provider、订单和金额唯一锁定 UNKNOWN 支付。 */
+    public UUID recordPaymentSuccessByOrder(UUID orderId, String provider, String providerReference, long amountFen) {
+        List<PaymentRecord> payments = jdbc.query("SELECT id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,request_hash,response_utf8 "
+                + "FROM payment_order WHERE order_id=? AND provider=? AND amount_fen=? AND provider_reference IS NULL "
+                + "AND status='UNKNOWN' ORDER BY created_at,id FOR UPDATE",
+            (rs, rowNum) -> new PaymentRecord(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),
+                rs.getString("provider"), rs.getString("idempotency_key"), rs.getLong("amount_fen"), rs.getLong("paid_amount_fen"),
+                rs.getString("provider_reference"), rs.getString("status"), rs.getBytes("request_hash"), rs.getBytes("response_utf8")),
+            orderId.toString(), provider, amountFen);
+        if (payments.size() != 1) return null;
+        PaymentRecord payment = payments.get(0);
+        int changed = jdbc.update("UPDATE payment_order SET provider_reference=?,paid_amount_fen=amount_fen,status='SUCCEEDED',"
+                + "reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) "
+                + "WHERE id=? AND order_id=? AND provider=? AND amount_fen=? AND provider_reference IS NULL AND status='UNKNOWN'",
+            providerReference, payment.id().toString(), orderId.toString(), provider, amountFen);
+        if (changed == 1) return payment.id();
+        PaymentRecord current = findPayment(payment.id());
+        return current != null && "SUCCEEDED".equals(current.status())
+            && providerReference.equals(current.providerReference()) ? current.id() : null;
+    }
+
+    /** 兼容仓储调用方：仅在订单已取消时记录补偿退款。 */
+    public UUID recordLatePaymentSuccessByOrder(UUID orderId, String provider, String providerReference, long amountFen) {
+        UUID paymentId = recordPaymentSuccessByOrder(orderId, provider, providerReference, amountFen);
+        return paymentId == null ? null : recordLatePaymentSuccessAfterCancellation(paymentId, orderId, providerReference, amountFen, null, null);
     }
 
     public void saveRefundRequest(UUID refundId, byte[] requestHash) {
@@ -468,9 +500,16 @@ public class JdbcPaymentRepository {
     }
     private String sanitizedPayload(PaymentGateway.VerifiedCallback callback) {
         try {
-            return mapper.writeValueAsString(java.util.Map.of("provider", callback.provider(), "providerEventId", callback.providerEventId(),
-                "type", callback.type().name(), "providerReference", callback.providerReference(), "amountFen", callback.amountFen(),
-                "status", callback.status(), "occurredAt", callback.occurredAt().toString()));
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("provider", callback.provider());
+            payload.put("providerEventId", callback.providerEventId());
+            payload.put("type", callback.type().name());
+            payload.put("providerReference", callback.providerReference());
+            payload.put("amountFen", callback.amountFen());
+            payload.put("status", callback.status());
+            payload.put("occurredAt", callback.occurredAt().toString());
+            if (callback.orderId() != null) payload.put("orderId", callback.orderId());
+            return mapper.writeValueAsString(payload);
         } catch (Exception e) { throw new IllegalStateException("回调摘要序列化失败", e); }
     }
 }

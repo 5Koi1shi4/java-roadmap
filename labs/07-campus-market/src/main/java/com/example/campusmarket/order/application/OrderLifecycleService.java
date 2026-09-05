@@ -38,6 +38,7 @@ public final class OrderLifecycleService {
             var row = repository.lock(orderId);
             Instant now = repository.databaseNow();
             if (row == null) throw new OrderNotFoundException();
+            if (row.buyerId().equals(sellerId)) throw new ForbiddenParticipantException();
             if (!row.sellerId().equals(sellerId)) throw new OrderNotFoundException();
             if (!isHandoffAllowed(row.status(), now, row.handoffDeadline())) return false;
             return repository.markHandoff(orderId, sellerId, row.version(), now, note, now.plus(Duration.ofHours(48))) == 1;
@@ -49,24 +50,12 @@ public final class OrderLifecycleService {
         return Boolean.TRUE.equals(transactions.execute(status -> {
             var row = repository.lock(orderId);
             if (row == null) throw new OrderNotFoundException();
+            if (row.sellerId().equals(buyerId)) throw new ForbiddenParticipantException();
             if (!row.buyerId().equals(buyerId)) throw new OrderNotFoundException();
             if (!isReceiptConfirmationAllowed(row.status())) return false;
             Instant now = repository.databaseNow();
             if (row.receiptDeadline() == null || !now.isBefore(row.receiptDeadline())) return false;
             return repository.confirmReceipt(orderId, buyerId, row.version(), now, now.plus(Duration.ofHours(72)), now.plus(Duration.ofDays(7))) == 1;
-        }));
-    }
-
-    /** 买家在试用窗口内发起争议；仅记录生命周期边界，争议处理由 Task10 负责。 */
-    public boolean openDispute(java.util.UUID orderId, java.util.UUID buyerId, String reason) {
-        return Boolean.TRUE.equals(transactions.execute(status -> {
-            var row = repository.lock(orderId);
-            if (row == null) throw new OrderNotFoundException();
-            if (!row.buyerId().equals(buyerId)) throw new OrderNotFoundException();
-            Instant now = repository.databaseNow();
-            if (row.t0() == null || !isReasonAllowed(reason, row.t0(), now)) return false;
-            return repository.transition(orderId, row.status(), OrderStatus.DISPUTED, row.version(), now,
-                null, false, null, null, null, "BUYER_DISPUTE") == 1;
         }));
     }
 
@@ -154,4 +143,5 @@ public final class OrderLifecycleService {
     }
 
     public static class OrderNotFoundException extends RuntimeException { }
+    public static class ForbiddenParticipantException extends RuntimeException { }
 }

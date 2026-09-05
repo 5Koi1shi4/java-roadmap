@@ -7,6 +7,7 @@ import com.example.campusmarket.order.application.IdempotentCommandService;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.dao.DataAccessResourceFailureException;
 
 import java.util.Set;
 import java.util.UUID;
@@ -55,5 +56,30 @@ class HandoffControllerTest {
         var response = controller.receipt(UUID.randomUUID(), new HandoffController.ReceiptRequest(), "", authentication);
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(new String(response.getBody(), StandardCharsets.UTF_8)).contains("幂等");
+    }
+
+    @Test
+    void authenticatedWrongRoleIsForbidden() {
+        HandoffService service = mock(HandoffService.class);
+        when(service.handoff(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
+            .thenThrow(new com.example.campusmarket.order.application.OrderLifecycleService.ForbiddenParticipantException());
+        HandoffController controller = new HandoffController(service);
+        var authentication = new UsernamePasswordAuthenticationToken(
+            new AuthenticatedUser(UUID.randomUUID(), Set.of("ROLE_USER")), null);
+        var response = controller.handoff(UUID.randomUUID(), new HandoffController.HandoffRequest("note"), "role-key", authentication);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+    }
+
+    @Test
+    void infrastructureFailureIsUtf8ServiceUnavailable() {
+        HandoffService service = mock(HandoffService.class);
+        when(service.handoff(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
+            .thenThrow(new DataAccessResourceFailureException("db down"));
+        HandoffController controller = new HandoffController(service);
+        var authentication = new UsernamePasswordAuthenticationToken(
+            new AuthenticatedUser(UUID.randomUUID(), Set.of("ROLE_USER")), null);
+        var response = controller.handoff(UUID.randomUUID(), new HandoffController.HandoffRequest("note"), "db-key", authentication);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(new String(response.getBody(), StandardCharsets.UTF_8)).contains("服务");
     }
 }

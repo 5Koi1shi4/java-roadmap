@@ -114,7 +114,7 @@ public class SimulatedPaymentGateway implements PaymentGateway {
         }
         try {
             JsonNode json = mapper.readTree(rawBody);
-            java.util.Set<String> allowed = java.util.Set.of("providerEventId", "type", "providerReference", "amountFen", "status", "occurredAt");
+            java.util.Set<String> allowed = java.util.Set.of("providerEventId", "type", "providerReference", "amountFen", "status", "occurredAt", "orderId");
             java.util.Iterator<String> names = json.fieldNames();
             while (names.hasNext()) if (!allowed.contains(names.next())) throw new InvalidCallbackException("回调包含未知字段");
             requireFields(json, "providerEventId", "type", "providerReference", "amountFen", "status", "occurredAt");
@@ -125,8 +125,9 @@ public class SimulatedPaymentGateway implements PaymentGateway {
             if (number(json, "amountFen") <= 0 || text(json, "providerReference").isBlank()
                 || text(json, "providerEventId").isBlank()) throw new InvalidCallbackException("回调字段边界无效");
             Instant occurred = json.get("occurredAt").isNumber() ? Instant.ofEpochSecond(json.get("occurredAt").longValue()) : Instant.parse(text(json, "occurredAt"));
+            java.util.UUID orderId = json.hasNonNull("orderId") ? java.util.UUID.fromString(text(json, "orderId")) : null;
             return new VerifiedCallback(provider, text(json, "providerEventId"), callbackType,
-                text(json, "providerReference"), number(json, "amountFen"), status, occurred, nonce);
+                text(json, "providerReference"), number(json, "amountFen"), status, occurred, nonce, orderId);
         } catch (InvalidCallbackException e) { throw e; }
         catch (Exception e) { throw new InvalidCallbackException("回调 JSON 无效"); }
     }

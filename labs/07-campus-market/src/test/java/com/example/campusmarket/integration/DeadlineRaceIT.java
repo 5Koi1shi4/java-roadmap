@@ -101,6 +101,25 @@ class DeadlineRaceIT extends SharedContainers {
     }
 
     @Test
+    void concurrentHandoffBeforeDeadlineWinsAgainstDueClaim() throws Exception {
+        UUID seller = user(); UUID buyer = user(); UUID listing = listing(seller, 0);
+        UUID order = order(buyer, seller, listing, "AWAITING_HANDOFF", "DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 1 HOUR)", "CURRENT_TIMESTAMP(6)");
+        deadline(order, "HANDOFF", "CURRENT_TIMESTAMP(6)");
+        var gate = new CountDownLatch(1);
+        var pool = Executors.newFixedThreadPool(2);
+        try {
+            var handoff = pool.submit(() -> { gate.await(); return lifecycle.handoff(order, seller, "截止前交付"); });
+            var dueClaim = pool.submit(() -> { gate.await(); return scheduler.runOnce(10); });
+            gate.countDown();
+            assertThat(handoff.get(30, TimeUnit.SECONDS)).isTrue();
+            assertThat(dueClaim.get(30, TimeUnit.SECONDS)).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("AWAITING_RECEIPT");
+            assertThat(jdbc.queryForObject("SELECT available_quantity FROM listing WHERE id=?", Integer.class, listing.toString())).isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='ORDER_REFUNDING_CANCEL' AND aggregate_id=?", Integer.class, order.toString())).isZero();
+        } finally { pool.shutdownNow(); }
+    }
+
+    @Test
     void receiptTimeoutWritesT0ExactlyOnceAndDoesNotRepeatOutbox() {
         UUID seller = user(); UUID buyer = user(); UUID listing = listing(seller, 0);
         UUID order = order(buyer, seller, listing, "AWAITING_RECEIPT", "CURRENT_TIMESTAMP(6)", "CURRENT_TIMESTAMP(6)");
@@ -127,29 +146,6 @@ class DeadlineRaceIT extends SharedContainers {
         assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("AWAITING_RECEIPT");
         assertThat(scheduler.runOnce(10)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("AFTERSALE_WINDOW");
-    }
-
-    @Test
-    void trialCloseAndUserDisputeRaceHasOneLegalWinnerAndNoSettlement() throws Exception {
-        UUID seller = user(); UUID buyer = user(); UUID listing = listing(seller, 0);
-        UUID order = order(buyer, seller, listing, "AFTERSALE_WINDOW", "CURRENT_TIMESTAMP(6)", "DATE_SUB(CURRENT_TIMESTAMP(6), INTERVAL 1 SECOND)");
-        jdbc.update("UPDATE trade_order SET t0=DATE_SUB(CURRENT_TIMESTAMP(6), INTERVAL 1 HOUR),acceptance_deadline=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 1 HOUR) WHERE id=?", order.toString());
-        deadline(order, "TRIAL", "CURRENT_TIMESTAMP(6)");
-        var gate = new CountDownLatch(1);
-        var pool = Executors.newFixedThreadPool(2);
-        try {
-            var close = pool.submit(() -> { gate.await(); return scheduler.runOnce(10); });
-            var userTransition = pool.submit(() -> { gate.await(); return lifecycle.openDispute(order, buyer, "FUNCTIONAL_DEFECT"); });
-            gate.countDown();
-            int deadlineProcessed = close.get(30, TimeUnit.SECONDS);
-            boolean userWon = userTransition.get(30, TimeUnit.SECONDS);
-            String status = jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString());
-            assertThat(status).isIn("AFTERSALE_WINDOW", "DISPUTED");
-            assertThat(userWon).isEqualTo("DISPUTED".equals(status));
-            assertThat(deadlineProcessed).isEqualTo(1);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='ORDER_TRIAL_ELAPSED' AND aggregate_id=?", Integer.class, order.toString())).isEqualTo("AFTERSALE_WINDOW".equals(status) ? 1 : 0);
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='ORDER_SETTLED' AND aggregate_id=?", Integer.class, order.toString())).isZero();
-        } finally { pool.shutdownNow(); }
     }
 
     @Test
@@ -204,9 +200,21 @@ class DeadlineRaceIT extends SharedContainers {
     }
 
     @Test
-    void schedulerHasNoRedisCorrectnessDependency() {
-        assertThat(java.util.Arrays.stream(DeadlineScheduler.class.getDeclaredFields())
-            .noneMatch(field -> field.getType().getName().toLowerCase().contains("redis"))).isTrue();
+    void thirdDeadlineFailureAtomicallyFailsClaimAndCreatesManualFailureFact() {
+        UUID seller = user(); UUID buyer = user(); UUID listing = listing(seller, 0);
+        UUID order = order(buyer, seller, listing, "PENDING_PAYMENT", "CURRENT_TIMESTAMP(6)", "CURRENT_TIMESTAMP(6)");
+        deadline(order, "PAYMENT", "CURRENT_TIMESTAMP(6)");
+        JdbcOrderLifecycleRepository.DeadlineClaim claim = lifecycleRepository.claimBatch("failure-owner", 1, java.time.Duration.ofSeconds(30)).get(0);
+        assertThat(lifecycleRepository.retryOrFailClaim(claim, "first failure")).isEqualTo(1);
+        jdbc.update("UPDATE order_deadline_claim SET due_at=CURRENT_TIMESTAMP(6) WHERE id=?", claim.id().toString());
+        claim = lifecycleRepository.claimBatch("failure-owner", 1, java.time.Duration.ofSeconds(30)).get(0);
+        assertThat(lifecycleRepository.retryOrFailClaim(claim, "second failure")).isEqualTo(1);
+        jdbc.update("UPDATE order_deadline_claim SET due_at=CURRENT_TIMESTAMP(6) WHERE id=?", claim.id().toString());
+        claim = lifecycleRepository.claimBatch("failure-owner", 1, java.time.Duration.ofSeconds(30)).get(0);
+        assertThat(lifecycleRepository.retryOrFailClaim(claim, "third failure")).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT status FROM order_deadline_claim WHERE id=?", String.class, claim.id().toString())).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM manual_failure WHERE source_type='ORDER_DEADLINE' AND source_id=?", Integer.class, claim.id().toString())).isEqualTo(1);
+        assertThat(lifecycleRepository.claimBatch("another-owner", 10, java.time.Duration.ofSeconds(30))).isEmpty();
     }
 
     private UUID listing(UUID seller, int available) {

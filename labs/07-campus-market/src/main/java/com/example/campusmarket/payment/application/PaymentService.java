@@ -170,6 +170,19 @@ public class PaymentService {
                     repository.insertPaymentEvent("PAYMENT_SUCCEEDED", payment.id(),
                         json(java.util.Map.of("paymentId", payment.id(), "orderId", payment.orderId(), "amountFen", callback.amountFen())));
                 }
+            } else if (callback.orderId() != null) {
+                UUID paymentId = repository.recordPaymentSuccessByOrder(callback.orderId(), callback.provider(),
+                    callback.providerReference(), callback.amountFen());
+                if (paymentId != null) {
+                    if (repository.advanceOrderAfterPayment(paymentId, callback.orderId()) != 1
+                        && repository.recordLatePaymentSuccessAfterCancellation(paymentId, callback.orderId(),
+                            callback.providerReference(), callback.amountFen(), null, null) == null) {
+                        throw new IllegalStateException("订单支付结转 CAS 失败，等待对账");
+                    }
+                    repository.savePaymentResponse(paymentId, response(paymentId, callback.providerReference(), "SUCCEEDED"));
+                    repository.insertPaymentEvent("PAYMENT_SUCCEEDED", paymentId,
+                        json(java.util.Map.of("paymentId", paymentId, "orderId", callback.orderId(), "amountFen", callback.amountFen())));
+                }
             }
         }
         repository.completeCallback(callback.provider(), callback.providerEventId());
