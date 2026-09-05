@@ -115,6 +115,14 @@ public class JdbcPaymentRepository {
             provider, reference, amountFen) == 1;
     }
 
+    /** 带订单号的已验签回调必须在同一条件更新中绑定 reference 的订单归属。 */
+    public boolean markPaymentSucceededByReference(UUID orderId, String provider, String reference, long amountFen) {
+        Objects.requireNonNull(orderId, "订单ID不能为空");
+        return jdbc.update("UPDATE payment_order SET paid_amount_fen=amount_fen,status='SUCCEEDED',reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) "
+                + "WHERE order_id=? AND provider=? AND provider_reference=? AND status IN ('PENDING','CREATED','UNKNOWN') AND amount_fen=?",
+            orderId.toString(), provider, reference, amountFen) == 1;
+    }
+
     public void savePaymentResponse(UUID paymentId, byte[] responseUtf8) {
         jdbc.update("UPDATE payment_order SET response_utf8=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", responseUtf8, paymentId.toString());
     }

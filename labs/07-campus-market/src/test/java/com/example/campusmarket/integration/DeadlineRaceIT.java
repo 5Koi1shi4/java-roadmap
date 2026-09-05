@@ -204,16 +204,19 @@ class DeadlineRaceIT extends SharedContainers {
         UUID seller = user(); UUID buyer = user(); UUID listing = listing(seller, 0);
         UUID order = order(buyer, seller, listing, "PENDING_PAYMENT", "CURRENT_TIMESTAMP(6)", "CURRENT_TIMESTAMP(6)");
         deadline(order, "PAYMENT", "CURRENT_TIMESTAMP(6)");
-        JdbcOrderLifecycleRepository.DeadlineClaim claim = lifecycleRepository.claimBatch("failure-owner", 1, java.time.Duration.ofSeconds(30)).get(0);
-        assertThat(lifecycleRepository.retryOrFailClaim(claim, "first failure")).isEqualTo(1);
-        jdbc.update("UPDATE order_deadline_claim SET due_at=CURRENT_TIMESTAMP(6) WHERE id=?", claim.id().toString());
-        claim = lifecycleRepository.claimBatch("failure-owner", 1, java.time.Duration.ofSeconds(30)).get(0);
-        assertThat(lifecycleRepository.retryOrFailClaim(claim, "second failure")).isEqualTo(1);
-        jdbc.update("UPDATE order_deadline_claim SET due_at=CURRENT_TIMESTAMP(6) WHERE id=?", claim.id().toString());
-        claim = lifecycleRepository.claimBatch("failure-owner", 1, java.time.Duration.ofSeconds(30)).get(0);
-        assertThat(lifecycleRepository.retryOrFailClaim(claim, "third failure")).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT status FROM order_deadline_claim WHERE id=?", String.class, claim.id().toString())).isEqualTo("FAILED");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM manual_failure WHERE source_type='ORDER_DEADLINE' AND source_id=?", Integer.class, claim.id().toString())).isEqualTo(1);
+        String badKey = "order:" + order + ":payment-timeout";
+        jdbc.update("INSERT INTO inventory_movement (id,business_key,listing_id,order_id,reason,quantity_delta,created_at) VALUES (?,?,?,?,?,-99,CURRENT_TIMESTAMP(6))",
+            UUID.randomUUID().toString(), badKey, listing.toString(), order.toString(), "CORRUPTED_FIXTURE");
+
+        String claimId = jdbc.queryForObject("SELECT id FROM order_deadline_claim WHERE order_id=? AND deadline_type='PAYMENT'", String.class, order.toString());
+        for (int failure = 1; failure <= 3; failure++) {
+            assertThat(scheduler.runOne(order)).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT attempt_count FROM order_deadline_claim WHERE id=?", Integer.class, claimId)).isEqualTo(failure);
+            if (failure < 3) jdbc.update("UPDATE order_deadline_claim SET due_at=CURRENT_TIMESTAMP(6) WHERE id=?", claimId);
+        }
+        assertThat(jdbc.queryForObject("SELECT status FROM order_deadline_claim WHERE id=?", String.class, claimId)).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT attempt_count FROM order_deadline_claim WHERE id=?", Integer.class, claimId)).isEqualTo(3);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM manual_failure WHERE source_type='ORDER_DEADLINE' AND source_id=?", Integer.class, claimId)).isEqualTo(1);
         assertThat(lifecycleRepository.claimBatch("another-owner", 10, java.time.Duration.ofSeconds(30))).isEmpty();
     }
 

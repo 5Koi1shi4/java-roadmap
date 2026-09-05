@@ -158,7 +158,9 @@ public class PaymentService {
         if (!repository.recordCallback(callback, rawBody)) return new CallbackResult(true, false);
         if (callback.type() == PaymentGateway.VerifiedCallback.CallbackType.PAYMENT
             && "SUCCEEDED".equals(callback.status())) {
-            boolean changed = repository.markPaymentSucceededByReference(callback.provider(), callback.providerReference(), callback.amountFen());
+            boolean changed = callback.orderId() == null
+                ? repository.markPaymentSucceededByReference(callback.provider(), callback.providerReference(), callback.amountFen())
+                : repository.markPaymentSucceededByReference(callback.orderId(), callback.provider(), callback.providerReference(), callback.amountFen());
             if (changed) {
                 JdbcPaymentRepository.PaymentRecord payment = repository.findPaymentByReference(callback.provider(), callback.providerReference());
                 if (payment != null) repository.savePaymentResponse(payment.id(), response(payment.id(), callback.providerReference(), "SUCCEEDED"));

@@ -56,12 +56,20 @@ public final class PaymentReconciliationScheduler {
         return processed;
     }
 
-    /** 按支付 ID 定向对账，避免共享数据库中的旧 due 行污染测试或运维操作。 */
-    public int runOne(UUID paymentId) {
+    /** 定向对账结果；调用方必须能区分未领取、已完成和等待租约重试。 */
+    public ReconciliationResult runOne(UUID paymentId) {
         String token = UUID.randomUUID().toString();
-        if (!repository.claimPaymentReconciliation(paymentId, "payment-reconciler", token)) return 0;
-        try { payments.reconcilePayment(paymentId, "payment-reconciler", token); }
-        catch (RuntimeException failure) { LOG.warn("指定支付对账失败 paymentId={} failureClass={}", paymentId, failure.getClass().getSimpleName()); }
-        return 1;
+        if (!repository.claimPaymentReconciliation(paymentId, "payment-reconciler", token)) return ReconciliationResult.NOT_CLAIMED;
+        try {
+            PaymentService.PaymentResult result = payments.reconcilePayment(paymentId, "payment-reconciler", token);
+            if (result == null || "PENDING".equals(result.status()) || "UNKNOWN".equals(result.status()))
+                return ReconciliationResult.RETRY_PENDING;
+            return ReconciliationResult.PROCESSED;
+        } catch (RuntimeException failure) {
+            LOG.warn("指定支付对账失败 paymentId={} failureClass={}", paymentId, failure.getClass().getSimpleName());
+            return ReconciliationResult.RETRY_PENDING;
+        }
     }
+
+    public enum ReconciliationResult { NOT_CLAIMED, PROCESSED, RETRY_PENDING }
 }

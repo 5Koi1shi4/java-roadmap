@@ -2,6 +2,8 @@ package com.example.campusmarket.integration;
 
 import com.example.campusmarket.CampusMarketApplication;
 import com.example.campusmarket.order.application.DeadlineScheduler;
+import com.example.campusmarket.order.application.OrderLifecycleService;
+import com.example.campusmarket.order.infrastructure.JdbcOrderLifecycleRepository;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.AfterAll;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -18,6 +20,8 @@ import org.testcontainers.lifecycle.Startables;
 import org.testcontainers.utility.DockerImageName;
 
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -53,6 +57,8 @@ class RedisFailureDeadlineIT {
 
     @Autowired private JdbcTemplate jdbc;
     @Autowired private DeadlineScheduler scheduler;
+    @Autowired private OrderLifecycleService lifecycle;
+    @Autowired private JdbcOrderLifecycleRepository lifecycleRepository;
     @Autowired private StringRedisTemplate redis;
 
     @AfterAll
@@ -88,6 +94,96 @@ class RedisFailureDeadlineIT {
             if (!REDIS.isRunning()) REDIS.start();
         }
         assertThat(REDIS.isRunning()).isTrue();
+    }
+
+    @Test
+    void handoffAndTimeoutRaceStillHasOneDatabaseWinnerWhileRedisIsStopped() throws Exception {
+        UUID seller = user();
+        UUID buyer = user();
+        UUID listing = listing(seller, 0);
+        UUID order = order(buyer, seller, listing, "AWAITING_HANDOFF");
+        deadline(order, "HANDOFF");
+        var gate = new CountDownLatch(1);
+        var pool = Executors.newFixedThreadPool(2);
+        REDIS.stop();
+        try {
+            var handoff = pool.submit(() -> { gate.await(); return lifecycle.handoff(order, seller, "redis outage handoff"); });
+            var timeout = pool.submit(() -> { gate.await(); return scheduler.runOnce(10); });
+            gate.countDown();
+            boolean handoffWon = handoff.get(30, java.util.concurrent.TimeUnit.SECONDS);
+            timeout.get(30, java.util.concurrent.TimeUnit.SECONDS);
+            String status = jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString());
+            assertThat(status).isIn("AWAITING_RECEIPT", "REFUNDING_CANCEL");
+            assertThat(handoffWon).isEqualTo("AWAITING_RECEIPT".equals(status));
+            assertThat(jdbc.queryForObject("SELECT available_quantity FROM listing WHERE id=?", Integer.class, listing.toString()))
+                .isEqualTo("REFUNDING_CANCEL".equals(status) ? 1 : 0);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id=? AND event_type='ORDER_REFUNDING_CANCEL'", Integer.class, order.toString()))
+                .isEqualTo("REFUNDING_CANCEL".equals(status) ? 1 : 0);
+        } finally {
+            pool.shutdownNow();
+            if (!REDIS.isRunning()) REDIS.start();
+        }
+    }
+
+    @Test
+    void receiptT0AndOutboxAreWrittenOnceWhileRedisIsPhysicallyStopped() {
+        UUID seller = user();
+        UUID buyer = user();
+        UUID listing = listing(seller, 0);
+        UUID order = order(buyer, seller, listing, "AWAITING_RECEIPT");
+        deadline(order, "RECEIPT");
+        REDIS.stop();
+        try {
+            assertThat(scheduler.runOne(order)).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("AFTERSALE_WINDOW");
+            assertThat(jdbc.queryForObject("SELECT t0 IS NOT NULL FROM trade_order WHERE id=?", Boolean.class, order.toString())).isTrue();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM order_transition WHERE order_id=? AND reason='AUTO_RECEIPT'", Integer.class, order.toString())).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id=? AND event_type='ORDER_RECEIPT_CONFIRMED'", Integer.class, order.toString())).isEqualTo(1);
+        } finally {
+            if (!REDIS.isRunning()) REDIS.start();
+        }
+    }
+
+    @Test
+    void expiredOwnerCannotWriteReceiptAfterRedisStopsAndNewOwnerCanTakeOver() {
+        UUID seller = user();
+        UUID buyer = user();
+        UUID listing = listing(seller, 0);
+        UUID order = order(buyer, seller, listing, "AWAITING_RECEIPT");
+        deadline(order, "RECEIPT");
+        var oldClaim = lifecycleRepository.claimBatch("redis-old-owner", 1, java.time.Duration.ofSeconds(30)).get(0);
+        jdbc.update("UPDATE order_deadline_claim SET lease_until=DATE_SUB(CURRENT_TIMESTAMP(6), INTERVAL 1 SECOND) WHERE id=?", oldClaim.id().toString());
+        REDIS.stop();
+        try {
+            assertThat(lifecycle.autoConfirmReceipt(order, oldClaim)).isFalse();
+            assertThat(jdbc.queryForObject("SELECT t0 IS NULL FROM trade_order WHERE id=?", Boolean.class, order.toString())).isTrue();
+            assertThat(scheduler.runOne(order)).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("AFTERSALE_WINDOW");
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id=? AND event_type='ORDER_RECEIPT_CONFIRMED'", Integer.class, order.toString())).isEqualTo(1);
+        } finally {
+            if (!REDIS.isRunning()) REDIS.start();
+        }
+    }
+
+    private UUID listing(UUID seller, int available) {
+        UUID id = UUID.randomUUID();
+        jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,?,100,? ,?,0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            id.toString(), seller.toString(), "教材", "描述", "教材", available, available == 0 ? "SOLD_OUT" : "ON_SALE");
+        return id;
+    }
+
+    private UUID order(UUID buyer, UUID seller, UUID listing, String status) {
+        UUID id = UUID.randomUUID();
+        String handoff = "AWAITING_HANDOFF".equals(status) ? "CURRENT_TIMESTAMP(6)" : "NULL";
+        String receipt = "AWAITING_RECEIPT".equals(status) ? "CURRENT_TIMESTAMP(6)" : "NULL";
+        jdbc.update("INSERT INTO trade_order (id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,paid_amount_fen,status,version,payment_deadline,handoff_deadline,receipt_deadline,created_at,updated_at) VALUES (?,?,?,?,?,?,100,1,100,100,?,0,CURRENT_TIMESTAMP(6)," + handoff + "," + receipt + ",CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            id.toString(), buyer.toString(), seller.toString(), listing.toString(), "教材", "描述", status);
+        return id;
+    }
+
+    private void deadline(UUID order, String type) {
+        jdbc.update("INSERT INTO order_deadline_claim (id,order_id,deadline_type,status,due_at) VALUES (?,?,?,'NEW',CURRENT_TIMESTAMP(6))",
+            UUID.randomUUID().toString(), order.toString(), type);
     }
 
     private UUID user() {

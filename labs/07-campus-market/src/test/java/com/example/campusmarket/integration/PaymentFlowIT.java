@@ -405,7 +405,7 @@ class PaymentFlowIT extends SharedContainers {
 
             PaymentService.PaymentResult retry = payments.createPayment(order, key, "{}".getBytes(StandardCharsets.UTF_8));
             assertThat(retry.status()).isEqualTo("UNKNOWN");
-            assertThat(reconciliation.runOne(UUID.fromString(paymentId))).isEqualTo(1);
+            assertThat(reconciliation.runOne(UUID.fromString(paymentId))).isEqualTo(PaymentReconciliationScheduler.ReconciliationResult.PROCESSED);
             assertThat(provider.paymentCreateRequestCountForTest()).isEqualTo(1);
             assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, paymentId)).isEqualTo("SUCCEEDED");
         } finally {
@@ -457,14 +457,14 @@ class PaymentFlowIT extends SharedContainers {
             jdbc.update("UPDATE trade_order SET status='CANCELLED',version=version+1 WHERE id=?", order.toString());
             jdbc.update("UPDATE payment_order SET next_reconcile_at=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),reconcile_lease_until=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE id=?", paymentId);
 
-            assertThat(reconciliation.runOne(unknown.paymentId())).isEqualTo(1);
+            assertThat(reconciliation.runOne(unknown.paymentId())).isEqualTo(PaymentReconciliationScheduler.ReconciliationResult.PROCESSED);
             assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("CANCELLED");
             assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, paymentId)).isEqualTo("SUCCEEDED");
             assertThat(jdbc.queryForObject("SELECT available_quantity FROM listing WHERE id=?", Integer.class, listingId)).isZero();
             String refundId = jdbc.queryForObject("SELECT id FROM refund_order WHERE order_id=?", String.class, order.toString());
             assertThat(jdbc.queryForObject("SELECT status FROM refund_order WHERE id=?", String.class, refundId)).isEqualTo("REQUESTED");
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='REFUND_REQUESTED' AND aggregate_id=?", Integer.class, refundId)).isEqualTo(1);
-            assertThat(reconciliation.runOne(unknown.paymentId())).isZero();
+            assertThat(reconciliation.runOne(unknown.paymentId())).isEqualTo(PaymentReconciliationScheduler.ReconciliationResult.NOT_CLAIMED);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, order.toString())).isEqualTo(1);
         } finally {
             provider.releaseBlockedPaymentCreateForTest();
@@ -526,8 +526,13 @@ class PaymentFlowIT extends SharedContainers {
         String conflict = paymentCallbackBody("cross-order-event-" + secondPayment, sharedReference, 100, secondOrder);
         HttpResponse<byte[]> conflictResponse = postSignedWebhook(conflict);
         assertThat(conflictResponse.statusCode()).isEqualTo(200);
+        assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, firstPayment.toString())).isEqualTo("UNKNOWN");
+        assertThat(jdbc.queryForObject("SELECT provider_reference FROM payment_order WHERE id=?", String.class, firstPayment.toString())).isEqualTo(sharedReference);
         assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, secondPayment.toString())).isEqualTo("UNKNOWN");
         assertThat(jdbc.queryForObject("SELECT provider_reference FROM payment_order WHERE id=?", String.class, secondPayment.toString())).isNull();
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, firstOrder.toString())).isEqualTo("PENDING_PAYMENT");
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, secondOrder.toString())).isEqualTo("PENDING_PAYMENT");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id IN (?,?)", Integer.class, firstOrder.toString(), secondOrder.toString())).isZero();
 
         UUID wrongOrder = UUID.randomUUID();
         String wrongOrderBody = paymentCallbackBody("wrong-order-event-" + secondPayment,
