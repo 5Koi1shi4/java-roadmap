@@ -7,7 +7,7 @@ import org.springframework.stereotype.Repository;
 import java.util.UUID;
 
 @Repository
-public final class JdbcEvidenceCaseAccess implements EvidenceCaseAccess {
+public class JdbcEvidenceCaseAccess implements EvidenceCaseAccess {
     private final JdbcTemplate jdbc;
     public JdbcEvidenceCaseAccess(JdbcTemplate jdbc) { this.jdbc = jdbc; }
 
