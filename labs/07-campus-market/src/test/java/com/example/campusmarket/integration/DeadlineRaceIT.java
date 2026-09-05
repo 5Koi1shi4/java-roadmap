@@ -218,7 +218,8 @@ class DeadlineRaceIT extends SharedContainers {
 
     private UUID order(UUID buyer, UUID seller, UUID listing, String status, String handoffDeadline, String trialDeadline) {
         UUID id = UUID.randomUUID();
-        String sql = "INSERT INTO trade_order (id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,paid_amount_fen,status,version,payment_deadline,handoff_deadline,receipt_deadline,trial_deadline,created_at,updated_at) VALUES (?,?,?,?,?,?,100,1,100,100,?,0,CURRENT_TIMESTAMP(6)," + handoffDeadline + "," + ("AWAITING_RECEIPT".equals(status) ? "CURRENT_TIMESTAMP(6)" : "NULL") + "," + trialDeadline + ",CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))";
+        String trial = "AFTERSALE_WINDOW".equals(status) ? trialDeadline : "NULL";
+        String sql = "INSERT INTO trade_order (id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,paid_amount_fen,status,version,payment_deadline,handoff_deadline,receipt_deadline,acceptance_deadline,trial_deadline,created_at,updated_at) VALUES (?,?,?,?,?,?,100,1,100,100,?,0,CURRENT_TIMESTAMP(6)," + handoffDeadline + "," + ("AWAITING_RECEIPT".equals(status) ? "CURRENT_TIMESTAMP(6)" : "NULL") + ",NULL," + trial + ",CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))";
         jdbc.update(sql, id.toString(), buyer.toString(), seller.toString(), listing.toString(), "教材", "描述", status);
         return id;
     }
