@@ -24,7 +24,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 @SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("local")
-class DisputeEvidenceIT extends SharedContainers {
+class DisputeEvidenceIT extends DisputeEvidenceContainers {
     private static final byte[] PNG = Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
     private static final byte[] PDF = "%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer<<>>\n%%EOF".getBytes(StandardCharsets.US_ASCII);
     private final HttpClient client = HttpClient.newHttpClient();
