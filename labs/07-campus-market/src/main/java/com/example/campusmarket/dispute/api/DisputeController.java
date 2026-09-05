@@ -5,6 +5,7 @@ import com.example.campusmarket.dispute.application.EvidenceStorage;
 import com.example.campusmarket.dispute.domain.DisputeDecision;
 import com.example.campusmarket.identity.application.AuthenticatedUser;
 import com.example.campusmarket.order.application.IdempotentCommandService;
+import org.springframework.core.io.InputStreamResource;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -72,7 +73,8 @@ public final class DisputeController {
 
     @GetMapping(path = "/api/disputes/{caseId}/evidence/{evidenceId}/content")
     public ResponseEntity<?> content(@PathVariable UUID caseId, @PathVariable UUID evidenceId, Authentication auth) {
-        try { return ResponseEntity.ok().contentType(MediaType.APPLICATION_OCTET_STREAM).body(evidence.open(caseId, evidenceId, user(auth))); }
+        try { return ResponseEntity.ok().contentType(MediaType.APPLICATION_OCTET_STREAM)
+            .body(new InputStreamResource(evidence.open(caseId, evidenceId, user(auth)))); }
         catch (EvidenceStorage.NotFoundException ex) { return error(HttpStatus.NOT_FOUND, "证据不存在"); }
         catch (EvidenceStorage.StorageUnavailableException ex) { return error(HttpStatus.SERVICE_UNAVAILABLE, "对象存储暂不可用"); }
     }
