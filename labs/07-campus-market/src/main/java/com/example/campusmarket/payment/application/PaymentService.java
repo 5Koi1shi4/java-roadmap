@@ -5,7 +5,6 @@ import com.example.campusmarket.shared.Money;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Profile;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -22,17 +21,15 @@ import java.security.MessageDigest;
 public class PaymentService {
     private final JdbcPaymentRepository repository;
     private final PaymentGateway gateway;
-    private final JdbcTemplate jdbc;
     private final String provider;
     private final TransactionTemplate transactions;
     private final ObjectMapper mapper;
 
-    public PaymentService(JdbcPaymentRepository repository, PaymentGateway gateway, JdbcTemplate jdbc,
+    public PaymentService(JdbcPaymentRepository repository, PaymentGateway gateway,
                           @Value("${campus.market.payment.provider:simulated}") String provider,
                           PlatformTransactionManager transactionManager, ObjectMapper mapper) {
         this.repository = Objects.requireNonNull(repository, "支付仓储不能为空");
         this.gateway = Objects.requireNonNull(gateway, "支付网关不能为空");
-        this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.provider = Objects.requireNonNull(provider, "支付提供方不能为空");
         this.transactions = new TransactionTemplate(Objects.requireNonNull(transactionManager, "事务管理器不能为空"));
         this.mapper = Objects.requireNonNull(mapper, "JSON序列化器不能为空");
@@ -43,8 +40,7 @@ public class PaymentService {
     }
 
     public PaymentResult createPayment(UUID orderId, String idempotencyKey, byte[] rawRequest) {
-        OrderAmount order = jdbc.query("SELECT total_amount_fen,status FROM trade_order WHERE id=?",
-            rs -> rs.next() ? new OrderAmount(rs.getLong(1), rs.getString(2)) : null, orderId.toString());
+        JdbcPaymentRepository.OrderRecord order = repository.findOrderForPayment(orderId);
         if (order == null) throw new IllegalStateException("订单不存在或不可支付");
         byte[] requestHash = digest(orderId + ":" + order.amountFen() + ":" + provider + ":CNY:" + idempotencyKey + ":" +
             java.util.Base64.getEncoder().encodeToString(rawRequest == null ? new byte[0] : rawRequest));
@@ -176,7 +172,6 @@ public class PaymentService {
         public PaymentResult(UUID paymentId, String providerReference, String status) { this(paymentId, providerReference, status, null); }
     }
     public record CallbackResult(boolean idempotentSuccess, boolean firstSeen) {}
-    private record OrderAmount(long amountFen, String status) {}
     private static byte[] digest(String value) {
         try { return MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)); }
         catch (Exception e) { throw new IllegalStateException("SHA-256不可用", e); }

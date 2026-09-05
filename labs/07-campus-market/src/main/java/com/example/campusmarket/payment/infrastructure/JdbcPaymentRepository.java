@@ -64,6 +64,23 @@ public class JdbcPaymentRepository {
             orderId.toString(), provider, idempotencyKey);
     }
 
+    /** 查询订单支付用的金额和当前状态；支付服务不直接依赖订单表 SQL。 */
+    public OrderRecord findOrderForPayment(UUID orderId) {
+        return jdbc.query("SELECT id,total_amount_fen,status FROM trade_order WHERE id=?",
+            rs -> rs.next() ? new OrderRecord(UUID.fromString(rs.getString("id")), rs.getLong("total_amount_fen"), rs.getString("status")) : null,
+            orderId.toString());
+    }
+
+    /** 查询订单最近一笔成功支付；退款服务只通过该业务查询获取可退款支付。 */
+    public PaymentRecord findLatestSuccessfulPaymentByOrder(UUID orderId) {
+        return jdbc.query("SELECT id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,request_hash,response_utf8 " +
+                "FROM payment_order WHERE order_id=? AND status='SUCCEEDED' ORDER BY created_at DESC LIMIT 1",
+            rs -> rs.next() ? new PaymentRecord(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),
+                rs.getString("provider"), rs.getString("idempotency_key"), rs.getLong("amount_fen"), rs.getLong("paid_amount_fen"),
+                rs.getString("provider_reference"), rs.getString("status"), rs.getBytes("request_hash"), rs.getBytes("response_utf8")) : null,
+            orderId.toString());
+    }
+
     public PaymentRecord findPaymentByReference(String provider, String reference) {
         return jdbc.query("SELECT id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,request_hash,response_utf8 FROM payment_order WHERE provider=? AND provider_reference=?",
             rs -> rs.next() ? new PaymentRecord(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),
@@ -281,9 +298,22 @@ public class JdbcPaymentRepository {
         return new RefundInsert(id, changed == 1);
     }
 
-    public boolean bindRefundProvider(UUID refundId, String reference, PaymentGateway.RefundStatus.Status status) {
-        return jdbc.update("UPDATE refund_order SET provider_reference=?,status=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('REQUESTED','PROCESSING')",
-            reference, status.name(), refundId.toString()) == 1;
+    /** 按 provider reference 查询退款回调对应的业务记录。 */
+    public RefundRecord findRefundByProviderReference(String provider, String reference) {
+        return jdbc.query("SELECT id,order_id,payment_order_id,provider,idempotency_key,amount_fen,provider_reference,status,request_hash,response_utf8 " +
+                "FROM refund_order WHERE provider=? AND provider_reference=?",
+            rs -> rs.next() ? new RefundRecord(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),
+                UUID.fromString(rs.getString("payment_order_id")), rs.getString("provider"), rs.getString("idempotency_key"),
+                rs.getLong("amount_fen"), rs.getString("provider_reference"), rs.getString("status"),
+                rs.getBytes("request_hash"), rs.getBytes("response_utf8")) : null,
+            provider, reference);
+    }
+
+    /** 回调退款终态 CAS；调用方负责与额度、响应和 Outbox 共用事务。 */
+    public boolean markRefundTerminalByCallback(String provider, String reference, long amountFen, String status) {
+        return jdbc.update("UPDATE refund_order SET status=?,updated_at=CURRENT_TIMESTAMP(6) " +
+                "WHERE provider=? AND provider_reference=? AND amount_fen=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN')",
+            status, provider, reference, amountFen) == 1;
     }
 
     public RefundRecord findRefund(UUID refundId) {
@@ -367,6 +397,7 @@ public class JdbcPaymentRepository {
             this(id, orderId, provider, idempotencyKey, amountFen, paidAmountFen, providerReference, status, null, null);
         }
     }
+    public record OrderRecord(UUID id, long amountFen, String status) {}
     public record RefundRecord(UUID id, UUID orderId, UUID paymentId, String provider, String idempotencyKey,
                                long amountFen, String providerReference, String status, byte[] requestHash, byte[] responseUtf8) {
         public RefundRecord(UUID id, UUID orderId, UUID paymentId, String provider, String idempotencyKey,

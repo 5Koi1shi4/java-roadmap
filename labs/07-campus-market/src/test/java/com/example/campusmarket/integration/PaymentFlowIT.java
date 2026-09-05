@@ -267,7 +267,9 @@ class PaymentFlowIT extends SharedContainers {
         try {
             request.get(15, TimeUnit.SECONDS);
         } catch (java.util.concurrent.ExecutionException expected) {
-            // 聚合 CAS 失败必须回滚退款终态、响应和 Outbox。
+            assertThat(expected.getCause())
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("退款聚合结转失败，等待重试");
         }
         executor.shutdownNow();
 
