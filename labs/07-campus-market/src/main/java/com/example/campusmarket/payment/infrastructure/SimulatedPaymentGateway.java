@@ -76,7 +76,7 @@ public class SimulatedPaymentGateway implements PaymentGateway {
     public RefundCreated requestRefund(CreateRefundRequest request) {
         JsonNode body = post("/refunds", request.idempotencyKey(), object("orderId", request.orderId().toString(), "paymentProviderReference",
             request.paymentProviderReference(), "amountFen", request.amount().fen(), "idempotencyKey", request.idempotencyKey()));
-        return new RefundCreated(text(body, "providerReference"), RefundStatus.Status.valueOf(text(body, "status")));
+        return new RefundCreated(text(body, "providerReference"), RefundStatus.Status.valueOf(text(body, "status")), number(body, "amountFen"));
     }
 
     @Override

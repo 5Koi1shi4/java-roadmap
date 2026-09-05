@@ -221,6 +221,36 @@ class PaymentFlowIT extends SharedContainers {
     }
 
     @Test
+    void immediateRefundSuccessAmountMismatchDoesNotSettle() {
+        provider.setNextRefundStatusForTest("SUCCEEDED");
+        provider.setNextRefundAmountFenForTest(29);
+        UUID payment = paidPayment(100);
+        UUID order = UUID.fromString(jdbc.queryForObject("SELECT order_id FROM payment_order WHERE id=?", String.class, payment.toString()));
+        jdbc.update("UPDATE payment_order SET provider_reference=? WHERE id=?", "sim-pay-mismatch-success-" + payment, payment.toString());
+
+        RefundService.RefundResult result = refunds.requestRefund(order, "immediate-refund-mismatch-success-" + payment, com.example.campusmarket.shared.Money.ofFen(30));
+        assertThat(result.status()).isIn("REQUESTED", "PROCESSING", "UNKNOWN");
+        assertThat(jdbc.queryForObject("SELECT reserved_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(30L);
+        assertThat(jdbc.queryForObject("SELECT successful_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(0L);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id=? AND event_type LIKE 'REFUND_%'", Integer.class, result.refundId().toString())).isEqualTo(0);
+    }
+
+    @Test
+    void immediateRefundFailureAmountMismatchDoesNotRelease() {
+        provider.setNextRefundStatusForTest("FAILED");
+        provider.setNextRefundAmountFenForTest(31);
+        UUID payment = paidPayment(100);
+        UUID order = UUID.fromString(jdbc.queryForObject("SELECT order_id FROM payment_order WHERE id=?", String.class, payment.toString()));
+        jdbc.update("UPDATE payment_order SET provider_reference=? WHERE id=?", "sim-pay-mismatch-failure-" + payment, payment.toString());
+
+        RefundService.RefundResult result = refunds.requestRefund(order, "immediate-refund-mismatch-failure-" + payment, com.example.campusmarket.shared.Money.ofFen(30));
+        assertThat(result.status()).isIn("REQUESTED", "PROCESSING", "UNKNOWN");
+        assertThat(jdbc.queryForObject("SELECT reserved_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(30L);
+        assertThat(jdbc.queryForObject("SELECT successful_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(0L);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id=? AND event_type LIKE 'REFUND_%'", Integer.class, result.refundId().toString())).isEqualTo(0);
+    }
+
+    @Test
     void immediateRefundRollsBackWhenAggregateCasFails() throws Exception {
         provider.setNextRefundStatusForTest("SUCCEEDED");
         provider.blockNextRefundCreateForTest();

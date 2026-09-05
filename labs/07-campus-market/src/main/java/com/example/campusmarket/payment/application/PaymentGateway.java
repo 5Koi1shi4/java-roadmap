@@ -63,10 +63,15 @@ public interface PaymentGateway {
         }
     }
 
-    record RefundCreated(String providerReference, RefundStatus.Status status) {
+    record RefundCreated(String providerReference, RefundStatus.Status status, long amountFen) {
         public RefundCreated {
             requireReference(providerReference);
             Objects.requireNonNull(status, "退款状态不能为空");
+            if (amountFen < 0) throw new IllegalArgumentException("退款金额不能为负数");
+        }
+        /** 兼容未携带金额的旧适配器；业务层会拒绝该未知金额进入终态。 */
+        public RefundCreated(String providerReference, RefundStatus.Status status) {
+            this(providerReference, status, 0L);
         }
     }
 

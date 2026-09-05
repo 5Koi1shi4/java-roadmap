@@ -140,6 +140,10 @@ public class RefundService {
 
     /** 只有首次 claim 的 owner 才能在事务外 IO 返回后提交结果；迟到 owner 直接重放当前记录。 */
     private RefundResult finishOwned(RefundIntent intent, PaymentGateway.RefundCreated created) {
+        if (created.providerReference() == null || created.providerReference().isBlank()
+            || created.amountFen() != intent.amountFen()) {
+            return finishUnknown(intent, created.providerReference());
+        }
         String status = created.status().name();
         RefundResult committed = transactions.execute(ignored -> {
             if (created.status() == PaymentGateway.RefundStatus.Status.SUCCEEDED
@@ -165,11 +169,15 @@ public class RefundService {
     }
 
     private RefundResult finishUnknown(RefundIntent intent) {
+        return finishUnknown(intent, null);
+    }
+
+    private RefundResult finishUnknown(RefundIntent intent, String reference) {
         RefundResult committed = transactions.execute(ignored -> {
-            if (!repository.markRefundUnknown(intent.refundId(), null, intent.owner(), intent.token())) return null;
-            byte[] saved = response(intent.refundId(), null, "UNKNOWN");
+            if (!repository.markRefundUnknown(intent.refundId(), reference, intent.owner(), intent.token())) return null;
+            byte[] saved = response(intent.refundId(), reference, "UNKNOWN");
             repository.saveRefundResponse(intent.refundId(), saved);
-            return new RefundResult(intent.refundId(), null, "UNKNOWN", saved);
+            return new RefundResult(intent.refundId(), reference, "UNKNOWN", saved);
         });
         return committed == null ? queryRefund(intent.refundId()) : committed;
     }

@@ -37,6 +37,7 @@ public class SimulatedPaymentProviderController {
     private final AtomicInteger refundCreateRequests = new AtomicInteger();
     private volatile String nextPaymentStatus;
     private volatile String nextRefundStatus;
+    private volatile Long nextRefundAmountFen;
     private volatile CountDownLatch paymentCreateEntered;
     private volatile CountDownLatch paymentCreateRelease;
     private volatile CountDownLatch refundCreateEntered;
@@ -134,7 +135,10 @@ public class SimulatedPaymentProviderController {
             if (entry == null) {
                 String initialStatus = nextRefundStatus;
                 nextRefundStatus = null;
-                entry = new RefundEntry(request.amountFen(), initialStatus == null ? "PENDING" : initialStatus,
+                Long initialAmount = nextRefundAmountFen;
+                nextRefundAmountFen = null;
+                entry = new RefundEntry(initialAmount == null ? request.amountFen() : initialAmount,
+                    initialStatus == null ? "PENDING" : initialStatus,
                     request.paymentProviderReference(), request.idempotencyKey());
                 refundsByKey.put(request.idempotencyKey(), entry);
                 refunds.put(ref, entry);
@@ -235,6 +239,7 @@ public class SimulatedPaymentProviderController {
         refundCreateRequests.set(0);
         nextPaymentStatus = null;
         nextRefundStatus = null;
+        nextRefundAmountFen = null;
         releaseBlockedPaymentCreateForTest();
         releaseBlockedRefundCreateForTest();
         paymentCreateEntered = null;
@@ -255,6 +260,11 @@ public class SimulatedPaymentProviderController {
 
     public void nextRefundStatus(String status) {
         setNextRefundStatusForTest(status);
+    }
+
+    public void setNextRefundAmountFenForTest(long amountFen) {
+        if (amountFen <= 0) throw new IllegalArgumentException("退款金额必须为正数");
+        nextRefundAmountFen = amountFen;
     }
 
     public void blockNextPaymentCreateForTest() {
