@@ -48,12 +48,12 @@ public class StorageCleanupScheduler {
         String token = UUID.randomUUID().toString();
         jdbc.update("""
             INSERT INTO storage_cleanup_task (id, cleanup_business_key, object_key, status, run_after, created_at, updated_at)
-            SELECT UUID(), CONCAT('listing-upload:', id), object_key, 'PENDING', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
+            SELECT UUID(), CASE WHEN purpose='LISTING_MEDIA' THEN CONCAT('listing-upload:', id) ELSE CONCAT('dispute-upload:', id) END, object_key, 'PENDING', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6)
             FROM object_upload_session
-            WHERE purpose='LISTING_MEDIA' AND status IN ('OPEN','ABORTED') AND expires_at <= CURRENT_TIMESTAMP(6)
+            WHERE purpose IN ('LISTING_MEDIA','DISPUTE_EVIDENCE') AND status IN ('OPEN','ABORTED') AND expires_at <= CURRENT_TIMESTAMP(6)
             ON DUPLICATE KEY UPDATE updated_at=CURRENT_TIMESTAMP(6)
             """);
-        jdbc.update("UPDATE object_upload_session SET status='EXPIRED', updated_at=CURRENT_TIMESTAMP(6) WHERE purpose='LISTING_MEDIA' AND status='OPEN' AND expires_at <= CURRENT_TIMESTAMP(6)");
+        jdbc.update("UPDATE object_upload_session SET status='EXPIRED', updated_at=CURRENT_TIMESTAMP(6) WHERE purpose IN ('LISTING_MEDIA','DISPUTE_EVIDENCE') AND status='OPEN' AND expires_at <= CURRENT_TIMESTAMP(6)");
         List<Candidate> candidates = jdbc.query("""
             SELECT id, object_key FROM storage_cleanup_task
             WHERE (status='PENDING' AND run_after <= CURRENT_TIMESTAMP(6))

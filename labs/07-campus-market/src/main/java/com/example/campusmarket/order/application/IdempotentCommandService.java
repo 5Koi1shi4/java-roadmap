@@ -64,13 +64,26 @@ public class IdempotentCommandService {
     @Transactional
     public byte[] executeLifecycle(UUID actorId, String idempotencyKey, byte[] request,
                                    UUID orderId, Supplier<byte[]> action) {
+        return executeLifecycle(actorId, idempotencyKey, "ORDER_LIFECYCLE", orderId, request, orderId, action);
+    }
+
+    /** Execute a command with a digest scoped to its command namespace and target resource. */
+    @Transactional
+    public byte[] executeLifecycle(UUID actorId, String idempotencyKey, String commandNamespace,
+                                   UUID resourceId, byte[] request, UUID orderId, Supplier<byte[]> action) {
         if (actorId == null || idempotencyKey == null || idempotencyKey.isBlank() || idempotencyKey.length() > 191)
             throw new IllegalArgumentException("Idempotency-Key无效");
+        if (commandNamespace == null || commandNamespace.isBlank() || resourceId == null)
+            throw new IllegalArgumentException("命令作用域无效");
         Objects.requireNonNull(request, "请求不能为空");
         Objects.requireNonNull(orderId, "订单ID不能为空");
         Objects.requireNonNull(action, "命令动作不能为空");
         byte[] digest;
-        try { digest = MessageDigest.getInstance("SHA-256").digest(request); }
+        byte[] namespace = (commandNamespace.trim() + "|" + resourceId + "|").getBytes(StandardCharsets.UTF_8);
+        byte[] canonical = new byte[namespace.length + request.length];
+        System.arraycopy(namespace, 0, canonical, 0, namespace.length);
+        System.arraycopy(request, 0, canonical, namespace.length, request.length);
+        try { digest = MessageDigest.getInstance("SHA-256").digest(canonical); }
         catch (NoSuchAlgorithmException e) { throw new IllegalStateException("SHA-256不可用", e); }
         hook.beforeCommand(actorId, idempotencyKey);
         var lock = repository.lockOrCreateCommand(actorId, idempotencyKey, digest);

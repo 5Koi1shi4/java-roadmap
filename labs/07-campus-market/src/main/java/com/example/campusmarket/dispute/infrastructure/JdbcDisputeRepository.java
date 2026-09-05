@@ -46,28 +46,28 @@ public class JdbcDisputeRepository {
     }
 
     public CaseRow find(UUID caseId) {
-        return jdbc.query("SELECT id,order_id,initiator_id,assigned_admin_id,disputed_quantity,reason,status,decision,approved_quantity,version,seller_deadline,admin_deadline,opened_at FROM dispute_case WHERE id=?",
+        return jdbc.query("SELECT id,order_id,initiator_id,assigned_admin_id,disputed_quantity,reason,status,decision,approved_quantity,version,seller_deadline,seller_response,admin_deadline,opened_at FROM dispute_case WHERE id=?",
             rs -> { if (!rs.next()) return null; return new CaseRow(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),
                 UUID.fromString(rs.getString("initiator_id")), uuid(rs.getString("assigned_admin_id")), rs.getInt("disputed_quantity"),
                 DisputeReason.parse(rs.getString("reason")), DisputeCase.Status.valueOf(rs.getString("status")),
                 rs.getString("decision") == null ? null : DisputeDecision.valueOf(rs.getString("decision")),
                 (Integer) rs.getObject("approved_quantity"), rs.getLong("version"), instant(rs.getTimestamp("seller_deadline")),
-                instant(rs.getTimestamp("admin_deadline")), instant(rs.getTimestamp("opened_at"))); }, caseId.toString());
+                rs.getString("seller_response"), instant(rs.getTimestamp("admin_deadline")), instant(rs.getTimestamp("opened_at"))); }, caseId.toString());
     }
 
     public CaseRow lock(UUID caseId) {
-        return jdbc.query("SELECT id,order_id,initiator_id,assigned_admin_id,disputed_quantity,reason,status,decision,approved_quantity,version,seller_deadline,admin_deadline,opened_at FROM dispute_case WHERE id=? FOR UPDATE",
+        return jdbc.query("SELECT id,order_id,initiator_id,assigned_admin_id,disputed_quantity,reason,status,decision,approved_quantity,version,seller_deadline,seller_response,admin_deadline,opened_at FROM dispute_case WHERE id=? FOR UPDATE",
             rs -> { if (!rs.next()) return null; return new CaseRow(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),
                 UUID.fromString(rs.getString("initiator_id")), uuid(rs.getString("assigned_admin_id")), rs.getInt("disputed_quantity"),
                 DisputeReason.parse(rs.getString("reason")), DisputeCase.Status.valueOf(rs.getString("status")),
                 rs.getString("decision") == null ? null : DisputeDecision.valueOf(rs.getString("decision")),
                 (Integer) rs.getObject("approved_quantity"), rs.getLong("version"), instant(rs.getTimestamp("seller_deadline")),
-                instant(rs.getTimestamp("admin_deadline")), instant(rs.getTimestamp("opened_at"))); }, caseId.toString());
+                rs.getString("seller_response"), instant(rs.getTimestamp("admin_deadline")), instant(rs.getTimestamp("opened_at"))); }, caseId.toString());
     }
 
     public int markSellerResponded(UUID caseId, long version, Instant now, String response) {
-        return jdbc.update("UPDATE dispute_case SET status='SELLER_RESPONDED',version=version+1,updated_at=? WHERE id=? AND status='OPEN' AND version=?",
-            Timestamp.from(now), caseId.toString(), version);
+        return jdbc.update("UPDATE dispute_case SET status='SELLER_RESPONDED',seller_response=?,version=version+1,updated_at=? WHERE id=? AND status='OPEN' AND version=?",
+            response, Timestamp.from(now), caseId.toString(), version);
     }
 
     public int assignAdmin(UUID caseId, UUID adminId, long version, Instant now) {
@@ -105,11 +105,11 @@ public class JdbcDisputeRepository {
             evidenceId.toString(), caseId.toString(), actorId.toString(), key, type, size, Timestamp.from(now));
     }
 
-    public void createSession(UUID sessionId, UUID actorId, String key) {
-        jdbc.update("INSERT INTO object_upload_session (id,submitted_by,purpose,object_key,status,expires_at,created_at,updated_at) VALUES (?,?,'DISPUTE_EVIDENCE',?,'OPEN',DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 1 HOUR),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", sessionId.toString(), actorId.toString(), key);
+    public void createSession(UUID sessionId, UUID actorId, String key, String claimToken) {
+        jdbc.update("INSERT INTO object_upload_session (id,submitted_by,purpose,object_key,status,claim_token,owner_id,expires_at,created_at,updated_at) VALUES (?,?,'DISPUTE_EVIDENCE',?,'OPEN',?,?,DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 1 HOUR),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", sessionId.toString(), actorId.toString(), key, claimToken, actorId.toString());
     }
-    public void completeSession(UUID id) { jdbc.update("UPDATE object_upload_session SET status='COMPLETED',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='OPEN'", id.toString()); }
-    public void abortSession(UUID id) { jdbc.update("UPDATE object_upload_session SET status='ABORTED',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='OPEN'", id.toString()); }
+    public int completeSession(UUID id, UUID ownerId, String claimToken) { return jdbc.update("UPDATE object_upload_session SET status='COMPLETED',owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='OPEN' AND owner_id=? AND claim_token=? AND expires_at > CURRENT_TIMESTAMP(6)", id.toString(), ownerId.toString(), claimToken); }
+    public int abortSession(UUID id, UUID ownerId, String claimToken) { return jdbc.update("UPDATE object_upload_session SET status='ABORTED',owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='OPEN' AND owner_id=? AND claim_token=?", id.toString(), ownerId.toString(), claimToken); }
     public void cleanup(UUID sessionId, String key) { jdbc.update("INSERT INTO storage_cleanup_task (id,cleanup_business_key,object_key,status,run_after,created_at,updated_at) VALUES (?,?,?,'PENDING',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE updated_at=CURRENT_TIMESTAMP(6)", UUID.randomUUID().toString(), "dispute-upload:" + sessionId, key); }
 
     private static UUID uuid(String value) { return value == null ? null : UUID.fromString(value); }
@@ -117,7 +117,7 @@ public class JdbcDisputeRepository {
 
     public record CaseRow(UUID id, UUID orderId, UUID initiatorId, UUID assignedAdminId, int disputedQuantity,
                           DisputeReason reason, DisputeCase.Status status, DisputeDecision decision, Integer approvedQuantity,
-                          long version, Instant sellerDeadline, Instant adminDeadline, Instant openedAt) {}
+                          long version, Instant sellerDeadline, String sellerResponse, Instant adminDeadline, Instant openedAt) {}
     public record CaseAccess(UUID caseId, UUID buyerId, UUID sellerId, UUID assignedAdminId) {}
     public record EvidenceRow(UUID id, UUID caseId, String objectKey, String mediaType, long sizeBytes, UUID orderId,
                               UUID buyerId, UUID sellerId, UUID assignedAdminId) {}

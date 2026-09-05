@@ -39,7 +39,7 @@ public final class DisputeService {
     public Result open(UUID orderId, UUID actorId, String key, int quantity, String reason, byte[] request) {
         DisputeReason parsed = DisputeReason.parse(reason);
         byte[] body = request == null ? ("{" + quantity + "," + parsed.name() + "}").getBytes(StandardCharsets.UTF_8) : request.clone();
-        byte[] response = commands.executeLifecycle(actorId, key, body, orderId, () -> openOnce(orderId, actorId, quantity, parsed));
+        byte[] response = commands.executeLifecycle(actorId, key, "DISPUTE_OPEN", orderId, body, orderId, () -> openOnce(orderId, actorId, quantity, parsed));
         return new Result(201, response, fieldUuid(response, "disputeId"));
     }
 
@@ -66,7 +66,7 @@ public final class DisputeService {
     public Result respond(UUID caseId, UUID actorId, String key, String response, byte[] request) {
         JdbcDisputeRepository.CaseRow file = requireCase(caseId);
         byte[] body = request == null ? String.valueOf(response).getBytes(StandardCharsets.UTF_8) : request.clone();
-        byte[] saved = commands.executeLifecycle(actorId, key, body, file.orderId(), () -> respondOnce(caseId, actorId, response));
+        byte[] saved = commands.executeLifecycle(actorId, key, "DISPUTE_RESPOND", caseId, body, file.orderId(), () -> respondOnce(caseId, actorId, response));
         return new Result(200, saved, caseId);
     }
 
@@ -80,11 +80,12 @@ public final class DisputeService {
             if (order == null || !order.sellerId().equals(actorId)) throw new NotFoundException();
             if (response == null || response.isBlank() || response.length() > 2000) throw new IllegalArgumentException("卖家回应无效");
             if (repository.markSellerResponded(caseId, file.version(), repository.databaseNow(), response) != 1) throw new ConflictException();
-            return json(MapBuilder.of("disputeId", caseId, "status", "SELLER_RESPONDED"));
+            return json(MapBuilder.of("disputeId", caseId, "status", "SELLER_RESPONDED", "response", response));
         });
     }
 
     public Result assign(UUID caseId, UUID adminId, UUID targetAdminId) {
+        if (adminId == null || targetAdminId == null) throw new IllegalArgumentException("管理员不能为空");
         if (!adminId.equals(targetAdminId)) throw new ForbiddenException();
         return transactions.execute(status -> {
             JdbcDisputeRepository.CaseRow file = repository.lock(caseId);
@@ -99,7 +100,7 @@ public final class DisputeService {
         JdbcDisputeRepository.CaseRow current = requireCase(caseId);
         if (current.assignedAdminId() != null && !current.assignedAdminId().equals(adminId)) throw new NotFoundException();
         byte[] body = request == null ? (choice.name() + ":" + approvedQuantity).getBytes(StandardCharsets.UTF_8) : request.clone();
-        byte[] saved = commands.executeLifecycle(adminId, key, body, current.orderId(), () -> decideOnce(caseId, adminId, choice, approvedQuantity));
+        byte[] saved = commands.executeLifecycle(adminId, key, "DISPUTE_DECIDE", caseId, body, current.orderId(), () -> decideOnce(caseId, adminId, choice, approvedQuantity));
         return new Result(200, saved, caseId);
     }
 

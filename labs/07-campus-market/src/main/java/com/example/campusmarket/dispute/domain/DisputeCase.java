@@ -106,7 +106,8 @@ public final class DisputeCase {
     public record Decision(DisputeDecision decision, int approvedQuantity) {
         public Decision {
             Objects.requireNonNull(decision, "裁决不能为空");
-            if (approvedQuantity < 0) throw new IllegalArgumentException("批准数量不能为负");
+            if (approvedQuantity < 0 || (decision == DisputeDecision.REJECT && approvedQuantity != 0))
+                throw new IllegalArgumentException("裁决批准数量无效");
         }
     }
 }

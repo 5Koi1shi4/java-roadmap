@@ -24,7 +24,7 @@ public final class HandoffService {
     public Result handoff(UUID orderId, UUID sellerId, String idempotencyKey, String note) {
         String safeNote = note == null ? "" : note;
         byte[] request = ("HANDOFF|" + orderId + "|" + safeNote).getBytes(StandardCharsets.UTF_8);
-        byte[] response = commands.executeLifecycle(sellerId, idempotencyKey, request, orderId,
+        byte[] response = commands.executeLifecycle(sellerId, idempotencyKey, "HANDOFF", orderId, request, orderId,
             () -> lifecycle.handoff(orderId, sellerId, safeNote)
                 ? success("AWAITING_RECEIPT") : conflict("交付截止或订单状态已变化"));
         return parse(response);
@@ -32,7 +32,7 @@ public final class HandoffService {
 
     public Result confirmReceipt(UUID orderId, UUID buyerId, String idempotencyKey) {
         byte[] request = ("RECEIPT|" + orderId).getBytes(StandardCharsets.UTF_8);
-        byte[] response = commands.executeLifecycle(buyerId, idempotencyKey, request, orderId,
+        byte[] response = commands.executeLifecycle(buyerId, idempotencyKey, "RECEIPT", orderId, request, orderId,
             () -> lifecycle.confirmReceipt(orderId, buyerId)
                 ? success("AFTERSALE_WINDOW") : conflict("收货截止或订单状态已变化"));
         return parse(response);

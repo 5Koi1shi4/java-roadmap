@@ -55,6 +55,12 @@ class DisputeCaseTest {
     }
 
     @Test
+    void rejectDecisionValueObjectCannotCarryApprovedQuantity() {
+        assertThatThrownBy(() -> new DisputeCase.Decision(DisputeDecision.REJECT, 1))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void rejectsNonPositiveQuantityAndUnknownReason() {
         assertThatThrownBy(() -> DisputeCase.open(UUID.randomUUID(), ORDER, BUYER, SELLER, 1, 0,
             DisputeReason.QUANTITY, T0, T0)).isInstanceOf(IllegalArgumentException.class);

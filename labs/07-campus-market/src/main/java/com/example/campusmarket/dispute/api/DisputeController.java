@@ -13,6 +13,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -30,7 +31,7 @@ public final class DisputeController {
     @PostMapping(path = "/api/orders/{orderId}/disputes", consumes = MediaType.APPLICATION_JSON_VALUE, produces = "application/json; charset=UTF-8")
     public ResponseEntity<byte[]> open(@PathVariable UUID orderId, @RequestBody OpenRequest request,
                                        @RequestHeader(value = "Idempotency-Key", required = false) String key, Authentication auth) {
-        try { requireKey(key); DisputeService.Result result = disputes.open(orderId, user(auth), key, request.disputedQuantity(), request.reason(), requestBytes(request)); return body(result, HttpStatus.CREATED); }
+        try { requireKey(key); if (request == null) throw new IllegalArgumentException("请求不能为空"); DisputeService.Result result = disputes.open(orderId, user(auth), key, request.disputedQuantity(), request.reason(), requestBytes(request)); return body(result, HttpStatus.CREATED); }
         catch (DisputeService.NotFoundException ex) { return error(HttpStatus.NOT_FOUND, "争议不存在"); }
         catch (DisputeService.ConflictException | IdempotentCommandService.IdempotencyConflictException ex) { return error(HttpStatus.CONFLICT, "争议状态或数量冲突"); }
         catch (IllegalArgumentException ex) { return error(HttpStatus.BAD_REQUEST, "请求参数无效"); }
@@ -39,7 +40,7 @@ public final class DisputeController {
     @PostMapping(path = "/api/disputes/{caseId}/responses", consumes = MediaType.APPLICATION_JSON_VALUE, produces = "application/json; charset=UTF-8")
     public ResponseEntity<byte[]> respond(@PathVariable UUID caseId, @RequestBody ResponseRequest request,
                                           @RequestHeader(value = "Idempotency-Key", required = false) String key, Authentication auth) {
-        try { requireKey(key); return body(disputes.respond(caseId, user(auth), key, request.response(), requestBytes(request)), HttpStatus.OK); }
+        try { requireKey(key); if (request == null) throw new IllegalArgumentException("请求不能为空"); return body(disputes.respond(caseId, user(auth), key, request.response(), requestBytes(request)), HttpStatus.OK); }
         catch (DisputeService.NotFoundException ex) { return error(HttpStatus.NOT_FOUND, "争议不存在"); }
         catch (DisputeService.ConflictException | IdempotentCommandService.IdempotencyConflictException ex) { return error(HttpStatus.CONFLICT, "争议状态冲突"); }
         catch (IllegalArgumentException ex) { return error(HttpStatus.BAD_REQUEST, "请求参数无效"); }
@@ -47,7 +48,7 @@ public final class DisputeController {
 
     @PostMapping(path = "/api/disputes/{caseId}/assignments", consumes = MediaType.APPLICATION_JSON_VALUE, produces = "application/json; charset=UTF-8")
     public ResponseEntity<byte[]> assign(@PathVariable UUID caseId, @RequestBody AssignmentRequest request, Authentication auth) {
-        try { if (!isAdmin(auth)) return error(HttpStatus.FORBIDDEN, "无权执行该角色操作"); return body(disputes.assign(caseId, user(auth), request.adminId()), HttpStatus.OK); }
+        try { if (!isAdmin(auth)) return error(HttpStatus.FORBIDDEN, "无权执行该角色操作"); if (request == null) throw new IllegalArgumentException("请求不能为空"); return body(disputes.assign(caseId, user(auth), request.adminId()), HttpStatus.OK); }
         catch (DisputeService.NotFoundException ex) { return error(HttpStatus.NOT_FOUND, "争议不存在"); }
         catch (DisputeService.ConflictException ex) { return error(HttpStatus.CONFLICT, "争议状态冲突"); }
         catch (DisputeService.ForbiddenException ex) { return error(HttpStatus.FORBIDDEN, "无权执行该角色操作"); }
@@ -57,7 +58,7 @@ public final class DisputeController {
     @PostMapping(path = "/api/disputes/{caseId}/decisions", consumes = MediaType.APPLICATION_JSON_VALUE, produces = "application/json; charset=UTF-8")
     public ResponseEntity<byte[]> decide(@PathVariable UUID caseId, @RequestBody DecisionRequest request,
                                          @RequestHeader(value = "Idempotency-Key", required = false) String key, Authentication auth) {
-        try { requireKey(key); if (!isAdmin(auth)) return error(HttpStatus.FORBIDDEN, "无权执行该角色操作"); return body(disputes.decide(caseId, user(auth), key, request.decision(), request.approvedQuantity(), requestBytes(request)), HttpStatus.OK); }
+        try { requireKey(key); if (!isAdmin(auth)) return error(HttpStatus.FORBIDDEN, "无权执行该角色操作"); if (request == null) throw new IllegalArgumentException("请求不能为空"); return body(disputes.decide(caseId, user(auth), key, request.decision(), request.approvedQuantity(), requestBytes(request)), HttpStatus.OK); }
         catch (DisputeService.NotFoundException ex) { return error(HttpStatus.NOT_FOUND, "争议不存在"); }
         catch (DisputeService.ConflictException | IdempotentCommandService.IdempotencyConflictException ex) { return error(HttpStatus.CONFLICT, "争议状态或数量冲突"); }
         catch (IllegalArgumentException ex) { return error(HttpStatus.BAD_REQUEST, "请求参数无效"); }
@@ -85,8 +86,16 @@ public final class DisputeController {
     private static byte[] requestBytes(Object request) { return request.toString().getBytes(StandardCharsets.UTF_8); }
     private static ResponseEntity<byte[]> body(DisputeService.Result result, HttpStatus status) { return ResponseEntity.status(status).contentType(JSON).body(result.responseUtf8()); }
     private static ResponseEntity<byte[]> error(HttpStatus status, String message) { return ResponseEntity.status(status).contentType(JSON).body(("{\"error\":\"" + message + "\"}").getBytes(StandardCharsets.UTF_8)); }
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<byte[]> malformedRequest() { return error(HttpStatus.BAD_REQUEST, "请求格式无效"); }
+
+    @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = false)
     public record OpenRequest(int disputedQuantity, String reason) {}
+    @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = false)
     public record ResponseRequest(String response) {}
+    @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = false)
     public record AssignmentRequest(UUID adminId) {}
+    @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = false)
     public record DecisionRequest(DisputeDecision decision, int approvedQuantity) {}
 }

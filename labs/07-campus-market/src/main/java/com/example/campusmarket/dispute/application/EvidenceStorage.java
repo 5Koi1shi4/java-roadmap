@@ -11,6 +11,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.ByteArrayOutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.SecureRandom;
@@ -44,10 +45,11 @@ public final class EvidenceStorage {
         if (!access.canAttach("DISPUTE", caseId, actorId)) throw new NotFoundException();
         UUID session = UUID.randomUUID();
         String key = "dispute-evidence/" + randomToken();
-        transactions.executeWithoutResult(s -> repository.createSession(session, actorId, key));
+        String claimToken = randomToken();
+        transactions.executeWithoutResult(s -> repository.createSession(session, actorId, key, claimToken));
         Path temp = null;
         try {
-            temp = readBounded(input);
+            temp = readBounded(input).path();
             String detected = TIKA.detect(temp.toFile());
             long size = Files.size(temp);
             validate(filename, declaredType, detected, size);
@@ -57,13 +59,13 @@ public final class EvidenceStorage {
                 if (!access.canAttach("DISPUTE", caseId, actorId)) throw new NotFoundException();
                 InstantHolder now = new InstantHolder(repository.databaseNow());
                 repository.insertEvidence(evidenceId, caseId, actorId, key, detected, size, now.value);
-                repository.completeSession(session);
+                if (repository.completeSession(session, actorId, claimToken) != 1)
+                    throw new IllegalStateException("上传会话已过期或已被接管");
                 return new EvidenceRecord(evidenceId, caseId, detected, size);
             });
             return result;
         } catch (RuntimeException | IOException ex) {
-            try { transactions.executeWithoutResult(s -> repository.abortSession(session)); } catch (RuntimeException ignored) { }
-            try { transactions.executeWithoutResult(s -> repository.cleanup(session, key)); } catch (RuntimeException ignored) { }
+            compensateFailure(session, actorId, claimToken, key, ex);
             if (ex instanceof MinioPrivateObjectStorage.StorageUnavailableException) throw new StorageUnavailableException();
             throw ex instanceof RuntimeException r ? r : new IllegalArgumentException("读取证据失败", ex);
         } finally {
@@ -80,18 +82,64 @@ public final class EvidenceStorage {
         catch (MinioPrivateObjectStorage.ObjectNotFoundException ex) { throw new NotFoundException(); }
     }
 
-    private static Path readBounded(InputStream input) throws IOException {
+    private static BoundedRead readBounded(InputStream input) throws IOException {
         if (input == null) throw new IllegalArgumentException("证据文件不能为空");
         Path file = Files.createTempFile("campus-evidence-", ".upload");
         try (InputStream in = input; OutputStream out = Files.newOutputStream(file)) {
-            byte[] buffer = new byte[8192]; long total = 0; int read;
-            while ((read = in.read(buffer)) != -1) {
+            byte[] prefix = readPrefix(in);
+            String preliminary = signatureType(prefix);
+            long limit = limitFor(preliminary);
+            out.write(prefix);
+            long total = prefix.length;
+            byte[] buffer = new byte[8192]; int read;
+            while (total <= limit && (read = in.read(buffer, 0, (int) Math.min(buffer.length, limit + 1 - total))) != -1) {
+                if (read == 0) continue;
                 total += read;
-                if (total > MAX_BYTES) throw new IllegalArgumentException("证据超过100MiB限制");
+                if (total > limit) throw new IllegalArgumentException("证据超过该类型大小限制");
                 out.write(buffer, 0, read);
             }
-            return file;
+            if (total > limit) throw new IllegalArgumentException("证据超过该类型大小限制");
+            return new BoundedRead(file, preliminary);
         } catch (IOException | RuntimeException ex) { try { Files.deleteIfExists(file); } catch (IOException ignored) { } throw ex; }
+    }
+
+    private void compensateFailure(UUID session, UUID owner, String claimToken, String key, Throwable original) {
+        RuntimeException compensationFailure = null;
+        try { transactions.executeWithoutResult(s -> repository.abortSession(session, owner, claimToken)); }
+        catch (RuntimeException ex) { compensationFailure = ex; }
+        try { transactions.executeWithoutResult(s -> repository.cleanup(session, key)); }
+        catch (RuntimeException ex) { if (compensationFailure == null) compensationFailure = ex; else compensationFailure.addSuppressed(ex); }
+        if (compensationFailure != null) original.addSuppressed(compensationFailure);
+    }
+
+    private static byte[] readPrefix(InputStream in) throws IOException {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream(512);
+        byte[] buffer = new byte[512];
+        while (bytes.size() < 512) {
+            int read = in.read(buffer, 0, Math.min(buffer.length, 512 - bytes.size()));
+            if (read < 0) break;
+            if (read == 0) continue;
+            bytes.write(buffer, 0, read);
+        }
+        return bytes.toByteArray();
+    }
+
+    private static String signatureType(byte[] bytes) {
+        if (bytes.length >= 3 && (bytes[0] & 0xff) == 0xff && (bytes[1] & 0xff) == 0xd8 && (bytes[2] & 0xff) == 0xff) return "image/jpeg";
+        if (bytes.length >= 8 && (bytes[0] & 0xff) == 0x89 && bytes[1] == 'P' && bytes[2] == 'N' && bytes[3] == 'G') return "image/png";
+        if (bytes.length >= 12 && bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F' && bytes[8] == 'W' && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P') return "image/webp";
+        if (bytes.length >= 5 && bytes[0] == '%' && bytes[1] == 'P' && bytes[2] == 'D' && bytes[3] == 'F' && bytes[4] == '-') return "application/pdf";
+        if (bytes.length >= 8 && bytes[4] == 'f' && bytes[5] == 't' && bytes[6] == 'y' && bytes[7] == 'p') return "video/mp4";
+        return "";
+    }
+
+    private static long limitFor(String type) {
+        return switch (type) {
+            case "image/jpeg", "image/png", "image/webp" -> 10 * MIB;
+            case "application/pdf" -> 20 * MIB;
+            case "video/mp4", "" -> MAX_BYTES;
+            default -> MAX_BYTES;
+        };
     }
 
     private static void validate(String filename, String declared, String detected, long size) throws IOException {
@@ -118,6 +166,7 @@ public final class EvidenceStorage {
 
     private static String randomToken() { byte[] bytes = new byte[32]; RANDOM.nextBytes(bytes); return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes); }
     public record EvidenceRecord(UUID id, UUID caseId, String mediaType, long sizeBytes) { }
+    private record BoundedRead(Path path, String preliminaryType) { }
     public static class NotFoundException extends RuntimeException { }
     public static class StorageUnavailableException extends RuntimeException { }
     private record InstantHolder(java.time.Instant value) { }
