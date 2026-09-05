@@ -126,8 +126,26 @@ public class JdbcPaymentRepository {
 
     /** 支付成功时将订单从待支付 CAS 推进为待交付；调用方事务负责回滚终态。 */
     public int advanceOrderAfterPayment(UUID paymentId, UUID orderId) {
-        return jdbc.update("UPDATE trade_order o JOIN payment_order p ON p.order_id=o.id SET o.paid_amount_fen=p.paid_amount_fen,o.status='AWAITING_HANDOFF',o.updated_at=CURRENT_TIMESTAMP(6) WHERE p.id=? AND o.id=? AND o.status='PENDING_PAYMENT'",
-            paymentId.toString(), orderId.toString());
+        Long expectedVersion = jdbc.query("SELECT version FROM trade_order WHERE id=? FOR UPDATE",
+            rs -> rs.next() ? rs.getLong(1) : null, orderId.toString());
+        if (expectedVersion == null) return 0;
+        int changed = jdbc.update("""
+            UPDATE trade_order o JOIN payment_order p ON p.order_id=o.id SET o.paid_amount_fen=p.paid_amount_fen,
+                o.status='AWAITING_HANDOFF',o.handoff_deadline=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 72 HOUR),o.version=o.version+1,
+                o.updated_at=CURRENT_TIMESTAMP(6) WHERE p.id=? AND o.id=? AND o.status='PENDING_PAYMENT' AND o.version=?
+            """,
+            paymentId.toString(), orderId.toString(), expectedVersion);
+        if (changed == 1) {
+            Long version = jdbc.queryForObject("SELECT version FROM trade_order WHERE id=?", Long.class, orderId.toString());
+            jdbc.update("INSERT INTO order_deadline_claim (id,order_id,deadline_type,status,due_at) SELECT ?,?, 'HANDOFF','NEW',handoff_deadline FROM trade_order WHERE id=? ON DUPLICATE KEY UPDATE due_at=VALUES(due_at)",
+                UUID.randomUUID().toString(), orderId.toString(), orderId.toString());
+            jdbc.update("INSERT INTO order_transition (id,order_id,from_status,to_status,reason,occurred_at) VALUES (?,?, 'PENDING_PAYMENT','AWAITING_HANDOFF','PAYMENT_SUCCEEDED',CURRENT_TIMESTAMP(6))",
+                UUID.randomUUID().toString(), orderId.toString());
+            String payload = "{\"orderId\":\"" + orderId + "\",\"status\":\"AWAITING_HANDOFF\",\"paymentId\":\"" + paymentId + "\"}";
+            jdbc.update("INSERT INTO integration_outbox (id,event_id,event_type,aggregate_id,aggregate_version,schema_version,occurred_at,payload,status,attempt_count,available_at,created_at) VALUES (?,?, 'ORDER_PAID',?,?,1,CURRENT_TIMESTAMP(6),CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+                UUID.randomUUID().toString(), UUID.randomUUID().toString(), orderId.toString(), version, payload);
+        }
+        return changed;
     }
 
     /** 为首次 provider IO 建立短时租约，应用并发请求只有一个 owner。 */

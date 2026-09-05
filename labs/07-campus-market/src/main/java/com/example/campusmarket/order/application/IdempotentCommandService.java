@@ -60,5 +60,26 @@ public class IdempotentCommandService {
         }
     }
 
+    /** 复用订单命令表为交付/收货命令提供同样的 actor+key fencing。 */
+    @Transactional
+    public byte[] executeLifecycle(UUID actorId, String idempotencyKey, byte[] request,
+                                   UUID orderId, Supplier<byte[]> action) {
+        if (actorId == null || idempotencyKey == null || idempotencyKey.isBlank() || idempotencyKey.length() > 191)
+            throw new IllegalArgumentException("Idempotency-Key无效");
+        Objects.requireNonNull(request, "请求不能为空");
+        Objects.requireNonNull(orderId, "订单ID不能为空");
+        Objects.requireNonNull(action, "命令动作不能为空");
+        byte[] digest;
+        try { digest = MessageDigest.getInstance("SHA-256").digest(request); }
+        catch (NoSuchAlgorithmException e) { throw new IllegalStateException("SHA-256不可用", e); }
+        hook.beforeCommand(actorId, idempotencyKey);
+        var lock = repository.lockOrCreateCommand(actorId, idempotencyKey, digest);
+        if (!MessageDigest.isEqual(lock.requestHash(), digest)) throw new IdempotencyConflictException();
+        if (lock.completed()) return lock.responseUtf8();
+        byte[] response = action.get();
+        repository.completeCommand(lock.id(), response, orderId);
+        return response;
+    }
+
     public static final class IdempotencyConflictException extends RuntimeException { }
 }

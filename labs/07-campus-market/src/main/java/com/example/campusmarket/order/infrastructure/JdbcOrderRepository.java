@@ -78,6 +78,8 @@ public class JdbcOrderRepository {
             snapshot.warrantyTerm().sellerWarrantyDays(), snapshot.warrantyScope(), snapshot.manufacturerWarrantyProof(),
             timestamp(snapshot.manufacturerWarrantyExpiresAt()), timestamp(order.paymentDeadline()), order.status().name(),
             timestamp(order.createdAt()), timestamp(order.createdAt()));
+        jdbc.update("INSERT INTO order_deadline_claim (id,order_id,deadline_type,status,due_at) VALUES (?,?, 'PAYMENT','NEW',?)",
+            UUID.randomUUID().toString(), order.id().toString(), timestamp(order.paymentDeadline()));
     }
 
     public void insertOrderCreatedOutbox(TradeOrder order, ObjectMapper objectMapper) {
