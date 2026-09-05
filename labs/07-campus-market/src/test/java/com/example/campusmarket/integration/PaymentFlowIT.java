@@ -445,7 +445,6 @@ class PaymentFlowIT extends SharedContainers {
         try {
             var request = executor.submit(() -> payments.createPayment(order, key, "{}".getBytes(StandardCharsets.UTF_8)));
             assertThat(provider.awaitPaymentCreateEnteredForTest(10, TimeUnit.SECONDS)).isTrue();
-            provider.releaseBlockedPaymentCreateForTest();
             PaymentService.PaymentResult unknown = request.get(20, TimeUnit.SECONDS);
             assertThat(unknown.status()).isEqualTo("UNKNOWN");
             String reference = "sim-pay-" + UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8));
