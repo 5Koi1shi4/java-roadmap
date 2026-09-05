@@ -40,11 +40,6 @@ public final class EvidenceStorage {
         this.transactions = new TransactionTemplate(Objects.requireNonNull(transactionManager, "事务管理器不能为空"));
     }
 
-    public EvidenceStorage(JdbcDisputeRepository repository, PrivateObjectStorage storage, EvidenceCaseAccess access,
-                           TransactionTemplate transactions) {
-        this.repository = repository; this.storage = storage; this.access = access; this.transactions = transactions;
-    }
-
     public EvidenceRecord attach(UUID caseId, UUID actorId, String filename, String declaredType, InputStream input) {
         if (!access.canAttach("DISPUTE", caseId, actorId)) throw new NotFoundException();
         UUID session = UUID.randomUUID();
