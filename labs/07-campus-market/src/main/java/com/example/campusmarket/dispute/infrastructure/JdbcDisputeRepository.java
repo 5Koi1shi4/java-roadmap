@@ -15,7 +15,7 @@ import java.util.UUID;
 
 /** 普通争议的 MySQL 持久化；调用者负责事务边界。 */
 @Repository
-public final class JdbcDisputeRepository {
+public class JdbcDisputeRepository {
     private final JdbcTemplate jdbc;
     private final JdbcOrderLifecycleRepository orders;
 
