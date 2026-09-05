@@ -74,8 +74,9 @@ public final class DisputeController {
 
     @GetMapping(path = "/api/disputes/{caseId}/evidence/{evidenceId}/content")
     public ResponseEntity<?> content(@PathVariable UUID caseId, @PathVariable UUID evidenceId, Authentication auth) {
-        try { return ResponseEntity.ok().contentType(MediaType.APPLICATION_OCTET_STREAM)
-            .body(new InputStreamResource(evidence.open(caseId, evidenceId, user(auth)))); }
+        try { EvidenceStorage.OpenedEvidence opened = evidence.open(caseId, evidenceId, user(auth));
+            return ResponseEntity.ok().contentType(MediaType.parseMediaType(opened.mediaType()))
+                .body(new InputStreamResource(opened.content())); }
         catch (EvidenceStorage.NotFoundException ex) { return error(HttpStatus.NOT_FOUND, "证据不存在"); }
         catch (EvidenceStorage.StorageUnavailableException ex) { return error(HttpStatus.SERVICE_UNAVAILABLE, "对象存储暂不可用"); }
     }

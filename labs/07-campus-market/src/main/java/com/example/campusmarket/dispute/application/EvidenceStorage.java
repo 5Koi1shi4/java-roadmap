@@ -73,11 +73,11 @@ public final class EvidenceStorage {
         }
     }
 
-    public InputStream open(UUID caseId, UUID evidenceId, UUID actorId) {
+    public OpenedEvidence open(UUID caseId, UUID evidenceId, UUID actorId) {
         if (!access.canRead("DISPUTE", caseId, actorId)) throw new NotFoundException();
         JdbcDisputeRepository.EvidenceRow evidence = repository.evidence(evidenceId);
         if (evidence == null || !caseId.equals(evidence.caseId()) || !access.canRead("DISPUTE", caseId, actorId)) throw new NotFoundException();
-        try { return storage.open(evidence.objectKey()); }
+        try { return new OpenedEvidence(storage.open(evidence.objectKey()), evidence.mediaType()); }
         catch (MinioPrivateObjectStorage.StorageUnavailableException ex) { throw new StorageUnavailableException(); }
         catch (MinioPrivateObjectStorage.ObjectNotFoundException ex) { throw new NotFoundException(); }
     }
@@ -166,6 +166,7 @@ public final class EvidenceStorage {
 
     private static String randomToken() { byte[] bytes = new byte[32]; RANDOM.nextBytes(bytes); return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes); }
     public record EvidenceRecord(UUID id, UUID caseId, String mediaType, long sizeBytes) { }
+    public record OpenedEvidence(InputStream content, String mediaType) { }
     private record BoundedRead(Path path, String preliminaryType) { }
     public static class NotFoundException extends RuntimeException { }
     public static class StorageUnavailableException extends RuntimeException { }
