@@ -14,6 +14,7 @@ import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
+import org.apache.tika.Tika;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -48,6 +49,8 @@ class DisputeEvidenceIT extends DisputeEvidenceContainers {
     private static final byte[] PDF = "%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer<<>>\n%%EOF".getBytes(StandardCharsets.US_ASCII);
     // A real one-frame H.264 MP4 produced by ffmpeg; a bare ftyp box is not Tika-identifiable as video/mp4.
     private static final byte[] MP4 = Base64.getDecoder().decode("AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAL9bW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAA+gAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAid0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAA+gAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAABAAAAAQAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAPoAAAAAAABAAAAAAGfbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAABAAAAAQABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABSm1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAQpzdGJsAAAApnN0c2QAAAAAAAAAAQAAAJZhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAABAAEABIAAAASAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGP//AAAAMGF2Y0MBZAAK/+EAF2dkAAqs2V7ARAAAAwAEAAADAAg8SJZYAQAGaOvjyyLAAAAAEHBhc3AAAAABAAAAAQAAABhzdHRzAAAAAAAAAAEAAAABAABAAAAAABxzdHNjAAAAAAAAAAEAAAABAAAAAQAAAAEAAAAUc3RzegAAAAAAAALFAAAAAQAAABRzdGNvAAAAAAAAAAEAAAMtAAAAYnVkdGEAAABabWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAAAAAAAAAAAAAtaWxzdAAAACWpdG9vAAAAHWRhdGEAAAABAAAAAExhdmY1OC4yOS4xMDAAAAAIZnJlZQAAAs1tZGF0AAACrQYF//+p3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDE1OCByMjk4NCAzNzU5ZmNiIC0gSC4yNjQvTVBFRy00IEFWQyBjb2RlYyAtIENvcHlsZWZ0IDIwMDMtMjAxOSAtIGh0dHA6Ly93d3cudmlkZW9sYW4ub3JnL3gyNjQuaHRtbCAtIG9wdGlvbnM9Y2FiYWM9MSByZWY9MyBkZWJsb2NrPTE6MDowIGFuYWx5c2U9MHgzOjB4MTEzIG1lPWhleCBzdWJtZT03IHBzeT0xIHBzeV9yZD0xLjA6MC4wMCBtaXhlZF9yZWY9MSBtX3JhbmdlPTE2IGNocm9tYV9tZT0xIHRyZWxsaXM9MSA4eDhkY3Q9MCBjb219PTEgZGVhZHpvbWU9MjEsMTEgZmFzdF9wc2tpcD0xIGNocm9tYV9xcF9vZmZzZXQ9LTIgdGhyZWFkcz0xIGxvb2thaGVhZF90aHJlYWRzPTEgc2xpY2VkX3RocmVhZD0wIG5yPTAgZGVjaW1hdGU9MSBpbnRlcmxhY2VkPTAgYmx1cmF5X2NvbXBhdD0wIGNvbnN0cmFpbmVkX2ludHJhPTAgYmZyYW1lcz0zIGJfcHlyYW1pZD0yIGJfYWRhcHQ9MSBiX2lhcz0wIGRpcmVjdD0xIHdlaWdodGI9MSBvcGVuX2dvcD0wIHdlaWdodHA9MiBrZXlpbnQ9MjUwIGtleWludF9taW49MSBzY2VuZWN1dD00MCBpbnRyYV9yZWZfcmVmcmVzaD0wIHJjPWNyZiBtYnRyZWU9MSBjcmY9MjMuMCBxY29tcD0wLjYwIHFwbWluPTAgcXBtYXg9NjkgcXBzdGVwPTQgaXBfcmF0aW89MS40MCBxYT0xOjEuMDAgYXFvPTAuMDAgAACAAAAQZYiEABX//vfJ78Cm69vfgQ==");
+    private static final byte[] MP4_VALID = Base64.getDecoder().decode("AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAL9bW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAA+gAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAid0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAA+gAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAABAAAAAQAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAPoAAAAAAABAAAAAAGfbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAABAAAAAQABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABSm1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAQpzdGJsAAAApnN0c2QAAAAAAAAAAQAAAJZhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAABAAEABIAAAASAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGP//AAAAMGF2Y0MBZAAK/+EAF2dkAAqs2V7ARAAAAwAEAAADAAg8SJZYAQAGaOvjyyLAAAAAEHBhc3AAAAABAAAAAQAAABhzdHRzAAAAAAAAAAEAAAABAABAAAAAABxzdHNjAAAAAAAAAAEAAAABAAAAAQAAAAEAAAAUc3RzegAAAAAAAALFAAAAAQAAABRzdGNvAAAAAAAAAAEAAAMtAAAAYnVkdGEAAABabWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAAAAAAAAAAAAAtaWxzdAAAACWpdG9vAAAAHWRhdGEAAAABAAAAAExhdmY1OC4yOS4xMDAAAAAIZnJlZQAAAs1tZGF0AAACrQYF//+p3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDE1OCByMjk4NCAzNzU5ZmNiIC0gSC4yNjQvTVBFRy00IEFWQyBjb2RlYyAtIENvcHlsZWZ0IDIwMDMtMjAxOSAtIGh0dHA6Ly93d3cudmlkZW9sYW4ub3JnL3gyNjQuaHRtbCAtIGh0dHA6Ly93d3cudmlkZW9sYW4ub3JnL3gyNjQuaHRtbCAtIG9wdGlvbnM9Y2FiYWM9MSB0cmVhZHM9MSBsb29rYWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWQ9MCBucj0wIGRlY2ltYXRlPTEgaW50ZXJsYWNlZD0wIGJsdXJheV9jb21wYXQ9MCBjb21wYXRpYmlsPTE2IGNocm9tYV9tZT0xIHRyZWxsaXM9MSA4eDhkY3Q9MCBjcW09MCBkZWFkem9uZT0yMSwxMSBmYXN0X3Bza2lwPTEgcmVwbGljYXRlZD0wIHFwPTEwMCBxcG1pbj0wIHFwbWF4PTY5IHFwc3RlcD00IGlwX3JhdGlvPTEuNDAgYXE9MToxLjAwIHRocmVhZHM9MSBsb29rYWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWQ9MCBucj0wIGRlY2ltYXRlPTEgaW50ZXJsYWNlZD0wIGJsdXJheV9jb21wYXQ9MCBjb25zdHJhaW5lZF9pbnRyYT0wIGNvbnN0cmFpbmVkX2ludHJhPTAgYmZyYW1lcz0zIGNyZj0yMy4wIHFjb21wPTAuNjAgcXBtaW49MCBxcG1pbj0wIHFwbWluPTAgcXBtYXg9NjkgcXBzdGVwPTQgaXBfcmF0aW89MS40MCBxYT0xOjEuMDAgYXFvPTAuMDAgAACAAAAQZYiEABX//vfJ78Cm69vfgQ==");
+    private static final byte[] MP4_MINIMAL = new byte[] {0,0,0,24,'f','t','y','p','i','s','o','m',0,0,2,0,'i','s','o','m','i','s','o','2',0,0,0,8,'m','o','o','v'};
     private final HttpClient client = HttpClient.newHttpClient();
     @LocalServerPort private int port;
     @Autowired private JdbcTemplate jdbc;
@@ -129,7 +132,7 @@ class DisputeEvidenceIT extends DisputeEvidenceContainers {
         HttpResponse<byte[]> content = getBytes("/api/disputes/" + dispute + "/evidence/" + evidenceId + "/content", token(buyer));
         assertThat(content.statusCode()).isEqualTo(200);
         assertThat(content.body()).containsExactly(PNG);
-        assertThat(content.headers().firstValue("Content-Type")).contains("image/png");
+        assertMediaType(content, "image/png");
 
         MINIO_PROXY.setConnectionCut(true);
         try {
@@ -143,9 +146,10 @@ class DisputeEvidenceIT extends DisputeEvidenceContainers {
         UUID dispute = dispute(order(listing(seller), buyer, seller), buyer);
         Object[][] fixtures = {
             {"photo.jpg", "image/jpeg", JPEG}, {"photo.webp", "image/webp", WEBP},
-            {"document.pdf", "application/pdf", PDF}, {"clip.mp4", "video/mp4", MP4}
+            {"document.pdf", "application/pdf", PDF}, {"clip.mp4", "video/mp4", MP4_MINIMAL}
         };
         for (Object[] fixture : fixtures) {
+            assertThat(new Tika().detect((byte[]) fixture[2])).as("Tika fixture: " + fixture[0]).isEqualTo(fixture[1]);
             HttpResponse<String> response = multipart("/api/disputes/" + dispute + "/evidence", token(buyer),
                 (String) fixture[0], (String) fixture[1], (byte[]) fixture[2]);
             assertThat(response.statusCode()).as((String) fixture[0]).isEqualTo(201);
@@ -161,7 +165,7 @@ class DisputeEvidenceIT extends DisputeEvidenceContainers {
             {"bound.jpg", "image/jpeg", JPEG, 10L * 1024 * 1024 + 1},
             {"bound.webp", "image/webp", WEBP, 10L * 1024 * 1024 + 1},
             {"bound.pdf", "application/pdf", PDF, 20L * 1024 * 1024 + 1},
-            {"bound.mp4", "video/mp4", MP4, 100L * 1024 * 1024 + 1}
+            {"bound.mp4", "video/mp4", MP4_MINIMAL, 100L * 1024 * 1024 + 1}
         };
         for (Object[] fixture : fixtures) {
             HttpResponse<String> response = streamingMultipart("/api/disputes/" + dispute + "/evidence", token(buyer),
@@ -198,13 +202,13 @@ class DisputeEvidenceIT extends DisputeEvidenceContainers {
     void successfulMinioPutFollowedByDatabaseFailureLeavesDurableCleanup() throws Exception {
         UUID buyer = user("cleanup-buyer"); UUID seller = user("cleanup-seller");
         UUID dispute = dispute(order(listing(seller), buyer, seller), buyer);
-        String trigger = "fail_dispute_evidence_" + UUID.randomUUID().toString().replace('-', '_');
-        jdbc.execute("CREATE TRIGGER " + trigger + " BEFORE INSERT ON dispute_evidence FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='forced evidence DB failure'");
+        String constraint = "fail_dispute_evidence_" + UUID.randomUUID().toString().replace('-', '_');
+        jdbc.execute("ALTER TABLE dispute_evidence ADD CONSTRAINT " + constraint + " CHECK (size_bytes < 0)");
         try {
             assertThatThrownBy(() -> evidenceStorage.attach(dispute, buyer, "forced.png", "image/png", new ByteArrayInputStream(PNG)))
                 .isInstanceOf(RuntimeException.class);
         } finally {
-            jdbc.execute("DROP TRIGGER " + trigger);
+            jdbc.execute("ALTER TABLE dispute_evidence DROP CHECK " + constraint);
         }
         String sessionId = jdbc.queryForObject("SELECT id FROM object_upload_session WHERE submitted_by=? AND purpose='DISPUTE_EVIDENCE' ORDER BY created_at DESC LIMIT 1", String.class, buyer.toString());
         String objectKey = jdbc.queryForObject("SELECT object_key FROM object_upload_session WHERE id=?", String.class, sessionId);
@@ -284,6 +288,12 @@ class DisputeEvidenceIT extends DisputeEvidenceContainers {
         assertThat(mediaType.getType()).isEqualTo("application");
         assertThat(mediaType.getSubtype()).isEqualTo("json");
         assertThat(mediaType.getCharset()).isEqualTo(StandardCharsets.UTF_8);
+    }
+    private static void assertMediaType(HttpResponse<?> response, String expected) {
+        MediaType mediaType = MediaType.parseMediaType(response.headers().firstValue("Content-Type").orElseThrow());
+        MediaType expectedType = MediaType.parseMediaType(expected);
+        assertThat(mediaType.getType()).isEqualTo(expectedType.getType());
+        assertThat(mediaType.getSubtype()).isEqualTo(expectedType.getSubtype());
     }
     private HttpResponse<String> multipart(String path,String token,String filename,String type,byte[] bytes) throws Exception { String b="----campus"+UUID.randomUUID(); byte[] p=("--"+b+"\r\nContent-Disposition: form-data; name=\"file\"; filename=\""+filename+"\"\r\nContent-Type: "+type+"\r\n\r\n").getBytes(StandardCharsets.UTF_8), s=("\r\n--"+b+"--\r\n").getBytes(StandardCharsets.UTF_8), all=new byte[p.length+bytes.length+s.length]; System.arraycopy(p,0,all,0,p.length); System.arraycopy(bytes,0,all,p.length,bytes.length); System.arraycopy(s,0,all,p.length+bytes.length,s.length); return client.send(HttpRequest.newBuilder(URI.create("http://localhost:"+port+path)).header("Authorization","Bearer "+token).header("Content-Type","multipart/form-data; boundary="+b).POST(HttpRequest.BodyPublishers.ofByteArray(all)).build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)); }
     private HttpResponse<String> streamingMultipart(String path, String token, String filename, String type, byte[] signature, long size) throws Exception {
