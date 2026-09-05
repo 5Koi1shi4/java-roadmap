@@ -47,6 +47,9 @@ abstract class DisputeEvidenceContainers {
         registry.add("spring.datasource.username", MYSQL::getUsername);
         registry.add("spring.datasource.password", MYSQL::getPassword);
         registry.add("campus.market.storage.endpoint", () -> "http://" + MINIO_PROXY.getContainerIpAddress() + ":" + MINIO_PROXY.getProxyPort());
+        // This suite drives dispute HTTP APIs directly; the order deadline worker is unrelated.
+        // Disable its bean so it cannot race container shutdown after the test context stops.
+        registry.add("campus.market.order.deadline.enabled", () -> "false");
         registry.add("spring.task.scheduling.enabled", () -> "false");
         registry.add("campus.market.search.dispatcher.enabled", () -> "false");
         registry.add("campus.market.payment.reconciliation.enabled", () -> "false");

@@ -1,6 +1,7 @@
 package com.example.campusmarket.order.application;
 
 import com.example.campusmarket.order.infrastructure.JdbcOrderLifecycleRepository;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Profile;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -15,6 +16,7 @@ import org.slf4j.LoggerFactory;
 /** 订单截止任务的有界领取器；owner/token/lease 由 MySQL 负责 fencing。 */
 @Component
 @Profile("!test")
+@ConditionalOnProperty(prefix = "campus.market.order.deadline", name = "enabled", havingValue = "true", matchIfMissing = true)
 @EnableScheduling
 public final class DeadlineScheduler {
     private static final Logger LOG = LoggerFactory.getLogger(DeadlineScheduler.class);
