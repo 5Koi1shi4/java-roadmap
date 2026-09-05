@@ -9,8 +9,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import java.sql.Timestamp;
-import java.time.Instant;
 import java.util.UUID;
 import java.util.function.Supplier;
 import java.util.Objects;
@@ -92,17 +90,17 @@ public class JdbcInventoryRepository implements InventoryPort {
             return true;
         }
         String sql = restore
-            ? "UPDATE listing SET available_quantity = available_quantity + ?, status = CASE WHEN status = 'SOLD_OUT' THEN 'ON_SALE' ELSE status END, version = version + 1, updated_at = ? WHERE id = ?"
+            ? "UPDATE listing SET available_quantity = available_quantity + ?, status = CASE WHEN status = 'SOLD_OUT' THEN 'ON_SALE' ELSE status END, version = version + 1, updated_at = CURRENT_TIMESTAMP(6) WHERE id = ?"
             : (reason.equals("RETURN_QUARANTINE")
-                ? "UPDATE listing SET quarantined_quantity = quarantined_quantity + ?, version = version + 1, updated_at = ? WHERE id = ?"
-                : "UPDATE listing SET status = CASE WHEN available_quantity - ? = 0 THEN 'SOLD_OUT' ELSE status END, available_quantity = available_quantity - ?, version = version + 1, updated_at = ? WHERE id = ? AND status = 'ON_SALE' AND available_quantity >= ?");
+                ? "UPDATE listing SET quarantined_quantity = quarantined_quantity + ?, version = version + 1, updated_at = CURRENT_TIMESTAMP(6) WHERE id = ?"
+                : "UPDATE listing SET status = CASE WHEN available_quantity - ? = 0 THEN 'SOLD_OUT' ELSE status END, available_quantity = available_quantity - ?, version = version + 1, updated_at = CURRENT_TIMESTAMP(6) WHERE id = ? AND status = 'ON_SALE' AND available_quantity >= ?");
         int changed;
         if (restore) {
-            changed = jdbc.update(sql, quantity, Timestamp.from(Instant.now()), listingId.toString());
+            changed = jdbc.update(sql, quantity, listingId.toString());
         } else if (reason.equals("RETURN_QUARANTINE")) {
-            changed = jdbc.update(sql, quantity, Timestamp.from(Instant.now()), listingId.toString());
+            changed = jdbc.update(sql, quantity, listingId.toString());
         } else {
-            changed = jdbc.update(sql, quantity, quantity, Timestamp.from(Instant.now()), listingId.toString(), quantity);
+            changed = jdbc.update(sql, quantity, quantity, listingId.toString(), quantity);
         }
         if (changed != 1) {
             jdbc.update("DELETE FROM inventory_movement WHERE business_key = ?", key);

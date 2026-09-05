@@ -122,9 +122,15 @@ public class PaymentService {
             || (row.providerReference() != null && !row.providerReference().equals(status.providerReference()))) return queryPayment(paymentId);
         if (status.status() == PaymentGateway.PaymentStatus.Status.SUCCEEDED)
             transactions().execute(ignored -> { if (repository.markPaymentSucceeded(paymentId, row.providerReference(), status.providerReference(), status.amountFen(), owner, token)) {
-                if (!advanceOrderAfterSuccess(paymentId, row.orderId())) throw new IllegalStateException("订单支付结转 CAS 失败，等待对账");
+                boolean lateCompensation = false;
+                if (!advanceOrderAfterSuccess(paymentId, row.orderId())) {
+                    if (repository.recordLatePaymentSuccessAfterCancellation(paymentId, row.orderId(), status.providerReference(), status.amountFen(), owner, token) == null)
+                        throw new IllegalStateException("订单支付结转 CAS 失败，等待对账");
+                    lateCompensation = true;
+                }
                 byte[] response = response(paymentId, status.providerReference(), "SUCCEEDED");
-                if (!repository.savePaymentResponseAndRelease(paymentId, response, owner, token))
+                if (lateCompensation) repository.savePaymentResponse(paymentId, response);
+                else if (!repository.savePaymentResponseAndRelease(paymentId, response, owner, token))
                     throw new IllegalStateException("支付响应落库 CAS 失败，等待对账");
                 repository.insertPaymentEvent("PAYMENT_SUCCEEDED", row.id(), json(java.util.Map.of("paymentId", row.id(), "orderId", row.orderId(), "amountFen", status.amountFen()))); }
                 return null; });
@@ -156,8 +162,10 @@ public class PaymentService {
             if (changed) {
                 JdbcPaymentRepository.PaymentRecord payment = repository.findPaymentByReference(callback.provider(), callback.providerReference());
                 if (payment != null) repository.savePaymentResponse(payment.id(), response(payment.id(), callback.providerReference(), "SUCCEEDED"));
-                if (repository.advanceOrderAfterPayment(payment.id(), payment.orderId()) != 1)
-                    throw new IllegalStateException("订单支付结转 CAS 失败，等待对账");
+                if (payment != null && repository.advanceOrderAfterPayment(payment.id(), payment.orderId()) != 1) {
+                    if (repository.recordLatePaymentSuccessAfterCancellation(payment.id(), payment.orderId(), callback.providerReference(), callback.amountFen(), null, null) == null)
+                        throw new IllegalStateException("订单支付结转 CAS 失败，等待对账");
+                }
                 if (payment != null) {
                     repository.insertPaymentEvent("PAYMENT_SUCCEEDED", payment.id(),
                         json(java.util.Map.of("paymentId", payment.id(), "orderId", payment.orderId(), "amountFen", callback.amountFen())));

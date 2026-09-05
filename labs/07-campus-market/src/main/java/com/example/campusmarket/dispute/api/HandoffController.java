@@ -2,6 +2,8 @@ package com.example.campusmarket.dispute.api;
 
 import com.example.campusmarket.dispute.application.HandoffService;
 import com.example.campusmarket.identity.application.AuthenticatedUser;
+import com.example.campusmarket.order.application.IdempotentCommandService;
+import com.example.campusmarket.order.application.OrderLifecycleService;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -13,6 +15,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
@@ -29,17 +33,27 @@ public final class HandoffController {
 
     @PostMapping(path = "/{orderId}/handoff", consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<byte[]> handoff(@PathVariable UUID orderId, @RequestBody(required = false) HandoffRequest request,
-                                          @RequestHeader("Idempotency-Key") String key, Authentication authentication) {
+                                          @RequestHeader(value = "Idempotency-Key", required = false) String key, Authentication authentication) {
+        if (!validKey(key)) return error(HttpStatus.BAD_REQUEST, "幂等参数无效");
         UUID seller = principal(authentication);
-        HandoffService.Result result = service.handoff(orderId, seller, key, request == null ? "" : request.note());
-        return response(result, result.success() ? HttpStatus.OK : HttpStatus.CONFLICT);
+        try {
+            HandoffService.Result result = service.handoff(orderId, seller, key, request == null ? "" : request.note());
+            return response(result, result.success() ? HttpStatus.OK : HttpStatus.CONFLICT);
+        } catch (IdempotentCommandService.IdempotencyConflictException e) { return idempotencyConflict(); }
+          catch (OrderLifecycleService.OrderNotFoundException e) { return notFound(); }
+          catch (IllegalArgumentException e) { return error(HttpStatus.BAD_REQUEST, "请求参数无效"); }
     }
 
     @PostMapping(path = "/{orderId}/receipt", consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<byte[]> receipt(@PathVariable UUID orderId, @RequestBody(required = false) ReceiptRequest ignored,
-                                          @RequestHeader("Idempotency-Key") String key, Authentication authentication) {
-        HandoffService.Result result = service.confirmReceipt(orderId, principal(authentication), key);
-        return response(result, result.success() ? HttpStatus.OK : HttpStatus.CONFLICT);
+                                          @RequestHeader(value = "Idempotency-Key", required = false) String key, Authentication authentication) {
+        if (!validKey(key)) return error(HttpStatus.BAD_REQUEST, "幂等参数无效");
+        try {
+            HandoffService.Result result = service.confirmReceipt(orderId, principal(authentication), key);
+            return response(result, result.success() ? HttpStatus.OK : HttpStatus.CONFLICT);
+        } catch (IdempotentCommandService.IdempotencyConflictException e) { return idempotencyConflict(); }
+          catch (OrderLifecycleService.OrderNotFoundException e) { return notFound(); }
+          catch (IllegalArgumentException e) { return error(HttpStatus.BAD_REQUEST, "请求参数无效"); }
     }
 
     private static UUID principal(Authentication authentication) {
@@ -50,6 +64,24 @@ public final class HandoffController {
 
     private static ResponseEntity<byte[]> response(HandoffService.Result result, HttpStatus status) {
         return ResponseEntity.status(status).contentType(JSON_UTF8).body(result.responseUtf8());
+    }
+
+    @ExceptionHandler(IdempotentCommandService.IdempotencyConflictException.class)
+    public ResponseEntity<byte[]> idempotencyConflict() { return error(HttpStatus.CONFLICT, "幂等请求冲突"); }
+
+    @ExceptionHandler(OrderLifecycleService.OrderNotFoundException.class)
+    public ResponseEntity<byte[]> notFound() { return error(HttpStatus.NOT_FOUND, "订单不存在"); }
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<byte[]> malformedRequest() { return error(HttpStatus.BAD_REQUEST, "请求格式无效"); }
+
+    private static boolean validKey(String key) {
+        return key != null && !key.isBlank() && key.length() <= 191 && key.chars().noneMatch(Character::isISOControl);
+    }
+
+    private static ResponseEntity<byte[]> error(HttpStatus status, String message) {
+        return ResponseEntity.status(status).contentType(JSON_UTF8)
+            .body(("{\"error\":\"" + message + "\"}").getBytes(StandardCharsets.UTF_8));
     }
 
     public record HandoffRequest(String note) {}

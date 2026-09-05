@@ -128,22 +128,77 @@ class DeadlineRaceIT extends SharedContainers {
     }
 
     @Test
-    void trialCloseAndUserTransitionRaceCannotReopenOrDoublePublish() throws Exception {
+    void trialCloseAndUserDisputeRaceHasOneLegalWinnerAndNoSettlement() throws Exception {
         UUID seller = user(); UUID buyer = user(); UUID listing = listing(seller, 0);
         UUID order = order(buyer, seller, listing, "AFTERSALE_WINDOW", "CURRENT_TIMESTAMP(6)", "DATE_SUB(CURRENT_TIMESTAMP(6), INTERVAL 1 SECOND)");
+        jdbc.update("UPDATE trade_order SET t0=DATE_SUB(CURRENT_TIMESTAMP(6), INTERVAL 1 HOUR),acceptance_deadline=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 1 HOUR) WHERE id=?", order.toString());
         deadline(order, "TRIAL", "CURRENT_TIMESTAMP(6)");
         var gate = new CountDownLatch(1);
         var pool = Executors.newFixedThreadPool(2);
         try {
             var close = pool.submit(() -> { gate.await(); return scheduler.runOnce(10); });
-            var userTransition = pool.submit(() -> { gate.await(); return jdbc.update("UPDATE trade_order SET status='DISPUTED',version=version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='AFTERSALE_WINDOW' AND trial_deadline<=CURRENT_TIMESTAMP(6)", order.toString()); });
+            var userTransition = pool.submit(() -> { gate.await(); return lifecycle.openDispute(order, buyer, "FUNCTIONAL_DEFECT"); });
             gate.countDown();
-            close.get(30, TimeUnit.SECONDS); userTransition.get(30, TimeUnit.SECONDS);
+            int deadlineProcessed = close.get(30, TimeUnit.SECONDS);
+            boolean userWon = userTransition.get(30, TimeUnit.SECONDS);
             String status = jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString());
-            assertThat(status).isIn("SETTLED", "DISPUTED");
-            assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isNotEqualTo("AFTERSALE_WINDOW");
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='ORDER_SETTLED' AND aggregate_id=?", Integer.class, order.toString())).isEqualTo("SETTLED".equals(status) ? 1 : 0);
+            assertThat(status).isIn("AFTERSALE_WINDOW", "DISPUTED");
+            assertThat(userWon).isEqualTo("DISPUTED".equals(status));
+            assertThat(deadlineProcessed).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='ORDER_TRIAL_ELAPSED' AND aggregate_id=?", Integer.class, order.toString())).isEqualTo("AFTERSALE_WINDOW".equals(status) ? 1 : 0);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='ORDER_SETTLED' AND aggregate_id=?", Integer.class, order.toString())).isZero();
         } finally { pool.shutdownNow(); }
+    }
+
+    @Test
+    void handoffBeforeDeadlineWritesHandoffRecordReceiptDeadlineTransitionAndOutbox() {
+        UUID seller = user(); UUID buyer = user(); UUID listing = listing(seller, 0);
+        UUID order = order(buyer, seller, listing, "AWAITING_HANDOFF", "DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 48 HOUR)", "CURRENT_TIMESTAMP(6)");
+
+        assertThat(lifecycle.handoff(order, seller, "按时交付")).isTrue();
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("AWAITING_RECEIPT");
+        assertThat(jdbc.queryForObject("SELECT receipt_deadline > CURRENT_TIMESTAMP(6) FROM trade_order WHERE id=?", Boolean.class, order.toString())).isTrue();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM handoff_record WHERE order_id=?", Integer.class, order.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM order_transition WHERE order_id=? AND reason='SELLER_HANDOFF'", Integer.class, order.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='ORDER_HANDOFF_CONFIRMED' AND aggregate_id=?", Integer.class, order.toString())).isEqualTo(1);
+    }
+
+    @Test
+    void receiptAtFortyEightHourBoundaryIsRejectedButBeforeBoundarySucceeds() {
+        UUID seller = user(); UUID buyer = user(); UUID listing = listing(seller, 0);
+        UUID before = order(buyer, seller, listing, "AWAITING_RECEIPT", "CURRENT_TIMESTAMP(6)", "CURRENT_TIMESTAMP(6)");
+        jdbc.update("UPDATE trade_order SET receipt_deadline=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 1 HOUR) WHERE id=?", before.toString());
+        assertThat(lifecycle.confirmReceipt(before, buyer)).isTrue();
+
+        UUID at = order(buyer, seller, listing, "AWAITING_RECEIPT", "CURRENT_TIMESTAMP(6)", "CURRENT_TIMESTAMP(6)");
+        jdbc.update("UPDATE trade_order SET receipt_deadline=CURRENT_TIMESTAMP(6) WHERE id=?", at.toString());
+        assertThat(lifecycle.confirmReceipt(at, buyer)).isFalse();
+        assertThat(jdbc.queryForObject("SELECT t0 IS NULL FROM trade_order WHERE id=?", Boolean.class, at.toString())).isTrue();
+    }
+
+    @Test
+    void receiptSwitchesToSeventyTwoHourAcceptanceAndSevenDayTrialUsingDatabaseTime() {
+        UUID seller = user(); UUID buyer = user(); UUID listing = listing(seller, 0);
+        UUID order = order(buyer, seller, listing, "AWAITING_RECEIPT", "CURRENT_TIMESTAMP(6)", "CURRENT_TIMESTAMP(6)");
+        jdbc.update("UPDATE trade_order SET receipt_deadline=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 1 HOUR) WHERE id=?", order.toString());
+        assertThat(lifecycle.confirmReceipt(order, buyer)).isTrue();
+        assertThat(jdbc.queryForObject("SELECT TIMESTAMPDIFF(SECOND,t0,acceptance_deadline) FROM trade_order WHERE id=?", Long.class, order.toString())).isEqualTo(72L * 3600L);
+        assertThat(jdbc.queryForObject("SELECT TIMESTAMPDIFF(SECOND,t0,trial_deadline) FROM trade_order WHERE id=?", Long.class, order.toString())).isEqualTo(7L * 24L * 3600L);
+    }
+
+    @Test
+    void trialDeadlineLeavesOrderAwaitingSettlementAndEmitsOneTask11Signal() {
+        UUID seller = user(); UUID buyer = user(); UUID listing = listing(seller, 0);
+        UUID order = order(buyer, seller, listing, "AFTERSALE_WINDOW", "CURRENT_TIMESTAMP(6)", "DATE_SUB(CURRENT_TIMESTAMP(6), INTERVAL 1 SECOND)");
+        jdbc.update("UPDATE trade_order SET t0=DATE_SUB(CURRENT_TIMESTAMP(6), INTERVAL 8 DAY),acceptance_deadline=DATE_SUB(CURRENT_TIMESTAMP(6), INTERVAL 5 DAY) WHERE id=?", order.toString());
+        deadline(order, "TRIAL", "CURRENT_TIMESTAMP(6)");
+
+        assertThat(scheduler.runOnce(10)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("AFTERSALE_WINDOW");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='ORDER_TRIAL_ELAPSED' AND aggregate_id=?", Integer.class, order.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='ORDER_SETTLED' AND aggregate_id=?", Integer.class, order.toString())).isZero();
+        assertThat(scheduler.runOnce(10)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='ORDER_TRIAL_ELAPSED' AND aggregate_id=?", Integer.class, order.toString())).isEqualTo(1);
     }
 
     @Test

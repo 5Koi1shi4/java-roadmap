@@ -108,7 +108,7 @@ public class JdbcPaymentRepository {
     }
 
     public boolean markPaymentSucceededByReference(String provider, String reference, long amountFen) {
-        return jdbc.update("UPDATE payment_order SET paid_amount_fen=amount_fen,status='SUCCEEDED',updated_at=CURRENT_TIMESTAMP(6) WHERE provider=? AND provider_reference=? AND status IN ('PENDING','CREATED') AND amount_fen=?",
+        return jdbc.update("UPDATE payment_order SET paid_amount_fen=amount_fen,status='SUCCEEDED',reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE provider=? AND provider_reference=? AND status IN ('PENDING','CREATED','UNKNOWN') AND amount_fen=?",
             provider, reference, amountFen) == 1;
     }
 
@@ -309,10 +309,10 @@ public class JdbcPaymentRepository {
         int changed = jdbc.update("""
             INSERT INTO refund_order (id,order_id,payment_order_id,provider,idempotency_key,source_type,source_id,
                 paid_amount_fen,amount_fen,reserved_refund_fen,request_hash,status,created_at,updated_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,'REQUESTED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
+            VALUES (?,?,?,?,?,?,?,?,?,0,?,'REQUESTED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))
             ON DUPLICATE KEY UPDATE id=id
             """, id.toString(), orderId.toString(), paymentId.toString(), provider, idempotencyKey,
-            sourceType, sourceId == null ? null : sourceId.toString(), paidAmountFen, amountFen, amountFen, requestHash);
+            sourceType, sourceId == null ? null : sourceId.toString(), paidAmountFen, amountFen, requestHash);
         return new RefundInsert(id, changed == 1);
     }
 
@@ -346,6 +346,43 @@ public class JdbcPaymentRepository {
         return jdbc.query("SELECT id,order_id,payment_order_id,provider,idempotency_key,amount_fen,provider_reference,status,request_hash,response_utf8 FROM refund_order WHERE order_id=? AND idempotency_key=? FOR UPDATE",
             rs -> rs.next() ? new RefundRecord(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")), UUID.fromString(rs.getString("payment_order_id")), rs.getString("provider"), rs.getString("idempotency_key"), rs.getLong("amount_fen"), rs.getString("provider_reference"), rs.getString("status"), rs.getBytes("request_hash"), rs.getBytes("response_utf8")) : null,
             orderId.toString(), idempotencyKey);
+    }
+
+    /**
+     * 支付超时后 provider 迟到成功的安全收敛：保留成功事实，但取消订单只能进入补偿退款，
+     * 不能再次推进交付。订单行锁保证退款额度和 Outbox 只创建一次。
+     */
+    public UUID recordLatePaymentSuccessAfterCancellation(UUID paymentId, UUID orderId, String providerReference,
+                                                           long amountFen, String owner, String token) {
+        String orderStatus = jdbc.query("SELECT status FROM trade_order WHERE id=? FOR UPDATE",
+            rs -> rs.next() ? rs.getString(1) : null, orderId.toString());
+        if (!"CANCELLED".equals(orderStatus)) return null;
+        String key = "late-payment-" + paymentId;
+        RefundRecord existing = findRefundByKey(orderId, key);
+        if (existing != null) return existing.id();
+        PaymentRecord current = findPayment(paymentId);
+        String provider = current == null || current.provider() == null ? "unknown" : current.provider();
+        int paymentChanged = jdbc.update("UPDATE payment_order SET provider_reference=?,paid_amount_fen=amount_fen,status='SUCCEEDED',"
+                + "reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) "
+                + "WHERE id=? AND order_id=? AND amount_fen=? AND (provider_reference=? OR provider_reference IS NULL) "
+                + "AND ((status='SUCCEEDED' AND reconcile_owner IS NULL) OR (status IN ('PENDING','UNKNOWN','SUCCEEDED') AND reconcile_owner=? AND reconcile_token=? AND reconcile_lease_until>CURRENT_TIMESTAMP(6)))",
+            providerReference, paymentId.toString(), orderId.toString(), amountFen, providerReference, owner, token);
+        if (paymentChanged == 0) {
+            PaymentRecord payment = findPayment(paymentId);
+            if (payment == null || !"SUCCEEDED".equals(payment.status())) throw new IllegalStateException("迟到支付成功事实未能落库");
+        }
+        if (!reserveRefund(paymentId, amountFen)) throw new IllegalStateException("迟到支付补偿退款额度预占失败");
+        RefundInsert refund = insertRefund(orderId, paymentId, provider,
+            key, "LATE_PAYMENT", null, amountFen, amountFen);
+        UUID refundId = refund.id();
+        String payload = "{\"refundId\":\"" + refundId + "\",\"orderId\":\"" + orderId
+            + "\",\"paymentId\":\"" + paymentId + "\",\"amountFen\":" + amountFen + ",\"reason\":\"LATE_PAYMENT\"}";
+        UUID eventId = UUID.nameUUIDFromBytes(("late-payment-refund:" + refundId).getBytes(StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO integration_outbox (id,event_id,event_type,aggregate_id,aggregate_version,schema_version,occurred_at,payload,status,attempt_count,available_at,created_at) "
+                + "VALUES (?,?,?,?,?,1,CURRENT_TIMESTAMP(6),CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) "
+                + "ON DUPLICATE KEY UPDATE id=id",
+            eventId.toString(), eventId.toString(), "REFUND_REQUESTED", refundId.toString(), 1L, payload);
+        return refundId;
     }
 
     public void saveRefundRequest(UUID refundId, byte[] requestHash) {

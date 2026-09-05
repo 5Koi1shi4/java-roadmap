@@ -403,9 +403,68 @@ class PaymentFlowIT extends SharedContainers {
 
             PaymentService.PaymentResult retry = payments.createPayment(order, key, "{}".getBytes(StandardCharsets.UTF_8));
             assertThat(retry.status()).isEqualTo("UNKNOWN");
-            reconciliation.runOnce(20);
+            reconciliation.runOne(UUID.fromString(paymentId));
             assertThat(provider.paymentCreateRequestCountForTest()).isEqualTo(1);
             assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, paymentId)).isEqualTo("SUCCEEDED");
+        } finally {
+            provider.releaseBlockedPaymentCreateForTest();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void lateProviderSuccessAfterPaymentTimeoutIsRecordedAndCompensatedExactlyOnce() {
+        UUID order = pendingOrder();
+        UUID payment = UUID.randomUUID();
+        String owner = "late-owner-" + payment;
+        String token = "late-token-" + payment;
+        String reference = "late-reference-" + payment;
+        jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,status,reconcile_owner,reconcile_token,reconcile_lease_until,created_at,updated_at) VALUES (?,?,?,?,100,'UNKNOWN',?,?,DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 30 SECOND),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            payment.toString(), order.toString(), "simulated", "late-payment-" + payment, owner, token);
+        jdbc.update("UPDATE trade_order SET status='CANCELLED',version=version+1 WHERE id=?", order.toString());
+
+        UUID refund = repository.recordLatePaymentSuccessAfterCancellation(payment, order, reference, 100, owner, token);
+        assertThat(refund).isNotNull();
+        assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, payment.toString())).isEqualTo("SUCCEEDED");
+        assertThat(jdbc.queryForObject("SELECT paid_amount_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(100L);
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("CANCELLED");
+        assertThat(jdbc.queryForObject("SELECT status FROM refund_order WHERE id=?", String.class, refund.toString())).isEqualTo("REQUESTED");
+        assertThat(jdbc.queryForObject("SELECT reserved_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(100L);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='REFUND_REQUESTED' AND aggregate_id=?", Integer.class, refund.toString())).isEqualTo(1);
+        assertThat(repository.recordLatePaymentSuccessAfterCancellation(payment, order, reference, 100, owner, token)).isEqualTo(refund);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='REFUND_REQUESTED' AND aggregate_id=?", Integer.class, refund.toString())).isEqualTo(1);
+    }
+
+    @Test
+    void lateProviderSuccessThroughReconciliationStaysCancelledAndCompensatesOnce() throws Exception {
+        provider.resetRequestCountersForTest();
+        UUID order = pendingOrder();
+        String key = "late-reconcile-" + order;
+        provider.blockNextPaymentCreateForTest();
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            var request = executor.submit(() -> payments.createPayment(order, key, "{}".getBytes(StandardCharsets.UTF_8)));
+            assertThat(provider.awaitPaymentCreateEnteredForTest(10, TimeUnit.SECONDS)).isTrue();
+            provider.releaseBlockedPaymentCreateForTest();
+            PaymentService.PaymentResult unknown = request.get(20, TimeUnit.SECONDS);
+            assertThat(unknown.status()).isEqualTo("UNKNOWN");
+            String reference = "sim-pay-" + UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8));
+            client().send(HttpRequest.newBuilder(java.net.URI.create("http://localhost:" + port + "/simulated-provider/payments/" + reference + "/SUCCEEDED"))
+                .POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofByteArray());
+            String paymentId = unknown.paymentId().toString();
+            String listingId = jdbc.queryForObject("SELECT listing_id FROM trade_order WHERE id=?", String.class, order.toString());
+            jdbc.update("UPDATE trade_order SET status='CANCELLED',version=version+1 WHERE id=?", order.toString());
+            jdbc.update("UPDATE payment_order SET next_reconcile_at=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),reconcile_lease_until=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE id=?", paymentId);
+
+            assertThat(reconciliation.runOne(unknown.paymentId())).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("CANCELLED");
+            assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, paymentId)).isEqualTo("SUCCEEDED");
+            assertThat(jdbc.queryForObject("SELECT available_quantity FROM listing WHERE id=?", Integer.class, listingId)).isZero();
+            String refundId = jdbc.queryForObject("SELECT id FROM refund_order WHERE order_id=?", String.class, order.toString());
+            assertThat(jdbc.queryForObject("SELECT status FROM refund_order WHERE id=?", String.class, refundId)).isEqualTo("REQUESTED");
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='REFUND_REQUESTED' AND aggregate_id=?", Integer.class, refundId)).isEqualTo(1);
+            assertThat(reconciliation.runOne(unknown.paymentId())).isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, order.toString())).isEqualTo(1);
         } finally {
             provider.releaseBlockedPaymentCreateForTest();
             executor.shutdownNow();

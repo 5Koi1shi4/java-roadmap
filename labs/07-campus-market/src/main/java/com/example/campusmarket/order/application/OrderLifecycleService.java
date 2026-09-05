@@ -1,6 +1,7 @@
 package com.example.campusmarket.order.application;
 
 import com.example.campusmarket.order.domain.OrderStatus;
+import com.example.campusmarket.order.domain.OrderStatusTransitions;
 import com.example.campusmarket.catalog.application.InventoryPort;
 import com.example.campusmarket.order.infrastructure.JdbcOrderLifecycleRepository;
 import org.springframework.context.annotation.Profile;
@@ -9,7 +10,6 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.EnumSet;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
@@ -37,7 +37,9 @@ public final class OrderLifecycleService {
         return Boolean.TRUE.equals(transactions.execute(status -> {
             var row = repository.lock(orderId);
             Instant now = repository.databaseNow();
-            if (row == null || !row.sellerId().equals(sellerId) || !isHandoffAllowed(row.status(), now, row.handoffDeadline())) return false;
+            if (row == null) throw new OrderNotFoundException();
+            if (!row.sellerId().equals(sellerId)) throw new OrderNotFoundException();
+            if (!isHandoffAllowed(row.status(), now, row.handoffDeadline())) return false;
             return repository.markHandoff(orderId, sellerId, row.version(), now, note, now.plus(Duration.ofHours(48))) == 1;
         }));
     }
@@ -46,10 +48,25 @@ public final class OrderLifecycleService {
     public boolean confirmReceipt(java.util.UUID orderId, java.util.UUID buyerId) {
         return Boolean.TRUE.equals(transactions.execute(status -> {
             var row = repository.lock(orderId);
-            if (row == null || !row.buyerId().equals(buyerId) || !isReceiptConfirmationAllowed(row.status())) return false;
+            if (row == null) throw new OrderNotFoundException();
+            if (!row.buyerId().equals(buyerId)) throw new OrderNotFoundException();
+            if (!isReceiptConfirmationAllowed(row.status())) return false;
             Instant now = repository.databaseNow();
             if (row.receiptDeadline() == null || !now.isBefore(row.receiptDeadline())) return false;
             return repository.confirmReceipt(orderId, buyerId, row.version(), now, now.plus(Duration.ofHours(72)), now.plus(Duration.ofDays(7))) == 1;
+        }));
+    }
+
+    /** 买家在试用窗口内发起争议；仅记录生命周期边界，争议处理由 Task10 负责。 */
+    public boolean openDispute(java.util.UUID orderId, java.util.UUID buyerId, String reason) {
+        return Boolean.TRUE.equals(transactions.execute(status -> {
+            var row = repository.lock(orderId);
+            if (row == null) throw new OrderNotFoundException();
+            if (!row.buyerId().equals(buyerId)) throw new OrderNotFoundException();
+            Instant now = repository.databaseNow();
+            if (row.t0() == null || !isReasonAllowed(reason, row.t0(), now)) return false;
+            return repository.transition(orderId, row.status(), OrderStatus.DISPUTED, row.version(), now,
+                null, false, null, null, null, "BUYER_DISPUTE") == 1;
         }));
     }
 
@@ -86,8 +103,7 @@ public final class OrderLifecycleService {
     public boolean closeTrial(java.util.UUID orderId, JdbcOrderLifecycleRepository.DeadlineClaim claim) {
         return runClaim(claim, orderId, (row, now) -> {
             if (row.status() != OrderStatus.AFTERSALE_WINDOW || row.trialDeadline() == null || now.isBefore(row.trialDeadline())) return false;
-            return repository.transition(orderId, row.status(), OrderStatus.SETTLED, row.version(), now,
-                "trial_deadline", false, null, null, null, "TRIAL_CLOSED") == 1;
+            return repository.markTrialElapsed(orderId, row.version(), now) == 1;
         });
     }
 
@@ -112,16 +128,7 @@ public final class OrderLifecycleService {
     private interface DeadlineAction { boolean apply(JdbcOrderLifecycleRepository.OrderRow row, Instant now); }
 
     public static boolean isAllowedTransition(OrderStatus from, OrderStatus to) {
-        if (from == null || to == null) return false;
-        return switch (from) {
-            case PENDING_PAYMENT -> EnumSet.of(OrderStatus.AWAITING_HANDOFF, OrderStatus.CANCELLED).contains(to);
-            case AWAITING_HANDOFF -> EnumSet.of(OrderStatus.AWAITING_RECEIPT, OrderStatus.REFUNDING_CANCEL).contains(to);
-            case AWAITING_RECEIPT -> EnumSet.of(OrderStatus.AFTERSALE_WINDOW, OrderStatus.DISPUTED).contains(to);
-            case AFTERSALE_WINDOW -> EnumSet.of(OrderStatus.DISPUTED, OrderStatus.SETTLED).contains(to);
-            case DISPUTED -> EnumSet.of(OrderStatus.AFTERSALE_WINDOW, OrderStatus.REFUNDED).contains(to);
-            case REFUNDING_CANCEL -> to == OrderStatus.REFUNDED;
-            case CANCELLED, REFUNDED, SETTLED -> false;
-        };
+        return OrderStatusTransitions.isAllowed(from, to);
     }
 
     public static boolean isReceiptConfirmationAllowed(OrderStatus status) {
@@ -145,4 +152,6 @@ public final class OrderLifecycleService {
     public static boolean isHandoffTimeoutDue(OrderStatus status, Instant databaseNow, Instant deadline) {
         return status == OrderStatus.AWAITING_HANDOFF && databaseNow != null && deadline != null && !databaseNow.isBefore(deadline);
     }
+
+    public static class OrderNotFoundException extends RuntimeException { }
 }

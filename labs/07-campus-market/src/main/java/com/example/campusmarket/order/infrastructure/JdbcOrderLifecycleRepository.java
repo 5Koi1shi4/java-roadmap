@@ -1,11 +1,13 @@
 package com.example.campusmarket.order.infrastructure;
 
 import com.example.campusmarket.order.domain.OrderStatus;
+import com.example.campusmarket.order.domain.OrderStatusTransitions;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Propagation;
 
 import java.sql.Timestamp;
 import java.time.Duration;
@@ -51,6 +53,15 @@ public class JdbcOrderLifecycleRepository {
                           Instant databaseNow, String deadlineColumn, boolean requireBeforeDeadline,
                           Instant newT0, Instant newAcceptanceDeadline, Instant newTrialDeadline,
                           String reason) {
+        return transition(orderId, from, to, expectedVersion, databaseNow, deadlineColumn, requireBeforeDeadline,
+            newT0, newAcceptanceDeadline, newTrialDeadline, reason, null);
+    }
+
+    public int transition(UUID orderId, OrderStatus from, OrderStatus to, long expectedVersion,
+                          Instant databaseNow, String deadlineColumn, boolean requireBeforeDeadline,
+                          Instant newT0, Instant newAcceptanceDeadline, Instant newTrialDeadline,
+                          String reason, UUID actorId) {
+        if (!OrderStatusTransitions.isAllowed(from, to)) throw new IllegalArgumentException("非法订单状态迁移");
         if (!OrderStatusSafe.isValidColumn(deadlineColumn)) throw new IllegalArgumentException("截止时间列无效");
         String deadlinePredicate = deadlineColumn == null ? "" : " AND " + deadlineColumn + (requireBeforeDeadline ? " > ?" : " <= ?");
         String sql = "UPDATE trade_order SET status=?,version=version+1,updated_at=?"
@@ -68,7 +79,7 @@ public class JdbcOrderLifecycleRepository {
         int changed = jdbc.update(sql, args.toArray());
         if (changed == 1) {
             long newVersion = expectedVersion + 1;
-            insertTransition(orderId, from, to, reason, databaseNow);
+            insertTransition(orderId, from, to, reason, databaseNow, actorId);
             insertOutbox(orderId, to, newVersion, databaseNow, reason);
         }
         return changed;
@@ -76,6 +87,11 @@ public class JdbcOrderLifecycleRepository {
 
     public int markHandoff(UUID orderId, UUID sellerId, long expectedVersion, Instant databaseNow,
                            String note, Instant receiptDeadline) {
+        return markHandoff(orderId, sellerId, expectedVersion, databaseNow, note, receiptDeadline, sellerId);
+    }
+
+    public int markHandoff(UUID orderId, UUID sellerId, long expectedVersion, Instant databaseNow,
+                           String note, Instant receiptDeadline, UUID actorId) {
         int changed = jdbc.update("UPDATE trade_order SET status='AWAITING_RECEIPT',version=version+1,receipt_deadline=?,updated_at=? "
                 + "WHERE id=? AND seller_id=? AND status='AWAITING_HANDOFF' AND version=? AND handoff_deadline > ?",
             timestamp(receiptDeadline), timestamp(databaseNow), orderId.toString(), sellerId.toString(), expectedVersion,
@@ -86,7 +102,7 @@ public class JdbcOrderLifecycleRepository {
                 UUID.randomUUID().toString(), orderId.toString(), sellerId.toString(), note,
                 timestamp(databaseNow), timestamp(databaseNow));
             insertDeadline(orderId, "RECEIPT", receiptDeadline);
-            insertTransition(orderId, OrderStatus.AWAITING_HANDOFF, OrderStatus.AWAITING_RECEIPT, "SELLER_HANDOFF", databaseNow);
+            insertTransition(orderId, OrderStatus.AWAITING_HANDOFF, OrderStatus.AWAITING_RECEIPT, "SELLER_HANDOFF", databaseNow, actorId);
             insertOutbox(orderId, OrderStatus.AWAITING_RECEIPT, v, databaseNow, "SELLER_HANDOFF");
         }
         return changed;
@@ -94,14 +110,19 @@ public class JdbcOrderLifecycleRepository {
 
     public int confirmReceipt(UUID orderId, UUID buyerId, long expectedVersion, Instant databaseNow,
                               Instant acceptanceDeadline, Instant trialDeadline) {
+        return confirmReceipt(orderId, buyerId, expectedVersion, databaseNow, acceptanceDeadline, trialDeadline, buyerId);
+    }
+
+    public int confirmReceipt(UUID orderId, UUID buyerId, long expectedVersion, Instant databaseNow,
+                              Instant acceptanceDeadline, Instant trialDeadline, UUID actorId) {
         int changed = jdbc.update("UPDATE trade_order SET status='AFTERSALE_WINDOW',version=version+1,t0=?,acceptance_deadline=?,trial_deadline=?,updated_at=? "
-                + "WHERE id=? AND buyer_id=? AND status='AWAITING_RECEIPT' AND version=? AND receipt_deadline > ?",
+                + "WHERE id=? AND buyer_id=? AND status='AWAITING_RECEIPT' AND version=? AND receipt_deadline > ? AND t0 IS NULL AND acceptance_deadline IS NULL AND trial_deadline IS NULL",
             timestamp(databaseNow), timestamp(acceptanceDeadline), timestamp(trialDeadline), timestamp(databaseNow),
             orderId.toString(), buyerId.toString(), expectedVersion, timestamp(databaseNow));
         if (changed == 1) {
             long v = expectedVersion + 1;
             insertDeadline(orderId, "TRIAL", trialDeadline);
-            insertTransition(orderId, OrderStatus.AWAITING_RECEIPT, OrderStatus.AFTERSALE_WINDOW, "BUYER_RECEIPT", databaseNow);
+            insertTransition(orderId, OrderStatus.AWAITING_RECEIPT, OrderStatus.AFTERSALE_WINDOW, "BUYER_RECEIPT", databaseNow, actorId);
             insertOutbox(orderId, OrderStatus.AFTERSALE_WINDOW, v, databaseNow, "BUYER_RECEIPT");
         }
         return changed;
@@ -110,7 +131,7 @@ public class JdbcOrderLifecycleRepository {
     public int confirmReceiptAutomatically(UUID orderId, long expectedVersion, Instant databaseNow,
                                            Instant acceptanceDeadline, Instant trialDeadline) {
         int changed = jdbc.update("UPDATE trade_order SET status='AFTERSALE_WINDOW',version=version+1,t0=?,acceptance_deadline=?,trial_deadline=?,updated_at=? "
-                + "WHERE id=? AND status='AWAITING_RECEIPT' AND version=? AND receipt_deadline <= ?",
+                + "WHERE id=? AND status='AWAITING_RECEIPT' AND version=? AND receipt_deadline <= ? AND t0 IS NULL AND acceptance_deadline IS NULL AND trial_deadline IS NULL",
             timestamp(databaseNow), timestamp(acceptanceDeadline), timestamp(trialDeadline), timestamp(databaseNow),
             orderId.toString(), expectedVersion, timestamp(databaseNow));
         if (changed == 1) {
@@ -136,7 +157,8 @@ public class JdbcOrderLifecycleRepository {
                 + "WHERE (status='NEW' AND due_at <= ?) OR (status='PROCESSING' AND lease_until <= ?) "
                 + "ORDER BY due_at,id LIMIT ? FOR UPDATE SKIP LOCKED",
             (rs, row) -> new DeadlineClaim(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),
-                rs.getString("deadline_type"), rs.getTimestamp("due_at").toInstant(), owner, null, null),
+                rs.getString("deadline_type"), rs.getTimestamp("due_at").toInstant(), owner, null, null,
+                rs.getInt("attempt_count")),
             timestamp(now), timestamp(now), limit);
         List<DeadlineClaim> claimed = new ArrayList<>();
         long micros = Math.max(1, lease.toNanos() / 1_000L);
@@ -148,6 +170,28 @@ public class JdbcOrderLifecycleRepository {
             if (changed == 1) claimed.add(candidate.withToken(token, now.plus(lease)));
         }
         return List.copyOf(claimed);
+    }
+
+    /** 按订单定向领取，避免旧 due 行占满批次而使指定订单饥饿。 */
+    @Transactional
+    public DeadlineClaim claimOne(UUID orderId, String owner, Duration lease) {
+        if (orderId == null || owner == null || owner.isBlank() || lease == null || lease.isNegative() || lease.isZero())
+            throw new IllegalArgumentException("截止任务定向领取参数无效");
+        Instant now = databaseNow();
+        DeadlineClaim candidate = jdbc.query("SELECT id,order_id,deadline_type,due_at,attempt_count FROM order_deadline_claim "
+                + "WHERE order_id=? AND ((status='NEW' AND due_at <= ?) OR (status='PROCESSING' AND lease_until <= ?)) "
+                + "ORDER BY due_at,id LIMIT 1 FOR UPDATE",
+            rs -> rs.next() ? new DeadlineClaim(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),
+                rs.getString("deadline_type"), rs.getTimestamp("due_at").toInstant(), owner, null, null,
+                rs.getInt("attempt_count")) : null,
+            orderId.toString(), timestamp(now), timestamp(now));
+        if (candidate == null) return null;
+        String token = UUID.randomUUID().toString();
+        long micros = Math.max(1, lease.toNanos() / 1_000L);
+        int changed = jdbc.update("UPDATE order_deadline_claim SET status='PROCESSING',owner_id=?,claim_token=?,lease_until=TIMESTAMPADD(MICROSECOND, ?, ?),attempt_count=attempt_count+1 "
+                + "WHERE id=? AND ((status='NEW' AND due_at <= ?) OR (status='PROCESSING' AND lease_until <= ?))",
+            owner, token, micros, timestamp(now), candidate.id().toString(), timestamp(now), timestamp(now));
+        return changed == 1 ? candidate.withToken(token, now.plus(lease)) : null;
     }
 
     public int completeClaim(DeadlineClaim claim, Instant now) {
@@ -170,9 +214,49 @@ public class JdbcOrderLifecycleRepository {
             claim.id().toString(), claim.owner(), claim.token());
     }
 
+    /** 失败后短退避重试；第三次失败原子进入 FAILED 并记录人工告警事实。 */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public int retryOrFailClaim(DeadlineClaim claim, String failureMessage) {
+        Objects.requireNonNull(claim, "截止领取不能为空");
+        String message = failureMessage == null || failureMessage.isBlank() ? "deadline action failed" : failureMessage;
+        Instant now = databaseNow();
+        if (claim.attemptCount() >= 3) {
+            String payload = "{\"orderId\":\"" + claim.orderId() + "\",\"deadlineType\":\"" + claim.type()
+                + "\",\"claimId\":\"" + claim.id() + "\",\"error\":\"" + jsonEscape(message) + "\"}";
+            int fact = jdbc.update("INSERT INTO manual_failure (id,source_type,source_id,consumer_name,failure_class,payload,status,created_at) "
+                    + "SELECT ?, 'ORDER_DEADLINE', ?, 'deadline-scheduler', 'EXHAUSTED', CAST(? AS JSON), 'NEW', ? FROM order_deadline_claim "
+                    + "WHERE id=? AND status='PROCESSING' AND owner_id=? AND claim_token=? AND attempt_count>=3 "
+                    + "ON DUPLICATE KEY UPDATE id=id",
+                UUID.randomUUID().toString(), claim.id().toString(), payload, timestamp(now), claim.id().toString(), claim.owner(), claim.token());
+            if (fact == 0) {
+                Boolean existing = jdbc.query("SELECT id FROM manual_failure WHERE source_type='ORDER_DEADLINE' AND source_id=? AND consumer_name='deadline-scheduler'",
+                    (org.springframework.jdbc.core.ResultSetExtractor<Boolean>) rs -> rs.next(), claim.id().toString());
+                if (!Boolean.TRUE.equals(existing)) return 0;
+            }
+            return jdbc.update("UPDATE order_deadline_claim SET status='FAILED',owner_id=NULL,claim_token=NULL,lease_until=NULL,completed_at=? WHERE id=? AND status='PROCESSING' AND owner_id=? AND claim_token=? AND attempt_count>=3",
+                timestamp(now), claim.id().toString(), claim.owner(), claim.token());
+        }
+        long delayMicros = 250_000L * (1L << Math.max(0, claim.attemptCount() - 1));
+        return jdbc.update("UPDATE order_deadline_claim SET status='NEW',owner_id=NULL,claim_token=NULL,lease_until=NULL,due_at=TIMESTAMPADD(MICROSECOND,?,?) WHERE id=? AND status='PROCESSING' AND owner_id=? AND claim_token=?",
+            delayMicros, timestamp(now), claim.id().toString(), claim.owner(), claim.token());
+    }
+
+    public int markTrialElapsed(UUID orderId, long expectedVersion, Instant databaseNow) {
+        int changed = jdbc.update("UPDATE trade_order SET version=version+1,updated_at=? WHERE id=? AND status='AFTERSALE_WINDOW' AND version=? AND trial_deadline<=? AND t0 IS NOT NULL",
+            timestamp(databaseNow), orderId.toString(), expectedVersion, timestamp(databaseNow));
+        if (changed == 1) {
+            insertOutbox(orderId, OrderStatus.AFTERSALE_WINDOW, expectedVersion + 1, databaseNow, "TRIAL_ELAPSED");
+        }
+        return changed;
+    }
+
     private void insertTransition(UUID orderId, OrderStatus from, OrderStatus to, String reason, Instant at) {
-        jdbc.update("INSERT INTO order_transition (id,order_id,from_status,to_status,reason,occurred_at) VALUES (?,?,?,?,?,?)",
-            UUID.randomUUID().toString(), orderId.toString(), from.name(), to.name(), reason, timestamp(at));
+        insertTransition(orderId, from, to, reason, at, null);
+    }
+
+    private void insertTransition(UUID orderId, OrderStatus from, OrderStatus to, String reason, Instant at, UUID actorId) {
+        jdbc.update("INSERT INTO order_transition (id,order_id,from_status,to_status,actor_id,reason,occurred_at) VALUES (?,?,?,?,?,?,?)",
+            UUID.randomUUID().toString(), orderId.toString(), from.name(), to.name(), actorId == null ? null : actorId.toString(), reason, timestamp(at));
     }
 
     private void insertOutbox(UUID orderId, OrderStatus status, long version, Instant at, String reason) {
@@ -190,10 +274,14 @@ public class JdbcOrderLifecycleRepository {
             case "SELLER_HANDOFF" -> "ORDER_HANDOFF_CONFIRMED";
             case "BUYER_RECEIPT", "AUTO_RECEIPT" -> "ORDER_RECEIPT_CONFIRMED";
             case "HANDOFF_TIMEOUT" -> "ORDER_REFUNDING_CANCEL";
-            case "TRIAL_CLOSED" -> "ORDER_SETTLED";
+            case "TRIAL_ELAPSED" -> "ORDER_TRIAL_ELAPSED";
             case "PAYMENT_TIMEOUT" -> "ORDER_CANCELLED";
             default -> "ORDER_" + status.name();
         };
+    }
+
+    private static String jsonEscape(String value) {
+        return value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r");
     }
 
     private static Instant instant(Timestamp value) { return value == null ? null : value.toInstant(); }
@@ -205,8 +293,14 @@ public class JdbcOrderLifecycleRepository {
                            Instant warrantyDeadline) {}
 
     public record DeadlineClaim(UUID id, UUID orderId, String type, Instant dueAt, String owner, String token,
-                                Instant leaseUntil) {
-        private DeadlineClaim withToken(String value, Instant until) { return new DeadlineClaim(id, orderId, type, dueAt, owner, value, until); }
+                                Instant leaseUntil, int attemptCount) {
+        public DeadlineClaim(UUID id, UUID orderId, String type, Instant dueAt, String owner, String token,
+                             Instant leaseUntil) {
+            this(id, orderId, type, dueAt, owner, token, leaseUntil, 1);
+        }
+        private DeadlineClaim withToken(String value, Instant until) {
+            return new DeadlineClaim(id, orderId, type, dueAt, owner, value, until, attemptCount + 1);
+        }
     }
 
     private static final class OrderStatusSafe {
