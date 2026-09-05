@@ -225,8 +225,9 @@ public class JdbcOrderLifecycleRepository {
                 + "\",\"claimId\":\"" + claim.id() + "\",\"error\":\"" + jsonEscape(message) + "\"}";
             int fact = jdbc.update("INSERT INTO manual_failure (id,source_type,source_id,consumer_name,failure_class,payload,status,created_at) "
                     + "SELECT ?, 'ORDER_DEADLINE', ?, 'deadline-scheduler', 'EXHAUSTED', CAST(? AS JSON), 'NEW', ? FROM order_deadline_claim "
-                    + "WHERE id=? AND status='PROCESSING' AND owner_id=? AND claim_token=? AND attempt_count>=3 "
-                    + "ON DUPLICATE KEY UPDATE id=id",
+                    + "WHERE order_deadline_claim.id=? AND order_deadline_claim.status='PROCESSING' AND order_deadline_claim.owner_id=? "
+                    + "AND order_deadline_claim.claim_token=? AND order_deadline_claim.attempt_count>=3 "
+                    + "ON DUPLICATE KEY UPDATE id=manual_failure.id",
                 UUID.randomUUID().toString(), claim.id().toString(), payload, timestamp(now), claim.id().toString(), claim.owner(), claim.token());
             if (fact == 0) {
                 Boolean existing = jdbc.query("SELECT id FROM manual_failure WHERE source_type='ORDER_DEADLINE' AND source_id=? AND consumer_name='deadline-scheduler'",
