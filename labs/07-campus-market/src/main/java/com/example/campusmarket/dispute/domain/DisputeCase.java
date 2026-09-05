@@ -20,6 +20,7 @@ public final class DisputeCase {
     private final Instant openedAt;
     private Status status;
     private Decision decision;
+    private ReturnProofType returnProofType;
 
     private DisputeCase(UUID id, UUID orderId, UUID buyerId, UUID sellerId, int purchasedQuantity,
                         int disputedQuantity, DisputeReason reason, Instant openedAt) {
@@ -102,6 +103,19 @@ public final class DisputeCase {
     public Status status() { return status; }
     public Decision decision() { return decision; }
     public boolean isResolved() { return status == Status.RESOLVED || status == Status.REJECTED; }
+
+    /** 普通争议硬期限的自动退款门禁；买家自行提交的材料永远不构成可信证明。 */
+    public void recordProof(ReturnProofType proofType) {
+        this.returnProofType = Objects.requireNonNull(proofType, "证明类型不能为空");
+    }
+
+    public boolean mayAutoRefundAt(Instant now) {
+        Objects.requireNonNull(now, "当前时间不能为空");
+        return !now.isBefore(openedAt.plus(Duration.ofDays(14)))
+            && returnProofType != null && returnProofType.isTrusted();
+    }
+
+    public ReturnProofType returnProofType() { return returnProofType; }
 
     public record Decision(DisputeDecision decision, int approvedQuantity) {
         public Decision {

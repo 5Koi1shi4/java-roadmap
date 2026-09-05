@@ -33,9 +33,17 @@ public class JdbcDisputeRepository {
     }
 
     public void insert(DisputeCase file, Instant now) {
-        jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,admin_deadline,decision,approved_quantity,version,opened_at,created_at,updated_at) VALUES (?,?,?,?,?,'OPEN',?,NULL,NULL,NULL,0,?,?,?)",
+        Instant sellerDeadline = now.plus(Duration.ofHours(72));
+        Instant hardDeadline = now.plus(Duration.ofDays(14));
+        jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,admin_deadline,hard_deadline,decision,approved_quantity,version,opened_at,created_at,updated_at) VALUES (?,?,?,?,?,'OPEN',?,NULL,?,NULL,NULL,0,?,?,?)",
             file.id().toString(), file.orderId().toString(), file.buyerId().toString(), file.disputedQuantity(), file.reason().name(),
-            Timestamp.from(now.plus(Duration.ofHours(72))), Timestamp.from(now), Timestamp.from(now), Timestamp.from(now));
+            Timestamp.from(sellerDeadline), Timestamp.from(hardDeadline), Timestamp.from(now), Timestamp.from(now), Timestamp.from(now));
+        jdbc.update("INSERT INTO dispute_deadline_claim (id,dispute_case_id,deadline_type,due_at,status,created_at,updated_at) VALUES (?,?, 'SELLER_RESPONSE',?,'NEW',?,?)",
+            UUID.randomUUID().toString(), file.id().toString(), Timestamp.from(sellerDeadline), Timestamp.from(now), Timestamp.from(now));
+        jdbc.update("INSERT INTO dispute_deadline_claim (id,dispute_case_id,deadline_type,due_at,status,created_at,updated_at) VALUES (?,?, 'ADMIN_SLA',?,'NEW',?,?)",
+            UUID.randomUUID().toString(), file.id().toString(), Timestamp.from(now.plus(Duration.ofDays(7))), Timestamp.from(now), Timestamp.from(now));
+        jdbc.update("INSERT INTO dispute_deadline_claim (id,dispute_case_id,deadline_type,due_at,status,created_at,updated_at) VALUES (?,?, 'HARD_DEADLINE',?,'NEW',?,?)",
+            UUID.randomUUID().toString(), file.id().toString(), Timestamp.from(hardDeadline), Timestamp.from(now), Timestamp.from(now));
     }
 
     public int markDisputed(UUID orderId, UUID actorId, long version, Instant now) {
