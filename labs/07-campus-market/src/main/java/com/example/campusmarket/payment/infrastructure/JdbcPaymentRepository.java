@@ -411,12 +411,6 @@ public class JdbcPaymentRepository {
             && providerReference.equals(current.providerReference()) ? current.id() : null;
     }
 
-    /** 兼容仓储调用方：仅在订单已取消时记录补偿退款。 */
-    public UUID recordLatePaymentSuccessByOrder(UUID orderId, String provider, String providerReference, long amountFen) {
-        UUID paymentId = recordPaymentSuccessByOrder(orderId, provider, providerReference, amountFen);
-        return paymentId == null ? null : recordLatePaymentSuccessAfterCancellation(paymentId, orderId, providerReference, amountFen, null, null);
-    }
-
     public void saveRefundRequest(UUID refundId, byte[] requestHash) {
         jdbc.update("UPDATE refund_order SET request_hash=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=?", requestHash, refundId.toString());
     }
