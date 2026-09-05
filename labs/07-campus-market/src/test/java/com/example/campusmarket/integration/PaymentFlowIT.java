@@ -572,7 +572,9 @@ class PaymentFlowIT extends SharedContainers {
             var reconcile = pool.submit(() -> { gate.await(); return reconciliation.runOne(payment); });
             gate.countDown();
             assertThat(callback.get(20, TimeUnit.SECONDS)).isEqualTo(200);
-            assertThat(reconcile.get(20, TimeUnit.SECONDS)).isIn(0, 1);
+            assertThat(reconcile.get(20, TimeUnit.SECONDS)).isIn(
+                PaymentReconciliationScheduler.ReconciliationResult.NOT_CLAIMED,
+                PaymentReconciliationScheduler.ReconciliationResult.PROCESSED);
         } finally {
             pool.shutdownNow();
         }
