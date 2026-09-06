@@ -41,6 +41,9 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
         var opened = disputes.open(order, buyer, "matrix-open-" + order, 1, "FUNCTIONAL_DEFECT", "matrix".getBytes());
         UUID dispute = opened.disputeId();
         jdbc.update("UPDATE dispute_deadline_claim SET due_at=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE dispute_case_id=? AND deadline_type='SELLER_RESPONSE'", dispute.toString());
+        assertThat(deadlines.runOne(dispute)).isZero();
+        assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, dispute.toString())).isEqualTo("OPEN");
+        jdbc.update("UPDATE dispute_case SET seller_deadline=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE id=?", dispute.toString());
         assertThat(deadlines.runOne(dispute)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, dispute.toString())).isEqualTo("UNDER_REVIEW");
         assertThat(jdbc.queryForObject("SELECT due_at > DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 6 DAY) FROM dispute_deadline_claim WHERE dispute_case_id=? AND deadline_type='ADMIN_SLA'", Boolean.class, dispute.toString())).isTrue();

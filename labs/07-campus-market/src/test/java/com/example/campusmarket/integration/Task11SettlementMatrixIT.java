@@ -15,10 +15,12 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Task11 结算资格矩阵：只使用真实 MySQL，避免启动无关基础设施。 */
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.NONE)
+@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
 @ActiveProfiles("local")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @TestPropertySource(properties = {
+    "server.port=18084",
+    "campus.market.payment.provider-url=http://localhost:18084/simulated-provider",
     "campus.market.search.dispatcher.enabled=false",
     "campus.market.dispute.deadline.enabled=false",
     "campus.market.dispute.return-reconciliation.enabled=false",
