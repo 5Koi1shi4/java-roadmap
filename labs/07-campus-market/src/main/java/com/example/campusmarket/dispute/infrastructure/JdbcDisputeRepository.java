@@ -33,13 +33,50 @@ public class JdbcDisputeRepository {
 
     /** 在调用方已持有订单行锁时复用全仓库统一的活动/保留数量规则。 */
     public int cumulativeReservedQuantity(UUID orderId, UUID excludedCaseId) {
-        String sql = "SELECT COALESCE(SUM(CASE WHEN status IN ('OPEN','SELLER_RESPONDED','UNDER_REVIEW','ESCALATED') "
-            + "THEN disputed_quantity WHEN status='RESOLVED' THEN COALESCE(approved_quantity,0) ELSE 0 END),0) "
-            + "FROM dispute_case WHERE order_id=?" + (excludedCaseId == null ? "" : " AND id<>?");
-        Integer value = excludedCaseId == null
-            ? jdbc.queryForObject(sql, Integer.class, orderId.toString())
-            : jdbc.queryForObject(sql, Integer.class, orderId.toString(), excludedCaseId.toString());
-        return value == null ? 0 : value;
+        String sql = "SELECT status,disputed_quantity,approved_quantity FROM dispute_case WHERE order_id=?"
+            + (excludedCaseId == null ? "" : " AND id<>?") + " FOR UPDATE";
+        return jdbc.query(sql, rs -> {
+            int total = 0;
+            while (rs.next()) {
+                String status = rs.getString(1);
+                if (status.equals("OPEN") || status.equals("SELLER_RESPONDED")
+                    || status.equals("UNDER_REVIEW") || status.equals("ESCALATED")) {
+                    total += rs.getInt(2);
+                } else if (status.equals("RESOLVED")) {
+                    total += rs.getObject(3) == null ? 0 : rs.getInt(3);
+                }
+            }
+            return total;
+        }, excludedCaseId == null
+            ? new Object[] { orderId.toString() }
+            : new Object[] { orderId.toString(), excludedCaseId.toString() });
+    }
+
+    /**
+     * 硬期限在订单锁内仲裁同一订单的并发 claim。尚未完成的其它硬期限不应互相占额，
+     * 否则两个 claim 都会把对方的活动数量算入而双双升级；先提交者成为 RESOLVED，
+     * 后续 claim 再按统一规则看到已批准数量并升级。已有退款意图的 ESCALATED 案件仍保留占额。
+     */
+    public int cumulativeReservedQuantityForHardDeadline(UUID orderId, UUID excludedCaseId) {
+        return jdbc.query("SELECT c.id,c.status,c.disputed_quantity,c.approved_quantity,"
+                + "EXISTS (SELECT 1 FROM dispute_deadline_claim d WHERE d.dispute_case_id=c.id AND d.deadline_type='HARD_DEADLINE'),"
+                + "EXISTS (SELECT 1 FROM return_case r WHERE r.dispute_case_id=c.id AND r.status IN ('REQUESTED','CONFIRMED','ESCALATED')) "
+                + "FROM dispute_case c WHERE c.order_id=? AND c.id<>? FOR UPDATE", rs -> {
+            int total = 0;
+            while (rs.next()) {
+                String status = rs.getString(2);
+                boolean hardDeadline = rs.getBoolean(5);
+                boolean hasReturnReservation = rs.getBoolean(6);
+                if (hardDeadline && !status.equals("RESOLVED") && !(status.equals("ESCALATED") && hasReturnReservation)) continue;
+                if (status.equals("OPEN") || status.equals("SELLER_RESPONDED")
+                    || status.equals("UNDER_REVIEW") || status.equals("ESCALATED")) {
+                    total += rs.getInt(3);
+                } else if (status.equals("RESOLVED")) {
+                    total += rs.getObject(4) == null ? 0 : rs.getInt(4);
+                }
+            }
+            return total;
+        }, orderId.toString(), excludedCaseId.toString());
     }
 
     public void insert(DisputeCase file, Instant now) {

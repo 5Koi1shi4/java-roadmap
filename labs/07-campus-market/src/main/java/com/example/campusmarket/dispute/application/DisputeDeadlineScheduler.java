@@ -157,7 +157,7 @@ public final class DisputeDeadlineScheduler {
         // 所有硬期限案件按固定订单→支付锁序串行；累计规则与普通裁决共用。
         Integer purchased = jdbc.query("SELECT quantity FROM trade_order WHERE id=? FOR UPDATE",
             rs -> rs.next() ? rs.getInt(1) : null, row.orderId().toString());
-        if (purchased == null || disputeRepository.cumulativeReservedQuantity(row.orderId(), row.caseId()) + row.disputedQuantity() > purchased) {
+        if (purchased == null || disputeRepository.cumulativeReservedQuantityForHardDeadline(row.orderId(), row.caseId()) + row.disputedQuantity() > purchased) {
             escalate(row.caseId());
             return;
         }

@@ -176,7 +176,7 @@ public class ReturnResolutionService {
         UUID lockedOrderId = orderId;
         String status = (String) row[2];
         if (!"OPEN".equals(status) && !"SELLER_RESPONDED".equals(status) && !"UNDER_REVIEW".equals(status) && !"ESCALATED".equals(status)) {
-            var existing = jdbc.query("SELECT refund_id,order_id,listing_id,unit_price_fen,approved_quantity,status FROM return_case WHERE dispute_case_id=?",
+            var existing = jdbc.query("SELECT refund_id,order_id,listing_id,unit_price_fen,approved_quantity,status FROM return_case WHERE dispute_case_id=? FOR UPDATE",
                 rs -> rs.next() ? new CaseFacts(caseId, lockedOrderId, UUID.fromString(rs.getString("listing_id")),
                     rs.getInt("approved_quantity"), rs.getInt("approved_quantity"), rs.getLong("unit_price_fen"),
                     rs.getLong("unit_price_fen") * rs.getInt("approved_quantity"),
