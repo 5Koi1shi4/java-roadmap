@@ -88,7 +88,9 @@ public final class DisputeDeadlineScheduler {
             rs.getString(12) == null ? null : UUID.fromString(rs.getString(12)), rs.getLong(13), rs.getString(14)) : null, claim.caseId().toString());
         if (caseRow == null) return complete(handle, claim);
         switch (claim.type()) {
-            case "SELLER_RESPONSE" -> sellerDeadline(caseRow, now);
+            case "SELLER_RESPONSE" -> {
+                if (!sellerDeadline(caseRow, now, handle, claim)) return false;
+            }
             case "ADMIN_SLA" -> adminSla(caseRow, now, handle, claim);
             case "HARD_DEADLINE" -> hardDeadline(caseRow, now, handle, claim);
             default -> throw new IllegalArgumentException("未知争议截止类型");
@@ -96,12 +98,17 @@ public final class DisputeDeadlineScheduler {
         return complete(handle, claim);
     }
 
-    private void sellerDeadline(CaseFacts row, Instant now) {
-        if ("OPEN".equals(row.status()) && row.sellerDeadline() != null && !now.isBefore(row.sellerDeadline())) {
+    private boolean sellerDeadline(CaseFacts row, Instant now, ClaimHandle handle, Claim claim) {
+        if (row.sellerDeadline() == null || now.isBefore(row.sellerDeadline())) {
+            defer(handle, claim, row.sellerDeadline() == null ? plusDays(row.sellerDeadline(), 3, now) : row.sellerDeadline());
+            return false;
+        }
+        if ("OPEN".equals(row.status())) {
             jdbc.update("UPDATE dispute_case SET status='UNDER_REVIEW',admin_deadline=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 7 DAY),hard_deadline=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 14 DAY),version=version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='OPEN'",
                 row.caseId().toString());
             armAdminClaims(row.caseId());
         }
+        return true;
     }
 
     /** 卖家超时是进入管理员阶段的事实点；缺失或被旧版本提前完成的 claim 都重新武装。 */
