@@ -1,6 +1,7 @@
 package com.example.campusmarket.dispute.application;
 
 import com.example.campusmarket.dispute.domain.ReturnProofType;
+import com.example.campusmarket.dispute.infrastructure.JdbcDisputeRepository;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Profile;
 import org.springframework.scheduling.annotation.EnableScheduling;
@@ -26,13 +27,15 @@ public final class DisputeDeadlineScheduler {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
     private final ReturnResolutionService resolutions;
+    private final JdbcDisputeRepository disputeRepository;
     private final String owner = "dispute-deadline-" + UUID.randomUUID();
 
     public DisputeDeadlineScheduler(JdbcTemplate jdbc, org.springframework.transaction.PlatformTransactionManager transactionManager,
-                                    ReturnResolutionService resolutions) {
+                                    ReturnResolutionService resolutions, JdbcDisputeRepository disputeRepository) {
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.transactions = new TransactionTemplate(Objects.requireNonNull(transactionManager, "事务管理器不能为空"));
         this.resolutions = Objects.requireNonNull(resolutions, "退回解析服务不能为空");
+        this.disputeRepository = Objects.requireNonNull(disputeRepository, "争议仓储不能为空");
     }
 
     @Scheduled(initialDelayString = "${campus.market.dispute.deadline.initial-delay-ms:0}", fixedDelayString = "${campus.market.dispute.deadline.fixed-delay-ms:1000}")
@@ -83,7 +86,7 @@ public final class DisputeDeadlineScheduler {
         if (claim == null || !handle.owner().equals(claim.owner()) || !handle.token().equals(claim.token()) || !claim.leaseUntil().isAfter(now)) return false;
         var caseRow = jdbc.query("SELECT c.id,c.status,c.seller_deadline,c.admin_deadline,c.hard_deadline,c.proof_type,c.proof_reference,c.disputed_quantity,c.order_id,o.listing_id,o.unit_price_fen,p.id,p.paid_amount_fen,p.provider,p.status "
                 + "FROM dispute_case c JOIN trade_order o ON o.id=c.order_id LEFT JOIN payment_order p ON p.order_id=o.id AND p.status='SUCCEEDED' "
-                + "WHERE c.id=? FOR UPDATE", rs -> rs.next() ? new CaseFacts(UUID.fromString(rs.getString(1)), rs.getString(2), ts(rs.getTimestamp(3)), ts(rs.getTimestamp(4)), ts(rs.getTimestamp(5)),
+                + "WHERE c.id=?", rs -> rs.next() ? new CaseFacts(UUID.fromString(rs.getString(1)), rs.getString(2), ts(rs.getTimestamp(3)), ts(rs.getTimestamp(4)), ts(rs.getTimestamp(5)),
             rs.getString(6), rs.getString(7), rs.getInt(8), UUID.fromString(rs.getString(9)), UUID.fromString(rs.getString(10)), rs.getLong(11),
             rs.getString(12) == null ? null : UUID.fromString(rs.getString(12)), rs.getLong(13), rs.getString(14)) : null, claim.caseId().toString());
         if (caseRow == null) return complete(handle, claim);
@@ -128,7 +131,7 @@ public final class DisputeDeadlineScheduler {
             return;
         }
         int changed = jdbc.update("UPDATE dispute_case SET admin_sla_alerted_at=COALESCE(admin_sla_alerted_at,CURRENT_TIMESTAMP(6)),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('OPEN','SELLER_RESPONDED','UNDER_REVIEW','ESCALATED') AND admin_sla_alerted_at IS NULL", row.caseId().toString());
-        if (changed == 1) insertEvent("DISPUTE_SLA_ALERT", row.orderId(), row.caseId().toString(), "adminDeadline");
+        if (changed == 1) insertEvent("DISPUTE_SLA_ALERT", row.orderId(), row.caseId(), "adminDeadline");
     }
 
     private void hardDeadline(CaseFacts row, Instant now, ClaimHandle handle, Claim claim) {
@@ -148,6 +151,19 @@ public final class DisputeDeadlineScheduler {
             return;
         }
         if (!trusted || row.paymentId() == null || row.paidAmountFen() < amount) {
+            escalate(row.caseId());
+            return;
+        }
+        // 所有硬期限案件按固定订单→支付锁序串行；累计规则与普通裁决共用。
+        Integer purchased = jdbc.query("SELECT quantity FROM trade_order WHERE id=? FOR UPDATE",
+            rs -> rs.next() ? rs.getInt(1) : null, row.orderId().toString());
+        if (purchased == null || disputeRepository.cumulativeReservedQuantity(row.orderId(), row.caseId()) + row.disputedQuantity() > purchased) {
+            escalate(row.caseId());
+            return;
+        }
+        Long paidAmount = jdbc.query("SELECT paid_amount_fen FROM payment_order WHERE id=? AND status='SUCCEEDED' FOR UPDATE",
+            rs -> rs.next() ? rs.getLong(1) : null, row.paymentId().toString());
+        if (paidAmount == null || amount > paidAmount) {
             escalate(row.caseId());
             return;
         }
@@ -174,10 +190,10 @@ public final class DisputeDeadlineScheduler {
         return jdbc.update("UPDATE dispute_deadline_claim SET status='COMPLETED',completed_at=CURRENT_TIMESTAMP(6),owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='PROCESSING' AND owner_id=? AND claim_token=? AND lease_until>CURRENT_TIMESTAMP(6)", handle.id().toString(), handle.owner(), handle.token()) == 1;
     }
 
-    private void insertEvent(String type, UUID aggregateId, String orderId, String field) {
-        UUID eventId = UUID.nameUUIDFromBytes((type + ":" + orderId).getBytes(StandardCharsets.UTF_8));
+    private void insertEvent(String type, UUID orderId, UUID disputeCaseId, String field) {
+        UUID eventId = UUID.nameUUIDFromBytes((type + ":" + orderId + ":" + disputeCaseId).getBytes(StandardCharsets.UTF_8));
         jdbc.update("INSERT INTO integration_outbox (id,event_id,event_type,aggregate_id,aggregate_version,schema_version,occurred_at,payload,status,attempt_count,available_at,created_at) VALUES (?,?,?,?,?,1,CURRENT_TIMESTAMP(6),CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",
-            eventId.toString(), eventId.toString(), type, aggregateId.toString(), 1L, "{\"orderId\":\"" + orderId + "\",\"field\":\"" + field + "\"}");
+            eventId.toString(), eventId.toString(), type, orderId.toString(), 1L, "{\"orderId\":\"" + orderId + "\",\"disputeCaseId\":\"" + disputeCaseId + "\",\"field\":\"" + field + "\"}");
     }
 
     private static boolean terminal(String status) { return "RESOLVED".equals(status) || "REJECTED".equals(status); }

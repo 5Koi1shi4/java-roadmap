@@ -3,6 +3,7 @@ package com.example.campusmarket.dispute.application;
 import com.example.campusmarket.catalog.application.InventoryPort;
 import com.example.campusmarket.dispute.domain.DisputeDecision;
 import com.example.campusmarket.dispute.domain.ReturnProofType;
+import com.example.campusmarket.dispute.infrastructure.JdbcDisputeRepository;
 import com.example.campusmarket.payment.application.RefundService;
 import com.example.campusmarket.shared.Money;
 import org.springframework.context.annotation.Profile;
@@ -21,13 +22,16 @@ public class ReturnResolutionService {
     private final JdbcTemplate jdbc;
     private final RefundService refunds;
     private final InventoryPort inventory;
+    private final JdbcDisputeRepository disputeRepository;
     private final TransactionTemplate transactions;
 
     public ReturnResolutionService(JdbcTemplate jdbc, RefundService refunds, InventoryPort inventory,
+                                   JdbcDisputeRepository disputeRepository,
                                    org.springframework.transaction.PlatformTransactionManager transactionManager) {
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.refunds = Objects.requireNonNull(refunds, "退款服务不能为空");
         this.inventory = Objects.requireNonNull(inventory, "库存端口不能为空");
+        this.disputeRepository = Objects.requireNonNull(disputeRepository, "争议仓储不能为空");
         this.transactions = new TransactionTemplate(Objects.requireNonNull(transactionManager, "事务管理器不能为空"));
     }
 
@@ -124,12 +128,25 @@ public class ReturnResolutionService {
     /** 恢复已提交但尚未关联的普通退款意图；不存在提供方记录时不凭空新建退款。 */
     public int recoverPendingPreparedReturns(int limit) {
         if (limit <= 0 || limit > 1000) throw new IllegalArgumentException("退回恢复批量大小必须在1到1000之间");
-        var ids = jdbc.query("SELECT r.dispute_case_id FROM return_case r WHERE r.refund_id IS NULL AND r.status='CONFIRMED' ORDER BY r.updated_at,r.dispute_case_id LIMIT ?",
-            (rs, n) -> UUID.fromString(rs.getString(1)), limit);
+        var pending = jdbc.query("SELECT r.dispute_case_id,r.order_id,r.unit_price_fen,r.approved_quantity,r.resolution_type,r.status "
+                + "FROM return_case r WHERE r.status IN ('CONFIRMED','ESCALATED') "
+                + "AND (r.refund_id IS NULL OR r.refund_status IN ('REQUESTED','PROCESSING','UNKNOWN')) "
+                + "ORDER BY r.updated_at,r.dispute_case_id LIMIT ?",
+            (rs, n) -> new PendingReturn(UUID.fromString(rs.getString(1)), UUID.fromString(rs.getString(2)),
+                rs.getLong(3), rs.getInt(4), rs.getString(5), rs.getString(6)), limit);
         int recovered = 0;
-        for (UUID caseId : ids) {
-            var candidate = jdbc.query("SELECT f.id FROM return_case r JOIN refund_order f ON f.order_id=r.order_id AND (f.idempotency_key=CONCAT('dispute-return-',r.dispute_case_id) OR f.idempotency_key=CONCAT('dispute-hard-refund-',r.dispute_case_id)) WHERE r.dispute_case_id=? ORDER BY f.created_at LIMIT 1",
-                rs -> rs.next() ? UUID.fromString(rs.getString(1)) : null, caseId.toString());
+        for (PendingReturn pendingReturn : pending) {
+            String ordinaryKey = "dispute-return-" + pendingReturn.caseId();
+            String hardDeadlineKey = "dispute-hard-refund-" + pendingReturn.caseId();
+            String key = "RETURN_AND_REFUND".equals(pendingReturn.resolutionType()) ? hardDeadlineKey : ordinaryKey;
+            UUID candidate = jdbc.query("SELECT f.id FROM refund_order f WHERE f.order_id=? AND f.idempotency_key IN (?,?) ORDER BY f.created_at LIMIT 1",
+                rs -> rs.next() ? UUID.fromString(rs.getString(1)) : null, pendingReturn.orderId().toString(), ordinaryKey, hardDeadlineKey);
+            if (candidate == null && "CONFIRMED".equals(pendingReturn.status())) {
+                RefundService.RefundResult requested = refunds.requestRefund(pendingReturn.orderId(), key,
+                    Money.ofFen(refundAmountFen(pendingReturn.unitPriceFen(), pendingReturn.approvedQuantity())),
+                    "DISPUTE", pendingReturn.caseId());
+                candidate = requested == null ? null : requested.refundId();
+            }
             if (candidate != null) { reconcileSuccessfulRefund(candidate); recovered++; }
         }
         return recovered;
@@ -143,6 +160,11 @@ public class ReturnResolutionService {
 
     private CaseFacts prepare(UUID caseId, DisputeDecision decision, int approvedQuantity,
                               ReturnProofType proofType, String proofReference, ProofAuthority authority) {
+        UUID orderId = jdbc.query("SELECT order_id FROM dispute_case WHERE id=?",
+            rs -> rs.next() ? UUID.fromString(rs.getString(1)) : null, caseId.toString());
+        if (orderId == null) throw new IllegalArgumentException("争议不存在");
+        jdbc.query("SELECT id FROM trade_order WHERE id=? FOR UPDATE",
+            (org.springframework.jdbc.core.ResultSetExtractor<Boolean>) rs -> rs.next(), orderId.toString());
         var row = jdbc.query("SELECT c.order_id,c.disputed_quantity,c.status,o.listing_id,o.unit_price_fen,o.quantity,p.id,p.paid_amount_fen,p.provider,p.status "
                 + "FROM dispute_case c JOIN trade_order o ON o.id=c.order_id "
                 + "LEFT JOIN payment_order p ON p.order_id=o.id AND p.status='SUCCEEDED' "
@@ -150,13 +172,12 @@ public class ReturnResolutionService {
             rs.getString(3), UUID.fromString(rs.getString(4)), rs.getLong(5), rs.getInt(6),
                 rs.getString(7) == null ? null : UUID.fromString(rs.getString(7)), rs.getLong(8), rs.getString(9), rs.getString(10) } : null, caseId.toString());
         if (row == null) throw new IllegalArgumentException("争议不存在");
-        UUID orderId = (UUID) row[0];
-        jdbc.query("SELECT id FROM trade_order WHERE id=? FOR UPDATE",
-            (org.springframework.jdbc.core.ResultSetExtractor<Boolean>) rs -> rs.next(), orderId.toString());
+        orderId = (UUID) row[0];
+        UUID lockedOrderId = orderId;
         String status = (String) row[2];
         if (!"OPEN".equals(status) && !"SELLER_RESPONDED".equals(status) && !"UNDER_REVIEW".equals(status) && !"ESCALATED".equals(status)) {
             var existing = jdbc.query("SELECT refund_id,order_id,listing_id,unit_price_fen,approved_quantity,status FROM return_case WHERE dispute_case_id=?",
-                rs -> rs.next() ? new CaseFacts(caseId, orderId, UUID.fromString(rs.getString("listing_id")),
+                rs -> rs.next() ? new CaseFacts(caseId, lockedOrderId, UUID.fromString(rs.getString("listing_id")),
                     rs.getInt("approved_quantity"), rs.getInt("approved_quantity"), rs.getLong("unit_price_fen"),
                     rs.getLong("unit_price_fen") * rs.getInt("approved_quantity"),
                     rs.getString("refund_id") == null ? null : UUID.fromString(rs.getString("refund_id")), rs.getString("status")) : null, caseId.toString());
@@ -170,8 +191,8 @@ public class ReturnResolutionService {
             rs -> rs.next() && rs.getString(1) != null ? UUID.fromString(rs.getString(1)) : null, caseId.toString());
         String provider = (String) row[8];
         authorizeProof(authority, proofType, proofReference, orderId, approvedQuantity, sellerId, assignedAdminId, provider);
-        Integer used = jdbc.queryForObject("SELECT COALESCE(SUM(approved_quantity),0) FROM dispute_case WHERE order_id=? AND id<>? AND status='RESOLVED'", Integer.class, orderId.toString(), caseId.toString());
-        if (used != null && used + approvedQuantity > (Integer) row[5]) throw new IllegalArgumentException("累计裁决数量超过购买数量");
+        int used = disputeRepository.cumulativeReservedQuantity(orderId, caseId);
+        if (used + approvedQuantity > (Integer) row[5]) throw new IllegalArgumentException("累计裁决数量超过购买数量");
         UUID listingId = (UUID) row[3];
         long unitPriceFen = (Long) row[4];
         long amountFen = refundAmountFen(unitPriceFen, approvedQuantity);
@@ -213,7 +234,10 @@ public class ReturnResolutionService {
                 rs.getInt(4), rs.getString(5), rs.getTimestamp(6) != null, rs.getString(7), rs.getLong(8), rs.getInt(9)) : null, refundId.toString());
         });
         if (facts == null) return null;
-        if (!"SUCCEEDED".equals(facts.refundStatus())) return new Resolution(facts.disputeCaseId(), refundId, facts.refundStatus(), facts.amountFen(), facts.quarantined());
+        if (!"SUCCEEDED".equals(facts.refundStatus())) {
+            if ("FAILED".equals(facts.refundStatus())) escalateFailedRefund(facts.disputeCaseId(), refundId);
+            return new Resolution(facts.disputeCaseId(), refundId, facts.refundStatus(), facts.amountFen(), facts.quarantined());
+        }
         boolean quarantined = facts.quarantined();
         if (!quarantined && "RETURN_AND_REFUND".equals(facts.resolutionType())) {
             if (!inventory.quarantine(facts.listingId(), facts.approvedQuantity(), "return-quarantine-" + facts.disputeCaseId()))
@@ -242,9 +266,19 @@ public class ReturnResolutionService {
 
     private Resolution queryResolution(CaseFacts facts) {
         var row = jdbc.query("SELECT refund_id,refund_status,quarantined_at FROM return_case WHERE dispute_case_id=?",
-            rs -> rs.next() ? new Object[] { UUID.fromString(rs.getString(1)), rs.getString(2), rs.getTimestamp(3) != null } : null, facts.caseId().toString());
+            rs -> rs.next() ? new Object[] { rs.getString(1) == null ? null : UUID.fromString(rs.getString(1)), rs.getString(2), rs.getTimestamp(3) != null } : null, facts.caseId().toString());
         return row == null ? new Resolution(facts.caseId(), null, "REQUESTED", facts.amountFen(), false)
             : new Resolution(facts.caseId(), (UUID) row[0], (String) row[1], facts.amountFen(), (Boolean) row[2]);
+    }
+
+    private void escalateFailedRefund(UUID caseId, UUID refundId) {
+        transactions.execute(status -> {
+            jdbc.update("UPDATE return_case SET refund_id=COALESCE(refund_id,?),refund_status='FAILED',status='ESCALATED',updated_at=CURRENT_TIMESTAMP(6) WHERE dispute_case_id=? AND (refund_id IS NULL OR refund_id=?)",
+                refundId.toString(), caseId.toString(), refundId.toString());
+            jdbc.update("UPDATE dispute_case SET status='ESCALATED',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('RESOLVED','OPEN','SELLER_RESPONDED','UNDER_REVIEW')",
+                caseId.toString());
+            return null;
+        });
     }
 
     private Instant databaseNow() { return jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", java.sql.Timestamp.class).toInstant(); }
@@ -261,6 +295,7 @@ public class ReturnResolutionService {
     private record ReturnFacts(UUID disputeCaseId, UUID orderId, UUID listingId, int approvedQuantity, String resolutionType,
                                boolean quarantined, String refundStatus, long amountFen, int purchasedQuantity) {}
     private record HardFacts(UUID refundId, UUID orderId, long unitPriceFen, int approvedQuantity, String refundStatus, String resolutionType) {}
+    private record PendingReturn(UUID caseId, UUID orderId, long unitPriceFen, int approvedQuantity, String resolutionType, String status) {}
 
     /** 硬期限必须复用已落库的卖家/分配管理员事实或已验证物流签收事实，不能只信 dispute_case.proof_type。 */
     public boolean isHardDeadlineProofAuthorized(UUID disputeCaseId, UUID orderId, int quantity,

@@ -93,6 +93,55 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
     }
 
     @Test
+    void preparedReturnWithoutRefundRowIsRecoveredByOriginalIdempotencyKey() {
+        Fixture f = fixture(1, 100);
+        UUID returnCase = UUID.nameUUIDFromBytes((f.dispute() + "|REFUND_ONLY").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        jdbc.update("UPDATE dispute_case SET status='RESOLVED',decision='REFUND_ONLY',approved_quantity=1 WHERE id=?", f.dispute().toString());
+        jdbc.update("INSERT INTO return_case (id,dispute_case_id,order_id,listing_id,payment_order_id,unit_price_fen,status,proof_type,proof_reference,resolution_type,approved_quantity,deadline,created_at,updated_at) VALUES (?,?,?,?,?,100,'CONFIRMED','SELLER_CONFIRMED','seller-confirmed','REFUND_ONLY',1,DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 14 DAY),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            returnCase.toString(), f.dispute().toString(), f.order().toString(), f.listing().toString(), f.payment().toString());
+
+        assertThat(returns.recoverPendingPreparedReturns(10)).isEqualTo(1);
+        String refundId = jdbc.queryForObject("SELECT refund_id FROM return_case WHERE dispute_case_id=?", String.class, f.dispute().toString());
+        assertThat(refundId).isNotNull();
+        assertThat(jdbc.queryForObject("SELECT idempotency_key FROM refund_order WHERE id=?", String.class, refundId))
+            .isEqualTo("dispute-return-" + f.dispute());
+    }
+
+    @Test
+    void recoveryScanLinksFailedRefundAndEscalatesWhileKeepingRefundId() {
+        Fixture f = fixture(1, 100);
+        UUID refund = UUID.randomUUID();
+        UUID returnCase = UUID.nameUUIDFromBytes((f.dispute() + "|REFUND_ONLY").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        jdbc.update("UPDATE dispute_case SET status='RESOLVED',decision='REFUND_ONLY',approved_quantity=1 WHERE id=?", f.dispute().toString());
+        jdbc.update("INSERT INTO refund_order (id,order_id,payment_order_id,provider,idempotency_key,source_type,source_id,paid_amount_fen,amount_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,?,'DISPUTE',?,?,?,?,'FAILED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            refund.toString(), f.order().toString(), f.payment().toString(), "simulated", "dispute-return-" + f.dispute(), f.dispute().toString(), 100, 100, "failed-" + refund);
+        jdbc.update("INSERT INTO return_case (id,dispute_case_id,order_id,listing_id,payment_order_id,unit_price_fen,status,proof_type,proof_reference,resolution_type,approved_quantity,deadline,created_at,updated_at) VALUES (?,?,?,?,?,100,'CONFIRMED','SELLER_CONFIRMED','seller-confirmed','REFUND_ONLY',1,DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 14 DAY),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            returnCase.toString(), f.dispute().toString(), f.order().toString(), f.listing().toString(), f.payment().toString());
+
+        assertThat(returns.recoverPendingPreparedReturns(10)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT refund_id FROM return_case WHERE dispute_case_id=?", String.class, f.dispute().toString())).isEqualTo(refund.toString());
+        assertThat(jdbc.queryForObject("SELECT status FROM return_case WHERE dispute_case_id=?", String.class, f.dispute().toString())).isEqualTo("ESCALATED");
+        assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, f.dispute().toString())).isEqualTo("ESCALATED");
+    }
+
+    @Test
+    void escalatedFailedRefundStillReservesQuantityForAnotherDecision() {
+        Fixture f = fixture(1, 100);
+        provider.setNextRefundStatusForTest("FAILED");
+        var failed = returns.resolve(f.dispute(), DisputeDecision.REFUND_ONLY, 1,
+            ReturnProofType.SELLER_CONFIRMED, "seller-confirmed", ProofAuthority.seller(f.seller()));
+        UUID secondDispute = UUID.randomUUID();
+        jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,hard_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?,1,'QUANTITY','UNDER_REVIEW',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            secondDispute.toString(), f.order().toString(), f.buyer().toString());
+
+        assertThatThrownBy(() -> returns.resolve(secondDispute, DisputeDecision.REFUND_ONLY, 1,
+            ReturnProofType.SELLER_CONFIRMED, "seller-confirmed-2", ProofAuthority.seller(f.seller())))
+            .isInstanceOf(IllegalArgumentException.class);
+        provider.setRefundStatus(refunds.queryRefund(failed.refundId()).providerReference(), "SUCCEEDED");
+        assertThat(returns.retryFailedRefund(f.dispute()).refundStatus()).isEqualTo("SUCCEEDED");
+    }
+
+    @Test
     void directSuccessfulReturnRefundPersistsQuarantineAndSchedulerSecondRunIsIdle() {
         Fixture f = fixture(1, 100);
         provider.setNextRefundStatusForTest("SUCCEEDED");

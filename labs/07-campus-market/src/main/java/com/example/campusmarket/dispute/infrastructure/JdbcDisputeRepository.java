@@ -28,7 +28,17 @@ public class JdbcDisputeRepository {
     public Instant databaseNow() { return orders.databaseNow(); }
 
     public int cumulativeReservedQuantity(UUID orderId) {
-        Integer value = jdbc.queryForObject("SELECT COALESCE(SUM(CASE WHEN status IN ('OPEN','SELLER_RESPONDED','UNDER_REVIEW','ESCALATED') THEN disputed_quantity WHEN status='RESOLVED' THEN COALESCE(approved_quantity,0) ELSE 0 END),0) FROM dispute_case WHERE order_id=?", Integer.class, orderId.toString());
+        return cumulativeReservedQuantity(orderId, null);
+    }
+
+    /** 在调用方已持有订单行锁时复用全仓库统一的活动/保留数量规则。 */
+    public int cumulativeReservedQuantity(UUID orderId, UUID excludedCaseId) {
+        String sql = "SELECT COALESCE(SUM(CASE WHEN status IN ('OPEN','SELLER_RESPONDED','UNDER_REVIEW','ESCALATED') "
+            + "THEN disputed_quantity WHEN status='RESOLVED' THEN COALESCE(approved_quantity,0) ELSE 0 END),0) "
+            + "FROM dispute_case WHERE order_id=?" + (excludedCaseId == null ? "" : " AND id<>?");
+        Integer value = excludedCaseId == null
+            ? jdbc.queryForObject(sql, Integer.class, orderId.toString())
+            : jdbc.queryForObject(sql, Integer.class, orderId.toString(), excludedCaseId.toString());
         return value == null ? 0 : value;
     }
 

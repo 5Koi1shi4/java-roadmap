@@ -15,6 +15,8 @@ import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.annotation.DirtiesContext;
 
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -59,7 +61,9 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
         jdbc.update("UPDATE dispute_deadline_claim SET due_at=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE dispute_case_id=? AND deadline_type='ADMIN_SLA'", dispute.toString());
         assertThat(deadlines.runOne(dispute)).isEqualTo(1);
         assertThat(deadlines.runOne(dispute)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='DISPUTE_SLA_ALERT' AND payload->>'$.orderId'=?", Integer.class, dispute.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='DISPUTE_SLA_ALERT' AND payload->>'$.orderId'=?", Integer.class, order.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='DISPUTE_SLA_ALERT' AND aggregate_id=?", Integer.class, order.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='DISPUTE_SLA_ALERT' AND payload->>'$.disputeCaseId'=?", Integer.class, dispute.toString())).isEqualTo(1);
     }
 
     @Test
@@ -163,6 +167,38 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
         assertThat(returns.retryHardDeadlineRefund(dispute).refundStatus()).isEqualTo("SUCCEEDED");
         assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, dispute.toString())).isEqualTo("RESOLVED");
         assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("REFUNDED");
+    }
+
+    @Test
+    void concurrentHardDeadlinesReserveAcrossCasesWithoutExceedingOrderQuantity() throws Exception {
+        UUID buyer = user(), seller = user(), admin = user(), listing = UUID.randomUUID(), order = UUID.randomUUID();
+        UUID first = UUID.randomUUID(), second = UUID.randomUUID(), payment = UUID.randomUUID();
+        insertOrder(buyer, seller, listing, order, "DISPUTED");
+        jdbc.update("UPDATE trade_order SET quantity=1,total_amount_fen=100,paid_amount_fen=100 WHERE id=?", order.toString());
+        jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,100,100,?,'SUCCEEDED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            payment.toString(), order.toString(), "simulated", "pay-" + payment, "sim-pay-" + payment);
+        insertHardCase(first, order, buyer, admin);
+        insertHardCase(second, order, buyer, admin);
+        claim(first, "HARD_DEADLINE");
+        claim(second, "HARD_DEADLINE");
+        var pool = Executors.newFixedThreadPool(2);
+        try {
+            var one = pool.submit(() -> deadlines.runOne(first));
+            var two = pool.submit(() -> deadlines.runOne(second));
+            assertThat(one.get(20, TimeUnit.SECONDS)).isEqualTo(1);
+            assertThat(two.get(20, TimeUnit.SECONDS)).isEqualTo(1);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM return_case WHERE order_id=?", Integer.class, order.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, order.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM dispute_case WHERE order_id=? AND status='RESOLVED'", Integer.class, order.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM dispute_case WHERE order_id=? AND status='ESCALATED'", Integer.class, order.toString())).isEqualTo(1);
+    }
+
+    private void insertHardCase(UUID dispute, UUID order, UUID buyer, UUID admin) {
+        jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,assigned_admin_id,disputed_quantity,reason,status,proof_type,proof_reference,seller_deadline,admin_deadline,hard_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?, ?,1,'QUANTITY','UNDER_REVIEW','ADMIN_CONFIRMED',?,DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 3 DAY),DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            dispute.toString(), order.toString(), buyer.toString(), admin.toString(), admin.toString());
     }
 
     private void insertOrder(UUID buyer, UUID seller, UUID listing, UUID order, String status) {
