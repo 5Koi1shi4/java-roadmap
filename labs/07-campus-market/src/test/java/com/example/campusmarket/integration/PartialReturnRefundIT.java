@@ -81,7 +81,8 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
     @Test
     void refundOnlySuccessDoesNotTouchQuarantine() {
         Fixture f = fixture(1, 100);
-        attestations.recordDelivered(f.order(), "simulated", "provider-delivered", 1, java.time.Instant.now());
+        java.time.Instant verifiedAt = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", java.sql.Timestamp.class).toInstant().minusSeconds(1);
+        attestations.recordDelivered(f.order(), "simulated", "provider-delivered", 1, verifiedAt);
         var result = returns.resolve(f.dispute(), DisputeDecision.REFUND_ONLY, 1, ReturnProofType.PROVIDER_DELIVERED, "provider-delivered", ProofAuthority.provider("provider-delivered"));
         provider.setRefundStatus(refunds.queryRefund(result.refundId()).providerReference(), "SUCCEEDED");
         refunds.reconcileRefund(result.refundId());
