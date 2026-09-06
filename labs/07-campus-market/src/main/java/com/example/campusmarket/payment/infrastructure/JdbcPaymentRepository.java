@@ -458,13 +458,13 @@ public class JdbcPaymentRepository {
     public boolean claimInitialRefundAttempt(UUID refundId, String owner, String token) {
         return jdbc.update("""
             UPDATE refund_order
-               SET create_attempted_at=CURRENT_TIMESTAMP(6),
+               SET create_attempted_at=COALESCE(create_attempted_at,CURRENT_TIMESTAMP(6)),
                    reconcile_owner=?, reconcile_token=?,
                    reconcile_lease_until=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),
                    next_reconcile_at=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND),
                    updated_at=CURRENT_TIMESTAMP(6)
-             WHERE id=? AND create_attempted_at IS NULL
-               AND provider_reference IS NULL AND status='REQUESTED'
+             WHERE id=? AND provider_reference IS NULL AND status='REQUESTED'
+               AND (create_attempted_at IS NULL OR reconcile_lease_until IS NULL OR reconcile_lease_until<=CURRENT_TIMESTAMP(6))
             """, owner, token, refundId.toString()) == 1;
     }
 

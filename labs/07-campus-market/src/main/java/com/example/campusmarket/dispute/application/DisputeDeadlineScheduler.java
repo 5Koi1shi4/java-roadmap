@@ -25,11 +25,14 @@ import java.util.UUID;
 public final class DisputeDeadlineScheduler {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
+    private final ReturnResolutionService resolutions;
     private final String owner = "dispute-deadline-" + UUID.randomUUID();
 
-    public DisputeDeadlineScheduler(JdbcTemplate jdbc, org.springframework.transaction.PlatformTransactionManager transactionManager) {
+    public DisputeDeadlineScheduler(JdbcTemplate jdbc, org.springframework.transaction.PlatformTransactionManager transactionManager,
+                                    ReturnResolutionService resolutions) {
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.transactions = new TransactionTemplate(Objects.requireNonNull(transactionManager, "事务管理器不能为空"));
+        this.resolutions = Objects.requireNonNull(resolutions, "退回解析服务不能为空");
     }
 
     @Scheduled(initialDelayString = "${campus.market.dispute.deadline.initial-delay-ms:0}", fixedDelayString = "${campus.market.dispute.deadline.fixed-delay-ms:1000}")
@@ -60,7 +63,12 @@ public final class DisputeDeadlineScheduler {
 
     private boolean process(ClaimHandle handle) {
         try {
+            ClaimMetadata metadata = jdbc.query("SELECT dispute_case_id,deadline_type FROM dispute_deadline_claim WHERE id=?",
+                rs -> rs.next() ? new ClaimMetadata(UUID.fromString(rs.getString(1)), rs.getString(2)) : null, handle.id().toString());
             Boolean result = transactions.execute(status -> processClaim(handle));
+            if (Boolean.TRUE.equals(result) && metadata != null && "HARD_DEADLINE".equals(metadata.type())) {
+                resolutions.executeHardDeadlineRefund(metadata.caseId());
+            }
             return Boolean.TRUE.equals(result);
         } catch (RuntimeException failure) {
             jdbc.update("UPDATE dispute_deadline_claim SET status='NEW',owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND owner_id=? AND claim_token=? AND lease_until>CURRENT_TIMESTAMP(6)", handle.id().toString(), handle.owner(), handle.token());
@@ -92,9 +100,17 @@ public final class DisputeDeadlineScheduler {
         if ("OPEN".equals(row.status()) && row.sellerDeadline() != null && !now.isBefore(row.sellerDeadline())) {
             jdbc.update("UPDATE dispute_case SET status='UNDER_REVIEW',admin_deadline=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 7 DAY),hard_deadline=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 14 DAY),version=version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='OPEN'",
                 row.caseId().toString());
-            jdbc.update("UPDATE dispute_deadline_claim SET due_at=CASE deadline_type WHEN 'ADMIN_SLA' THEN DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 7 DAY) WHEN 'HARD_DEADLINE' THEN DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 14 DAY) ELSE due_at END,updated_at=CURRENT_TIMESTAMP(6) WHERE dispute_case_id=? AND deadline_type IN ('ADMIN_SLA','HARD_DEADLINE') AND status='NEW'",
-                row.caseId().toString());
+            armAdminClaims(row.caseId());
         }
+    }
+
+    /** 卖家超时是进入管理员阶段的事实点；缺失或被旧版本提前完成的 claim 都重新武装。 */
+    private void armAdminClaims(UUID caseId) {
+        jdbc.update("INSERT INTO dispute_deadline_claim (id,dispute_case_id,deadline_type,due_at,status,created_at,updated_at) "
+                + "VALUES (UUID(),?, 'ADMIN_SLA',DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 7 DAY),'NEW',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)), "
+                + "(UUID(),?, 'HARD_DEADLINE',DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 14 DAY),'NEW',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) "
+                + "ON DUPLICATE KEY UPDATE due_at=CASE deadline_type WHEN 'ADMIN_SLA' THEN DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 7 DAY) WHEN 'HARD_DEADLINE' THEN DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 14 DAY) ELSE due_at END,"
+                + "status='NEW',owner_id=NULL,claim_token=NULL,lease_until=NULL,completed_at=NULL,updated_at=CURRENT_TIMESTAMP(6)", caseId.toString(), caseId.toString());
     }
 
     private void adminSla(CaseFacts row, Instant now, ClaimHandle handle, Claim claim) {
@@ -127,23 +143,9 @@ public final class DisputeDeadlineScheduler {
             escalate(row.caseId());
             return;
         }
-        boolean reserved = jdbc.update("UPDATE payment_order SET reserved_refund_fen=reserved_refund_fen+?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='SUCCEEDED' AND successful_refund_fen+reserved_refund_fen+?<=paid_amount_fen", amount, row.paymentId().toString(), amount) == 1;
-        if (!reserved) {
-            escalate(row.caseId());
-            return;
-        }
-        UUID refundId = UUID.nameUUIDFromBytes((row.caseId() + "|dispute-hard-refund").getBytes(StandardCharsets.UTF_8));
         UUID returnCaseId = UUID.nameUUIDFromBytes((row.caseId() + "|RETURN_AND_REFUND").getBytes(StandardCharsets.UTF_8));
-        String key = "dispute-hard-refund-" + row.caseId();
-        jdbc.update("INSERT INTO return_case (id,dispute_case_id,order_id,listing_id,payment_order_id,unit_price_fen,status,proof_type,proof_reference,resolution_type,approved_quantity,deadline,created_at,updated_at) VALUES (?,?,?,?,?,?, 'CONFIRMED',?,?, 'RETURN_AND_REFUND',?,?,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE proof_type=VALUES(proof_type),proof_reference=VALUES(proof_reference),resolution_type=VALUES(resolution_type),approved_quantity=VALUES(approved_quantity),updated_at=CURRENT_TIMESTAMP(6)",
+        jdbc.update("INSERT INTO return_case (id,dispute_case_id,order_id,listing_id,payment_order_id,unit_price_fen,status,proof_type,proof_reference,resolution_type,approved_quantity,deadline,created_at,updated_at) VALUES (?,?,?,?,?,?, 'REQUESTED',?,?, 'RETURN_AND_REFUND',?,?,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE proof_type=VALUES(proof_type),proof_reference=VALUES(proof_reference),resolution_type=VALUES(resolution_type),approved_quantity=VALUES(approved_quantity),updated_at=CURRENT_TIMESTAMP(6)",
             returnCaseId.toString(), row.caseId().toString(), row.orderId().toString(), row.listingId().toString(), row.paymentId().toString(), row.unitPriceFen(), row.proofType(), row.proofReference(), row.disputedQuantity(), Timestamp.from(deadline));
-        jdbc.update("INSERT INTO refund_order (id,order_id,payment_order_id,provider,idempotency_key,source_type,source_id,paid_amount_fen,amount_fen,status,created_at,updated_at) VALUES (?,?,?,?,?,'DISPUTE',?,?,?,?,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE source_id=VALUES(source_id),amount_fen=VALUES(amount_fen)",
-            refundId.toString(), row.orderId().toString(), row.paymentId().toString(), row.provider(), key, row.caseId().toString(), row.paidAmountFen(), amount, "REQUESTED");
-        jdbc.update("UPDATE return_case SET refund_id=?,refund_status='REQUESTED',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND (refund_id IS NULL OR refund_id=?)", refundId.toString(), returnCaseId.toString(), refundId.toString());
-        UUID eventId = UUID.nameUUIDFromBytes(("dispute-refund:" + refundId).getBytes(StandardCharsets.UTF_8));
-        String payload = "{\"refundId\":\"" + refundId + "\",\"orderId\":\"" + row.orderId() + "\",\"amountFen\":" + amount + "}";
-        jdbc.update("INSERT INTO integration_outbox (id,event_id,event_type,aggregate_id,aggregate_version,schema_version,occurred_at,payload,status,attempt_count,available_at,created_at) VALUES (?,?,?,?,?,1,CURRENT_TIMESTAMP(6),CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",
-            eventId.toString(), eventId.toString(), "REFUND_REQUESTED", refundId.toString(), 1L, payload);
         jdbc.update("UPDATE dispute_case SET status='RESOLVED',decision='RETURN_AND_REFUND',approved_quantity=?,resolved_at=CURRENT_TIMESTAMP(6),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('OPEN','SELLER_RESPONDED','UNDER_REVIEW')", row.disputedQuantity(), row.caseId().toString());
     }
 
@@ -178,6 +180,7 @@ public final class DisputeDeadlineScheduler {
     }
     private static Instant ts(Timestamp value) { return value == null ? null : value.toInstant(); }
     private record Claim(UUID caseId, String type, Instant dueAt, String owner, String token, Instant leaseUntil) {}
+    private record ClaimMetadata(UUID caseId, String type) {}
     private record ClaimHandle(UUID id, String owner, String token) {}
     private record CaseFacts(UUID caseId, String status, Instant sellerDeadline, Instant adminDeadline, Instant hardDeadline, String proofType,
                              String proofReference, int disputedQuantity, UUID orderId, UUID listingId, long unitPriceFen,

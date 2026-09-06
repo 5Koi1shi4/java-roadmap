@@ -81,7 +81,7 @@ public class JdbcDisputeRepository {
         int changed = jdbc.update("UPDATE dispute_case SET assigned_admin_id=?,status=CASE WHEN status='OPEN' THEN 'UNDER_REVIEW' ELSE status END,admin_deadline=?,hard_deadline=?,version=version+1,updated_at=? WHERE id=? AND status IN ('OPEN','SELLER_RESPONDED','UNDER_REVIEW') AND version=?",
             adminId.toString(), Timestamp.from(now.plus(Duration.ofDays(7))), Timestamp.from(now.plus(Duration.ofDays(14))), Timestamp.from(now), caseId.toString(), version);
         if (changed == 1) {
-            jdbc.update("UPDATE dispute_deadline_claim SET due_at=CASE deadline_type WHEN 'ADMIN_SLA' THEN ? WHEN 'HARD_DEADLINE' THEN ? ELSE due_at END,updated_at=? WHERE dispute_case_id=? AND deadline_type IN ('ADMIN_SLA','HARD_DEADLINE') AND status='NEW'",
+            jdbc.update("UPDATE dispute_deadline_claim SET due_at=CASE deadline_type WHEN 'ADMIN_SLA' THEN ? WHEN 'HARD_DEADLINE' THEN ? ELSE due_at END,status='NEW',owner_id=NULL,claim_token=NULL,lease_until=NULL,completed_at=NULL,updated_at=? WHERE dispute_case_id=? AND deadline_type IN ('ADMIN_SLA','HARD_DEADLINE') AND status IN ('NEW','COMPLETED')",
                 Timestamp.from(now.plus(Duration.ofDays(7))), Timestamp.from(now.plus(Duration.ofDays(14))), Timestamp.from(now), caseId.toString());
         }
         return changed;

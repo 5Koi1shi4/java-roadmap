@@ -60,6 +60,43 @@ public class ReturnResolutionService {
             request.proofType(), request.proofReference());
     }
 
+    /** 硬期限任务提交的退款意图在截止事务外执行；失败或进程崩溃可由收敛器重试。 */
+    public Resolution executeHardDeadlineRefund(UUID disputeCaseId) {
+        Objects.requireNonNull(disputeCaseId, "争议ID不能为空");
+        HardFacts facts = transactions.execute(status -> jdbc.query("SELECT r.refund_id,r.order_id,r.unit_price_fen,r.approved_quantity,r.refund_status,r.resolution_type "
+                + "FROM return_case r WHERE r.dispute_case_id=? AND r.status='REQUESTED' FOR UPDATE",
+            rs -> rs.next() ? new HardFacts(rs.getString(1) == null ? null : UUID.fromString(rs.getString(1)), UUID.fromString(rs.getString(2)),
+                rs.getLong(3), rs.getInt(4), rs.getString(5), rs.getString(6)) : null, disputeCaseId.toString()));
+        if (facts == null) return null;
+        long amount = refundAmountFen(facts.unitPriceFen(), facts.approvedQuantity());
+        String key = "dispute-hard-refund-" + disputeCaseId;
+        RefundService.RefundResult refund = facts.refundId() == null
+            ? refunds.requestRefund(facts.orderId(), key, Money.ofFen(amount), "DISPUTE", disputeCaseId)
+            : refunds.queryRefund(facts.refundId());
+        if (refund == null) return null;
+        transactions.execute(status -> {
+            jdbc.update("UPDATE return_case SET refund_id=?,refund_status=?,status='CONFIRMED',updated_at=CURRENT_TIMESTAMP(6) WHERE dispute_case_id=? AND status='REQUESTED' AND (refund_id IS NULL OR refund_id=?)",
+                refund.refundId().toString(), refund.status(), disputeCaseId.toString(), refund.refundId().toString());
+            return null;
+        });
+        return "SUCCEEDED".equals(refund.status()) ? reconcileSuccessfulRefund(refund.refundId())
+            : new Resolution(disputeCaseId, refund.refundId(), refund.status(), amount, false);
+    }
+
+    /** 恢复已提交但尚未关联的普通退款意图；不存在提供方记录时不凭空新建退款。 */
+    public int recoverPendingPreparedReturns(int limit) {
+        if (limit <= 0 || limit > 1000) throw new IllegalArgumentException("退回恢复批量大小必须在1到1000之间");
+        var ids = jdbc.query("SELECT r.dispute_case_id FROM return_case r WHERE r.refund_id IS NULL AND r.status='CONFIRMED' ORDER BY r.updated_at,r.dispute_case_id LIMIT ?",
+            (rs, n) -> UUID.fromString(rs.getString(1)), limit);
+        int recovered = 0;
+        for (UUID caseId : ids) {
+            var candidate = jdbc.query("SELECT f.id FROM return_case r JOIN refund_order f ON f.order_id=r.order_id AND (f.idempotency_key=CONCAT('dispute-return-',r.dispute_case_id) OR f.idempotency_key=CONCAT('dispute-hard-refund-',r.dispute_case_id)) WHERE r.dispute_case_id=? ORDER BY f.created_at LIMIT 1",
+                rs -> rs.next() ? UUID.fromString(rs.getString(1)) : null, caseId.toString());
+            if (candidate != null) { reconcileSuccessfulRefund(candidate); recovered++; }
+        }
+        return recovered;
+    }
+
     public static long refundAmountFen(long unitPriceFen, int approvedQuantity) {
         if (unitPriceFen <= 0 || approvedQuantity <= 0) throw new IllegalArgumentException("退款参数无效");
         try { return Math.multiplyExact(unitPriceFen, approvedQuantity); }
@@ -172,6 +209,7 @@ public class ReturnResolutionService {
                              long amountFen, UUID existingRefundId, String refundStatus) {}
     private record ReturnFacts(UUID disputeCaseId, UUID orderId, UUID listingId, int approvedQuantity, String resolutionType,
                                boolean quarantined, String refundStatus, long amountFen, int purchasedQuantity) {}
+    private record HardFacts(UUID refundId, UUID orderId, long unitPriceFen, int approvedQuantity, String refundStatus, String resolutionType) {}
     private static final class TimestampValue {
         private TimestampValue() {}
         static java.sql.Timestamp of(Instant value) { return java.sql.Timestamp.from(value); }

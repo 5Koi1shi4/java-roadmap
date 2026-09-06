@@ -83,7 +83,10 @@ public class RefundService {
         String owner = "refund-request-" + UUID.randomUUID();
         String token = UUID.randomUUID().toString();
         RefundIntent intent = transactions.execute(status -> prepare(orderId, idempotencyKey, amount, sourceType, sourceId, body, owner, token));
-        if (intent.existing() != null) return intent.existing();
+        if (intent.existing() != null) {
+            if ("REQUESTED".equals(intent.existing().status())) return retryExisting(orderId, intent.existing());
+            return intent.existing();
+        }
         PaymentGateway.RefundCreated created;
         try {
             created = gateway.requestRefund(new PaymentGateway.CreateRefundRequest(orderId,
@@ -132,7 +135,25 @@ public class RefundService {
         }
         if (!repository.claimInitialRefundAttempt(claim.id(), owner, token))
             throw new IllegalStateException("退款首次创建权获取失败");
+        repository.insertPaymentEvent("REFUND_REQUESTED", claim.id(), json(java.util.Map.of("refundId", claim.id(), "orderId", orderId, "amountFen", amount.fen())));
         return new RefundIntent(claim.id(), payment.id(), payment.providerReference(), amount.fen(), owner, token, null);
+    }
+
+    private RefundResult retryExisting(UUID orderId, RefundResult existing) {
+        JdbcPaymentRepository.RefundRecord row = repository.findRefund(existing.refundId());
+        if (row == null || !"REQUESTED".equals(row.status())) return existing;
+        JdbcPaymentRepository.PaymentRecord payment = repository.findPayment(row.paymentId());
+        if (payment == null || payment.providerReference() == null) return existing;
+        String owner = "refund-retry-" + UUID.randomUUID();
+        String token = UUID.randomUUID().toString();
+        if (!repository.claimInitialRefundAttempt(row.id(), owner, token)) return queryRefund(row.id());
+        try {
+            PaymentGateway.RefundCreated created = gateway.requestRefund(new PaymentGateway.CreateRefundRequest(orderId,
+                payment.providerReference(), Money.ofFen(row.amountFen()), row.idempotencyKey()));
+            return finishOwned(new RefundIntent(row.id(), row.paymentId(), payment.providerReference(), row.amountFen(), owner, token, null), created);
+        } catch (RuntimeException failure) {
+            return finishUnknown(new RefundIntent(row.id(), row.paymentId(), payment.providerReference(), row.amountFen(), owner, token, null));
+        }
     }
 
     /** 只有首次 claim 的 owner 才能在事务外 IO 返回后提交结果；迟到 owner 直接重放当前记录。 */
