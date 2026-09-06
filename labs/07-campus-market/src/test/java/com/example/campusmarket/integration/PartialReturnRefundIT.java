@@ -13,14 +13,17 @@ import com.example.campusmarket.payment.application.RefundService;
 import com.example.campusmarket.payment.infrastructure.SimulatedPaymentProviderController;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.mock.mockito.SpyBean;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.jdbc.core.ResultSetExtractor;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.DefaultTransactionDefinition;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.annotation.DirtiesContext;
 
+import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -28,9 +31,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.doAnswer;
+import static org.awaitility.Awaitility.await;
 
 /** 真实 MySQL：三件退一件只隔离一件，剩余金额可在七天后净结算。 */
 @SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
@@ -42,7 +43,10 @@ import static org.mockito.Mockito.doAnswer;
     "campus.market.dispute.return-reconciliation.initial-delay-ms=86400000",
     "campus.market.dispute.return-reconciliation.fixed-delay-ms=86400000"})
 class PartialReturnRefundIT extends Task11MySqlContainers {
-    @SpyBean JdbcTemplate jdbc;
+    @Autowired JdbcTemplate jdbc;
+    /** root 连接只读取 MySQL Performance Schema，确认 settlement 线程确实在等待被测行锁。 */
+    private final JdbcTemplate lockObserver = new JdbcTemplate(
+        new DriverManagerDataSource(MYSQL.getJdbcUrl(), "root", MYSQL.getPassword()));
     @Autowired ReturnResolutionService returns;
     @Autowired ReturnProofAttestationService attestations;
     @Autowired ReturnResolutionScheduler reconciliation;
@@ -50,6 +54,7 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
     @Autowired RefundService refunds;
     @Autowired SimulatedPaymentProviderController provider;
     @Autowired InventoryPort inventory;
+    @Autowired PlatformTransactionManager transactionManager;
 
     @Test
     void returnsOneOfThreeQuarantinesOnlyOneAndSettlesTheRemainingNetAmount() {
@@ -301,23 +306,41 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
         Fixture f = fixture(1, 100);
         jdbc.update("UPDATE trade_order SET status='AFTERSALE_WINDOW',t0=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 8 DAY) WHERE id=?", f.order().toString());
         jdbc.update("DELETE FROM dispute_case WHERE id=?", f.dispute().toString());
-        CountDownLatch orderLockEntered = new CountDownLatch(1);
-        CountDownLatch releaseSettlement = new CountDownLatch(1);
-        doAnswer(invocation -> {
-            String sql = invocation.getArgument(0, String.class);
-            Object result = invocation.callRealMethod();
-            Object[] parameters = invocation.getArgument(2, Object[].class);
-            if (sql.startsWith("SELECT id,status,t0 FROM trade_order WHERE id=? FOR UPDATE")
-                && parameters.length == 1 && f.order().toString().equals(parameters[0])) {
-                orderLockEntered.countDown();
-                releaseSettlement.await(10, TimeUnit.SECONDS);
+        UUID settlementId = UUID.nameUUIDFromBytes(("settlement:" + f.order()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO settlement (id,order_id,paid_amount_fen,successful_refund_fen,net_settlement_fen,status,created_at,settled_at) VALUES (?,?,100,0,100,'PENDING',CURRENT_TIMESTAMP(6),NULL)",
+            settlementId.toString(), f.order().toString());
+        CountDownLatch settlementRowLocked = new CountDownLatch(1);
+        CountDownLatch releaseSettlementRow = new CountDownLatch(1);
+        var pool = Executors.newFixedThreadPool(3);
+        var blocker = pool.submit(() -> {
+            TransactionStatus transaction = transactionManager.getTransaction(new DefaultTransactionDefinition());
+            boolean committed = false;
+            try {
+                jdbc.queryForObject("SELECT id FROM settlement WHERE order_id=? FOR UPDATE", String.class, f.order().toString());
+                settlementRowLocked.countDown();
+                releaseSettlementRow.await(10, TimeUnit.SECONDS);
+                transactionManager.commit(transaction);
+                committed = true;
+            } finally {
+                if (!committed) transactionManager.rollback(transaction);
             }
-            return result;
-        }).when(jdbc).query(anyString(), any(ResultSetExtractor.class), any(Object[].class));
-        var pool = Executors.newFixedThreadPool(2);
+            return null;
+        });
         try {
             var settlement = pool.submit(() -> settlements.settle(f.order()));
-            assertThat(orderLockEntered.await(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(settlementRowLocked.await(10, TimeUnit.SECONDS)).isTrue();
+            await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                assertThat(lockObserver.queryForObject("SELECT COUNT(*) FROM performance_schema.data_lock_waits w "
+                    + "JOIN performance_schema.data_locks requesting ON requesting.ENGINE='INNODB' "
+                    + "AND requesting.ENGINE_LOCK_ID=w.REQUESTING_ENGINE_LOCK_ID "
+                    + "AND requesting.ENGINE_TRANSACTION_ID=w.REQUESTING_ENGINE_TRANSACTION_ID "
+                    + "JOIN performance_schema.data_locks blocking ON blocking.ENGINE='INNODB' "
+                    + "AND blocking.ENGINE_LOCK_ID=w.BLOCKING_ENGINE_LOCK_ID "
+                    + "AND blocking.ENGINE_TRANSACTION_ID=w.BLOCKING_ENGINE_TRANSACTION_ID "
+                    + "WHERE requesting.OBJECT_SCHEMA=DATABASE() AND requesting.OBJECT_NAME='settlement' "
+                    + "AND requesting.LOCK_STATUS='WAITING' AND blocking.OBJECT_SCHEMA=DATABASE() "
+                    + "AND blocking.OBJECT_NAME='settlement' AND blocking.LOCK_STATUS='GRANTED'", Long.class))
+                    .isGreaterThan(0L));
             var refund = pool.submit(() -> {
                 try {
                     return refunds.requestRefund(f.order(), "settlement-first-" + f.order(), com.example.campusmarket.shared.Money.ofFen(100));
@@ -325,12 +348,13 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
                     return null;
                 }
             });
-            releaseSettlement.countDown();
+            releaseSettlementRow.countDown();
             assertThat(settlement.get(20, TimeUnit.SECONDS).status()).isEqualTo("SETTLED");
             assertThat(refund.get(20, TimeUnit.SECONDS)).isNull();
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, f.order().toString())).isZero();
         } finally {
-            releaseSettlement.countDown();
+            releaseSettlementRow.countDown();
+            blocker.get(20, TimeUnit.SECONDS);
             pool.shutdownNow();
         }
     }
