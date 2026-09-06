@@ -48,6 +48,16 @@ public class JdbcInventoryRepository implements InventoryPort {
         return execute(() -> change(listingId, quantity, businessKey, "RETURN_QUARANTINE", false, null));
     }
 
+    @Override
+    public boolean relistQuarantined(UUID listingId, int quantity, String businessKey) {
+        return execute(() -> resolveQuarantine(listingId, quantity, businessKey, "RETURN_RELIST", true));
+    }
+
+    @Override
+    public boolean scrapQuarantined(UUID listingId, int quantity, String businessKey) {
+        return execute(() -> resolveQuarantine(listingId, quantity, businessKey, "RETURN_SCRAP", false));
+    }
+
     private boolean execute(Supplier<Boolean> operation) {
         for (int attempt = 0; attempt < 2; attempt++) {
             try {
@@ -108,6 +118,36 @@ public class JdbcInventoryRepository implements InventoryPort {
         }
         Long version = jdbc.queryForObject("SELECT version FROM listing WHERE id=?", Long.class, listingId.toString());
         if (version != null && version > 0) searchOutbox.enqueue(listingId, version, "INVENTORY_CHANGED");
+        return true;
+    }
+
+    private boolean resolveQuarantine(UUID listingId, int quantity, String key, String reason, boolean relist) {
+        validate(quantity, key);
+        boolean listingExists = jdbc.query("SELECT id FROM listing WHERE id=? FOR UPDATE",
+            (org.springframework.jdbc.core.ResultSetExtractor<Boolean>) rs -> rs.next(), listingId.toString());
+        if (!listingExists) return false;
+        Existing existing = jdbc.query("SELECT listing_id,order_id,reason,quantity_delta FROM inventory_movement WHERE business_key=? FOR UPDATE",
+            rs -> rs.next() ? new Existing(rs.getString(1), rs.getString(2), rs.getString(3), rs.getInt(4)) : null, key);
+        int delta = relist ? quantity : -quantity;
+        if (existing != null) {
+            if (!existing.listingId.equals(listingId.toString()) || existing.orderId != null || !existing.reason.equals(reason) || existing.delta != delta)
+                throw new IllegalArgumentException("库存业务键与请求不一致");
+            return true;
+        }
+        jdbc.update("INSERT INTO inventory_movement (id,business_key,listing_id,order_id,reason,quantity_delta,created_at) VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP(6))",
+            UUID.randomUUID().toString(), key, listingId.toString(), null, reason, delta);
+        String sql = relist
+            ? "UPDATE listing SET quarantined_quantity=quarantined_quantity-?,available_quantity=available_quantity+?,status='ON_SALE',version=version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND quarantined_quantity>=?"
+            : "UPDATE listing SET quarantined_quantity=quarantined_quantity-?,version=version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND quarantined_quantity>=?";
+        int changed = relist
+            ? jdbc.update(sql, quantity, quantity, listingId.toString(), quantity)
+            : jdbc.update(sql, quantity, listingId.toString(), quantity);
+        if (changed != 1) {
+            jdbc.update("DELETE FROM inventory_movement WHERE business_key=?", key);
+            return false;
+        }
+        Long version = jdbc.queryForObject("SELECT version FROM listing WHERE id=?", Long.class, listingId.toString());
+        if (version != null) searchOutbox.enqueue(listingId, version, "INVENTORY_CHANGED");
         return true;
     }
 

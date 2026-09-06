@@ -93,6 +93,18 @@ class InventoryIT extends SharedContainers {
     }
 
     @Test
+    void sellerExplicitRelistConsumesQuarantineIdempotently() {
+        UUID seller = UUID.randomUUID();
+        UUID listing = UUID.randomUUID();
+        insertListing(seller, listing, 0, "SOLD_OUT");
+        assertThat(inventory.quarantine(listing, 1, "return-q-" + listing)).isTrue();
+        assertThat(inventory.relistQuarantined(listing, 1, "return-relist-" + listing)).isTrue();
+        assertThat(inventory.relistQuarantined(listing, 1, "return-relist-" + listing)).isTrue();
+        assertThat(counts(listing)).containsExactly(1, 0);
+        assertThat(status(listing)).isEqualTo("ON_SALE");
+    }
+
+    @Test
     void sameBusinessKeyAcrossListingsHasOneCommitAndExplicitConflict() throws Exception {
         UUID seller = UUID.randomUUID();
         UUID firstListing = UUID.randomUUID();

@@ -10,4 +10,8 @@ public interface InventoryPort {
     boolean deduct(UUID listingId, int quantity, String businessKey, UUID orderId);
     boolean restore(UUID listingId, int quantity, String businessKey);
     boolean quarantine(UUID listingId, int quantity, String businessKey);
+    /** 卖家显式重新上架隔离库存；绝不由退款路径调用。 */
+    boolean relistQuarantined(UUID listingId, int quantity, String businessKey);
+    /** 卖家显式报损隔离库存；幂等且不增加可售数量。 */
+    boolean scrapQuarantined(UUID listingId, int quantity, String businessKey);
 }

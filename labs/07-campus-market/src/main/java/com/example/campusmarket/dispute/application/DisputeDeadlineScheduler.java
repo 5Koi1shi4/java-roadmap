@@ -37,53 +37,55 @@ public final class DisputeDeadlineScheduler {
 
     public int runOnce(int limit) {
         if (limit <= 0 || limit > 1000) throw new IllegalArgumentException("争议截止任务批量大小必须在1到1000之间");
-        List<UUID> ids = jdbc.query("SELECT id FROM dispute_deadline_claim WHERE status='NEW' AND due_at<=CURRENT_TIMESTAMP(6) ORDER BY due_at,id LIMIT ?", (rs, n) -> UUID.fromString(rs.getString(1)), limit);
+        List<UUID> ids = jdbc.query("SELECT id FROM dispute_deadline_claim WHERE due_at<=CURRENT_TIMESTAMP(6) AND (status='NEW' OR (status='PROCESSING' AND lease_until<=CURRENT_TIMESTAMP(6))) ORDER BY due_at,id LIMIT ?", (rs, n) -> UUID.fromString(rs.getString(1)), limit);
         int processed = 0;
-        for (UUID id : ids) if (claim(id) && process(id)) processed++;
+        for (UUID id : ids) { ClaimHandle handle = claim(id); if (handle != null && process(handle)) processed++; }
         return processed;
     }
 
     public int runOne(UUID disputeCaseId) {
         Objects.requireNonNull(disputeCaseId, "争议ID不能为空");
-        List<UUID> ids = jdbc.query("SELECT id FROM dispute_deadline_claim WHERE dispute_case_id=? AND status='NEW' AND due_at<=CURRENT_TIMESTAMP(6) ORDER BY due_at,id", (rs, n) -> UUID.fromString(rs.getString(1)), disputeCaseId.toString());
+        List<UUID> ids = jdbc.query("SELECT id FROM dispute_deadline_claim WHERE dispute_case_id=? AND due_at<=CURRENT_TIMESTAMP(6) AND (status='NEW' OR (status='PROCESSING' AND lease_until<=CURRENT_TIMESTAMP(6))) ORDER BY due_at,id", (rs, n) -> UUID.fromString(rs.getString(1)), disputeCaseId.toString());
         int processed = 0;
-        for (UUID id : ids) if (claim(id) && process(id)) processed++;
+        for (UUID id : ids) { ClaimHandle handle = claim(id); if (handle != null && process(handle)) processed++; }
         return processed;
     }
 
-    private boolean claim(UUID id) {
-        return jdbc.update("UPDATE dispute_deadline_claim SET status='PROCESSING',owner_id=?,claim_token=?,lease_until=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 30 SECOND),attempt_count=attempt_count+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='NEW' AND due_at<=CURRENT_TIMESTAMP(6)",
-            owner, id.toString(), UUID.randomUUID().toString(), id.toString()) == 1;
+    private ClaimHandle claim(UUID id) {
+        String token = UUID.randomUUID().toString();
+        int changed = jdbc.update("UPDATE dispute_deadline_claim SET status='PROCESSING',owner_id=?,claim_token=?,lease_until=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 30 SECOND),attempt_count=attempt_count+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND due_at<=CURRENT_TIMESTAMP(6) AND (status='NEW' OR (status='PROCESSING' AND lease_until<=CURRENT_TIMESTAMP(6)))",
+            owner, token, id.toString());
+        return changed == 1 ? new ClaimHandle(id, owner, token) : null;
     }
 
-    private boolean process(UUID claimId) {
+    private boolean process(ClaimHandle handle) {
         try {
-            Boolean result = transactions.execute(status -> processClaim(claimId));
+            Boolean result = transactions.execute(status -> processClaim(handle));
             return Boolean.TRUE.equals(result);
         } catch (RuntimeException failure) {
-            jdbc.update("UPDATE dispute_deadline_claim SET status='NEW',owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND owner_id=? AND lease_until>CURRENT_TIMESTAMP(6)", claimId.toString(), owner);
+            jdbc.update("UPDATE dispute_deadline_claim SET status='NEW',owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND owner_id=? AND claim_token=? AND lease_until>CURRENT_TIMESTAMP(6)", handle.id().toString(), handle.owner(), handle.token());
             return false;
         }
     }
 
-    private boolean processClaim(UUID claimId) {
-        Claim claim = jdbc.query("SELECT dispute_case_id,deadline_type,due_at,owner_id,claim_token FROM dispute_deadline_claim WHERE id=? FOR UPDATE", rs -> rs.next()
-            ? new Claim(UUID.fromString(rs.getString(1)), rs.getString(2), rs.getTimestamp(3).toInstant(), rs.getString(4), rs.getString(5)) : null, claimId.toString());
-        if (claim == null || !owner.equals(claim.owner()) || !claimId.toString().equals(claim.token()) && claim.token() == null) return false;
+    private boolean processClaim(ClaimHandle handle) {
         Instant now = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class).toInstant();
+        Claim claim = jdbc.query("SELECT dispute_case_id,deadline_type,due_at,owner_id,claim_token,lease_until FROM dispute_deadline_claim WHERE id=? FOR UPDATE", rs -> rs.next()
+            ? new Claim(UUID.fromString(rs.getString(1)), rs.getString(2), rs.getTimestamp(3).toInstant(), rs.getString(4), rs.getString(5), rs.getTimestamp(6).toInstant()) : null, handle.id().toString());
+        if (claim == null || !handle.owner().equals(claim.owner()) || !handle.token().equals(claim.token()) || !claim.leaseUntil().isAfter(now)) return false;
         var caseRow = jdbc.query("SELECT c.status,c.seller_deadline,c.admin_deadline,c.hard_deadline,c.proof_type,c.proof_reference,c.disputed_quantity,c.order_id,o.listing_id,o.unit_price_fen,p.id,p.paid_amount_fen,p.provider,p.status "
                 + "FROM dispute_case c JOIN trade_order o ON o.id=c.order_id LEFT JOIN payment_order p ON p.order_id=o.id AND p.status='SUCCEEDED' "
                 + "WHERE c.id=? FOR UPDATE", rs -> rs.next() ? new CaseFacts(rs.getString(1), ts(rs.getTimestamp(2)), ts(rs.getTimestamp(3)), ts(rs.getTimestamp(4)),
             rs.getString(5), rs.getString(6), rs.getInt(7), UUID.fromString(rs.getString(8)), UUID.fromString(rs.getString(9)), rs.getLong(10),
             rs.getString(11) == null ? null : UUID.fromString(rs.getString(11)), rs.getLong(12), rs.getString(13)) : null, claim.caseId().toString());
-        if (caseRow == null) return complete(claimId, claim);
+        if (caseRow == null) return complete(handle, claim);
         switch (claim.type()) {
             case "SELLER_RESPONSE" -> sellerDeadline(caseRow, now);
             case "ADMIN_SLA" -> adminSla(caseRow, now);
             case "HARD_DEADLINE" -> hardDeadline(caseRow, now);
             default -> throw new IllegalArgumentException("未知争议截止类型");
         }
-        return complete(claimId, claim);
+        return complete(handle, claim);
     }
 
     private void sellerDeadline(CaseFacts row, Instant now) {
@@ -124,8 +126,8 @@ public final class DisputeDeadlineScheduler {
         jdbc.update("UPDATE dispute_case SET status='RESOLVED',decision='REFUND_ONLY',approved_quantity=?,resolved_at=CURRENT_TIMESTAMP(6),updated_at=CURRENT_TIMESTAMP(6) WHERE order_id=? AND status IN ('OPEN','SELLER_RESPONDED','UNDER_REVIEW')", row.disputedQuantity(), row.orderId().toString());
     }
 
-    private boolean complete(UUID id, Claim claim) {
-        return jdbc.update("UPDATE dispute_deadline_claim SET status='COMPLETED',completed_at=CURRENT_TIMESTAMP(6),owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='PROCESSING' AND owner_id=? AND claim_token=? AND lease_until>CURRENT_TIMESTAMP(6)", id.toString(), claim.owner(), claim.token()) == 1;
+    private boolean complete(ClaimHandle handle, Claim claim) {
+        return jdbc.update("UPDATE dispute_deadline_claim SET status='COMPLETED',completed_at=CURRENT_TIMESTAMP(6),owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='PROCESSING' AND owner_id=? AND claim_token=? AND lease_until>CURRENT_TIMESTAMP(6)", handle.id().toString(), handle.owner(), handle.token()) == 1;
     }
 
     private void insertEvent(String type, UUID aggregateId, String orderId, String field) {
@@ -137,7 +139,8 @@ public final class DisputeDeadlineScheduler {
     private static boolean terminal(String status) { return "RESOLVED".equals(status) || "REJECTED".equals(status); }
     private static long amount(long unit, int quantity) { try { return Math.multiplyExact(unit, quantity); } catch (ArithmeticException ex) { return Long.MAX_VALUE; } }
     private static Instant ts(Timestamp value) { return value == null ? null : value.toInstant(); }
-    private record Claim(UUID caseId, String type, Instant dueAt, String owner, String token) {}
+    private record Claim(UUID caseId, String type, Instant dueAt, String owner, String token, Instant leaseUntil) {}
+    private record ClaimHandle(UUID id, String owner, String token) {}
     private record CaseFacts(String status, Instant sellerDeadline, Instant adminDeadline, Instant hardDeadline, String proofType,
                              String proofReference, int disputedQuantity, UUID orderId, UUID listingId, long unitPriceFen,
                              UUID paymentId, long paidAmountFen, String provider) {}

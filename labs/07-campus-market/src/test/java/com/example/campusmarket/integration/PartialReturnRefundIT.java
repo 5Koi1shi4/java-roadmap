@@ -5,26 +5,34 @@ import com.example.campusmarket.dispute.application.ReturnResolutionService;
 import com.example.campusmarket.dispute.domain.DisputeDecision;
 import com.example.campusmarket.dispute.domain.ReturnProofType;
 import com.example.campusmarket.payment.application.SettlementService;
+import com.example.campusmarket.payment.application.RefundService;
+import com.example.campusmarket.payment.infrastructure.SimulatedPaymentProviderController;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.test.annotation.DirtiesContext;
 
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** 真实 MySQL：三件退一件只隔离一件，剩余金额可在七天后净结算。 */
 @SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
 @ActiveProfiles("local")
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @TestPropertySource(properties = {"server.port=18082", "campus.market.payment.provider-url=http://localhost:18082/simulated-provider",
-    "campus.market.search.dispatcher.enabled=false", "campus.market.dispute.deadline.enabled=false"})
-class PartialReturnRefundIT extends SharedContainers {
+    "campus.market.search.dispatcher.enabled=false", "campus.market.dispute.deadline.enabled=false",
+    "campus.market.dispute.return-reconciliation.enabled=false"})
+class PartialReturnRefundIT extends Task11MySqlContainers {
     @Autowired JdbcTemplate jdbc;
     @Autowired ReturnResolutionService returns;
     @Autowired SettlementService settlements;
+    @Autowired RefundService refunds;
+    @Autowired SimulatedPaymentProviderController provider;
 
     @Test
     void returnsOneOfThreeQuarantinesOnlyOneAndSettlesTheRemainingNetAmount() {
@@ -35,8 +43,11 @@ class PartialReturnRefundIT extends SharedContainers {
         jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,hard_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?,1,'QUANTITY','UNDER_REVIEW',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),0, CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", dispute.toString(), order.toString(), buyer.toString());
 
         var result = returns.resolve(dispute, DisputeDecision.RETURN_AND_REFUND, 1, ReturnProofType.SELLER_CONFIRMED, "seller-confirmed");
-        assertThat(result.refundStatus()).isEqualTo("SUCCEEDED");
+        assertThat(result.refundStatus()).isEqualTo("PROCESSING");
         assertThat(result.amountFen()).isEqualTo(100L);
+        provider.setRefundStatus(refunds.queryRefund(result.refundId()).providerReference(), "SUCCEEDED");
+        assertThat(refunds.reconcileRefund(result.refundId()).status()).isEqualTo("SUCCEEDED");
+        assertThat(returns.reconcileSuccessfulRefund(result.refundId()).refundStatus()).isEqualTo("SUCCEEDED");
         assertThat(jdbc.queryForObject("SELECT quarantined_quantity FROM listing WHERE id=?", Integer.class, listing.toString())).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT available_quantity FROM listing WHERE id=?", Integer.class, listing.toString())).isZero();
         assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("AFTERSALE_WINDOW");
@@ -45,6 +56,47 @@ class PartialReturnRefundIT extends SharedContainers {
         assertThat(settlement.status()).isEqualTo("SETTLED");
         assertThat(settlement.netSettlementFen()).isEqualTo(200L);
     }
+
+    @Test
+    void refundOnlySuccessDoesNotTouchQuarantine() {
+        Fixture f = fixture(1, 100);
+        var result = returns.resolve(f.dispute(), DisputeDecision.REFUND_ONLY, 1, ReturnProofType.PROVIDER_DELIVERED, "provider-delivered");
+        provider.setRefundStatus(refunds.queryRefund(result.refundId()).providerReference(), "SUCCEEDED");
+        refunds.reconcileRefund(result.refundId());
+        returns.reconcileSuccessfulRefund(result.refundId());
+        assertThat(jdbc.queryForObject("SELECT quarantined_quantity FROM listing WHERE id=?", Integer.class, f.listing().toString())).isZero();
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, f.order().toString())).isEqualTo("REFUNDED");
+    }
+
+    @Test
+    void buyerEvidenceCannotTriggerRefund() {
+        Fixture f = fixture(1, 100);
+        assertThatThrownBy(() -> returns.resolve(f.dispute(), DisputeDecision.REFUND_ONLY, 1, ReturnProofType.BUYER_EVIDENCE, "buyer-video"))
+            .isInstanceOf(IllegalStateException.class);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, f.order().toString())).isZero();
+    }
+
+    @Test
+    void unknownRefundAndReservationBlockSettlement() {
+        Fixture f = fixture(1, 100);
+        jdbc.update("UPDATE trade_order SET status='AFTERSALE_WINDOW' WHERE id=?", f.order().toString());
+        jdbc.update("UPDATE payment_order SET reserved_refund_fen=100 WHERE id=?", f.payment().toString());
+        UUID refund = UUID.randomUUID();
+        jdbc.update("INSERT INTO refund_order (id,order_id,payment_order_id,provider,idempotency_key,source_type,source_id,paid_amount_fen,amount_fen,status,created_at,updated_at) VALUES (?,?,?,?,?,'DISPUTE',?,?,?,?,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            refund.toString(), f.order().toString(), f.payment().toString(), "simulated", "unknown-" + refund, f.dispute().toString(), 100, 100, "UNKNOWN");
+        assertThat(settlements.settle(f.order()).status()).isEqualTo("BLOCKED");
+    }
+
+    private Fixture fixture(int quantity, long unitPrice) {
+        UUID buyer = user(), seller = user(), listing = UUID.randomUUID(), order = UUID.randomUUID(), payment = UUID.randomUUID(), dispute = UUID.randomUUID();
+        jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,0,'SOLD_OUT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", listing.toString(), seller.toString(), "教材", "描述", "教材", unitPrice);
+        jdbc.update("INSERT INTO trade_order (id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,paid_amount_fen,status,version,t0,created_at,updated_at) VALUES (?,?,?,?,?,?,?, ?,?,?, 'DISPUTED',0,DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 8 DAY),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", order.toString(), buyer.toString(), seller.toString(), listing.toString(), "教材", "描述", unitPrice, quantity, unitPrice * quantity, unitPrice * quantity);
+        jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,'SUCCEEDED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", payment.toString(), order.toString(), "simulated", "pay-" + payment, unitPrice * quantity, unitPrice * quantity, "sim-pay-" + payment);
+        jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,hard_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?,?,'QUANTITY','UNDER_REVIEW',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", dispute.toString(), order.toString(), buyer.toString(), quantity);
+        return new Fixture(listing, order, payment, dispute);
+    }
+
+    private record Fixture(UUID listing, UUID order, UUID payment, UUID dispute) {}
 
     private UUID user() {
         UUID id = UUID.randomUUID();
