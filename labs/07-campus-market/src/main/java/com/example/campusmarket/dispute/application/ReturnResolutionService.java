@@ -120,10 +120,17 @@ public class ReturnResolutionService {
     /** 退款回调/对账成功后的短事务收敛；库存唯一业务键使重复解析安全。 */
     public Resolution reconcileSuccessfulRefund(UUID refundId) {
         Objects.requireNonNull(refundId, "退款ID不能为空");
-        ReturnFacts facts = transactions.execute(status -> jdbc.query("SELECT r.dispute_case_id,r.order_id,r.listing_id,r.approved_quantity,r.resolution_type,r.quarantined_at,f.status,f.amount_fen,o.quantity "
+        ReturnFacts facts = transactions.execute(status -> {
+            // prepare 已提交而 finish 尚未提交时，依据不可变幂等键把退款重新关联回退回案件。
+            jdbc.update("UPDATE return_case r JOIN refund_order f ON f.id=? AND r.refund_id IS NULL "
+                    + "AND f.order_id=r.order_id AND (f.idempotency_key=CONCAT('dispute-return-',r.dispute_case_id) "
+                    + "OR f.idempotency_key=CONCAT('dispute-hard-refund-',r.dispute_case_id)) "
+                    + "SET r.refund_id=f.id,r.refund_status=f.status,r.updated_at=CURRENT_TIMESTAMP(6)", refundId.toString());
+            return jdbc.query("SELECT r.dispute_case_id,r.order_id,r.listing_id,r.approved_quantity,r.resolution_type,r.quarantined_at,f.status,f.amount_fen,o.quantity "
                 + "FROM return_case r JOIN refund_order f ON f.id=r.refund_id JOIN trade_order o ON o.id=r.order_id WHERE f.id=? FOR UPDATE",
             rs -> rs.next() ? new ReturnFacts(UUID.fromString(rs.getString(1)), UUID.fromString(rs.getString(2)), UUID.fromString(rs.getString(3)),
-                rs.getInt(4), rs.getString(5), rs.getTimestamp(6) != null, rs.getString(7), rs.getLong(8), rs.getInt(9)) : null, refundId.toString()));
+                rs.getInt(4), rs.getString(5), rs.getTimestamp(6) != null, rs.getString(7), rs.getLong(8), rs.getInt(9)) : null, refundId.toString());
+        });
         if (facts == null) return null;
         if (!"SUCCEEDED".equals(facts.refundStatus())) return new Resolution(facts.disputeCaseId(), refundId, facts.refundStatus(), facts.amountFen(), facts.quarantined());
         boolean quarantined = facts.quarantined();

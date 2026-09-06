@@ -2,6 +2,9 @@ package com.example.campusmarket.integration;
 
 import com.example.campusmarket.CampusMarketApplication;
 import com.example.campusmarket.dispute.application.DisputeDeadlineScheduler;
+import com.example.campusmarket.dispute.application.ReturnResolutionService;
+import com.example.campusmarket.payment.application.RefundService;
+import com.example.campusmarket.payment.infrastructure.SimulatedPaymentProviderController;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -25,6 +28,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 class DisputeDeadlineIT extends Task11MySqlContainers {
     @Autowired JdbcTemplate jdbc;
     @Autowired DisputeDeadlineScheduler deadlines;
+    @Autowired RefundService refunds;
+    @Autowired ReturnResolutionService returns;
+    @Autowired SimulatedPaymentProviderController provider;
 
     @Test
     void sellerSilenceMovesCaseToAdminReviewWithoutBlockingLaterDecision() {
@@ -37,6 +43,8 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
         assertThat(deadlines.runOne(dispute)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, dispute.toString())).isEqualTo("UNDER_REVIEW");
         assertThat(jdbc.queryForObject("SELECT status FROM dispute_deadline_claim WHERE dispute_case_id=? AND deadline_type='SELLER_RESPONSE'", String.class, dispute.toString())).isEqualTo("COMPLETED");
+        assertThat(jdbc.queryForObject("SELECT due_at > CURRENT_TIMESTAMP(6) FROM dispute_deadline_claim WHERE dispute_case_id=? AND deadline_type='ADMIN_SLA'", Boolean.class, dispute.toString())).isTrue();
+        assertThat(jdbc.queryForObject("SELECT due_at > DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 13 DAY) FROM dispute_deadline_claim WHERE dispute_case_id=? AND deadline_type='HARD_DEADLINE'", Boolean.class, dispute.toString())).isTrue();
     }
 
     @Test
@@ -75,6 +83,14 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
         assertThat(deadlines.runOne(dispute)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, dispute.toString())).isEqualTo("RESOLVED");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='REFUND_REQUESTED' AND aggregate_id IN (SELECT id FROM refund_order WHERE order_id=?)", Integer.class, order.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT source_id FROM refund_order WHERE order_id=?", String.class, order.toString())).isEqualTo(dispute.toString());
+        UUID refund = UUID.fromString(jdbc.queryForObject("SELECT id FROM refund_order WHERE order_id=?", String.class, order.toString()));
+        provider.setRefundStatus(refunds.queryRefund(refund).providerReference(), "SUCCEEDED");
+        refunds.reconcileRefund(refund);
+        returns.reconcileSuccessfulRefund(refund);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM return_case WHERE dispute_case_id=? AND refund_id=? AND resolution_type='RETURN_AND_REFUND'", Integer.class, dispute.toString(), refund.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("REFUNDED");
+        assertThat(jdbc.queryForObject("SELECT quarantined_quantity FROM listing WHERE id=?", Integer.class, listing.toString())).isEqualTo(1);
 
         UUID slaCase = UUID.randomUUID();
         jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,disputed_quantity,reason,status,admin_deadline,hard_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?,1,'QUANTITY','UNDER_REVIEW',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", slaCase.toString(), order.toString(), buyer.toString());

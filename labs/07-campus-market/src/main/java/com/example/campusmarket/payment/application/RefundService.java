@@ -96,7 +96,9 @@ public class RefundService {
 
     private RefundIntent prepare(UUID orderId, String idempotencyKey, Money amount, String sourceType, UUID sourceId,
                                  byte[] rawRequest, String owner, String token) {
-        JdbcPaymentRepository.PaymentRecord payment = repository.findLatestSuccessfulPaymentByOrder(orderId);
+        JdbcPaymentRepository.OrderRecord order = repository.lockOrderForRefund(orderId);
+        if (order == null) throw new IllegalArgumentException("订单不存在");
+        JdbcPaymentRepository.PaymentRecord payment = repository.findLatestSuccessfulPaymentByOrderForUpdate(orderId);
         if (payment == null || payment.providerReference() == null) throw new IllegalStateException("订单尚未支付成功");
         if (amount.fen() <= 0 || amount.fen() > payment.paidAmountFen()) throw new IllegalArgumentException("退款金额超出实付金额");
         byte[] requestHash = digest(payment.provider() + "|CNY|" + payment.providerReference() + "|" + orderId + "|"
@@ -108,6 +110,7 @@ public class RefundService {
             if (existing.amountFen() != amount.fen() || (existing.requestHash() != null && !MessageDigest.isEqual(existing.requestHash(), requestHash))) throw new IdempotencyConflictException();
                 return new RefundIntent(null, null, null, 0L, null, null, new RefundResult(existing.id(), existing.providerReference(), existing.status(), existing.responseUtf8()));
         }
+        if ("SETTLED".equals(order.status())) throw new IllegalStateException("订单已结算，不能创建普通退款");
         if (!repository.reserveRefund(payment.id(), amount.fen())) {
             JdbcPaymentRepository.RefundRecord concurrent = repository.findRefundByKey(orderId, idempotencyKey);
             if (concurrent != null && concurrent.amountFen() == amount.fen()

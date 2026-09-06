@@ -60,6 +60,19 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
         var settlement = settlements.settle(order);
         assertThat(settlement.status()).isEqualTo("SETTLED");
         assertThat(settlement.netSettlementFen()).isEqualTo(200L);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='SETTLEMENT_CREATED' AND aggregate_id=?", Integer.class, order.toString())).isEqualTo(1);
+    }
+
+    @Test
+    void successfulRefundReconcilesWhenProcessCrashesAfterPrepare() {
+        Fixture f = fixture(1, 100);
+        var result = returns.resolve(f.dispute(), DisputeDecision.RETURN_AND_REFUND, 1, ReturnProofType.SELLER_CONFIRMED, "seller-confirmed");
+        jdbc.update("UPDATE return_case SET refund_id=NULL,refund_status='PROCESSING' WHERE dispute_case_id=?", f.dispute().toString());
+        provider.setRefundStatus(refunds.queryRefund(result.refundId()).providerReference(), "SUCCEEDED");
+        refunds.reconcileRefund(result.refundId());
+        assertThat(returns.reconcileSuccessfulRefund(result.refundId()).refundStatus()).isEqualTo("SUCCEEDED");
+        assertThat(jdbc.queryForObject("SELECT refund_id FROM return_case WHERE dispute_case_id=?", String.class, f.dispute().toString())).isEqualTo(result.refundId().toString());
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, f.order().toString())).isEqualTo("REFUNDED");
     }
 
     @Test

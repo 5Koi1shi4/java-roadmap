@@ -34,16 +34,15 @@ public class JdbcDisputeRepository {
 
     public void insert(DisputeCase file, Instant now) {
         Instant sellerDeadline = now.plus(Duration.ofHours(72));
-        Instant hardDeadline = now.plus(Duration.ofDays(14));
-        jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,admin_deadline,hard_deadline,decision,approved_quantity,version,opened_at,created_at,updated_at) VALUES (?,?,?,?,?,'OPEN',?,NULL,?,NULL,NULL,0,?,?,?)",
+        jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,admin_deadline,hard_deadline,decision,approved_quantity,version,opened_at,created_at,updated_at) VALUES (?,?,?,?,?,'OPEN',?,NULL,NULL,NULL,NULL,0,?,?,?)",
             file.id().toString(), file.orderId().toString(), file.buyerId().toString(), file.disputedQuantity(), file.reason().name(),
-            Timestamp.from(sellerDeadline), Timestamp.from(hardDeadline), Timestamp.from(now), Timestamp.from(now), Timestamp.from(now));
+            Timestamp.from(sellerDeadline), Timestamp.from(now), Timestamp.from(now), Timestamp.from(now));
         jdbc.update("INSERT INTO dispute_deadline_claim (id,dispute_case_id,deadline_type,due_at,status,created_at,updated_at) VALUES (?,?, 'SELLER_RESPONSE',?,'NEW',?,?)",
             UUID.randomUUID().toString(), file.id().toString(), Timestamp.from(sellerDeadline), Timestamp.from(now), Timestamp.from(now));
         jdbc.update("INSERT INTO dispute_deadline_claim (id,dispute_case_id,deadline_type,due_at,status,created_at,updated_at) VALUES (?,?, 'ADMIN_SLA',?,'NEW',?,?)",
-            UUID.randomUUID().toString(), file.id().toString(), Timestamp.from(now.plus(Duration.ofDays(7))), Timestamp.from(now), Timestamp.from(now));
+            UUID.randomUUID().toString(), file.id().toString(), Timestamp.from(sellerDeadline), Timestamp.from(now), Timestamp.from(now));
         jdbc.update("INSERT INTO dispute_deadline_claim (id,dispute_case_id,deadline_type,due_at,status,created_at,updated_at) VALUES (?,?, 'HARD_DEADLINE',?,'NEW',?,?)",
-            UUID.randomUUID().toString(), file.id().toString(), Timestamp.from(hardDeadline), Timestamp.from(now), Timestamp.from(now));
+            UUID.randomUUID().toString(), file.id().toString(), Timestamp.from(sellerDeadline), Timestamp.from(now), Timestamp.from(now));
     }
 
     public int markDisputed(UUID orderId, UUID actorId, long version, Instant now) {
@@ -79,8 +78,13 @@ public class JdbcDisputeRepository {
     }
 
     public int assignAdmin(UUID caseId, UUID adminId, long version, Instant now) {
-        return jdbc.update("UPDATE dispute_case SET assigned_admin_id=?,status=CASE WHEN status='OPEN' THEN 'UNDER_REVIEW' ELSE status END,admin_deadline=?,version=version+1,updated_at=? WHERE id=? AND status IN ('OPEN','SELLER_RESPONDED','UNDER_REVIEW') AND version=?",
-            adminId.toString(), Timestamp.from(now.plus(Duration.ofDays(7))), Timestamp.from(now), caseId.toString(), version);
+        int changed = jdbc.update("UPDATE dispute_case SET assigned_admin_id=?,status=CASE WHEN status='OPEN' THEN 'UNDER_REVIEW' ELSE status END,admin_deadline=?,hard_deadline=?,version=version+1,updated_at=? WHERE id=? AND status IN ('OPEN','SELLER_RESPONDED','UNDER_REVIEW') AND version=?",
+            adminId.toString(), Timestamp.from(now.plus(Duration.ofDays(7))), Timestamp.from(now.plus(Duration.ofDays(14))), Timestamp.from(now), caseId.toString(), version);
+        if (changed == 1) {
+            jdbc.update("UPDATE dispute_deadline_claim SET due_at=CASE deadline_type WHEN 'ADMIN_SLA' THEN ? WHEN 'HARD_DEADLINE' THEN ? ELSE due_at END,updated_at=? WHERE dispute_case_id=? AND deadline_type IN ('ADMIN_SLA','HARD_DEADLINE') AND status='NEW'",
+                Timestamp.from(now.plus(Duration.ofDays(7))), Timestamp.from(now.plus(Duration.ofDays(14))), Timestamp.from(now), caseId.toString());
+        }
+        return changed;
     }
 
     public int decide(UUID caseId, long version, DisputeDecision decision, int approvedQuantity, Instant now) {

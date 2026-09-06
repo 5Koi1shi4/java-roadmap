@@ -84,6 +84,23 @@ public class JdbcPaymentRepository {
             orderId.toString());
     }
 
+    /** 退款与结算统一先锁订单行，避免资格检查后被并发退款越过结算门禁。 */
+    public OrderRecord lockOrderForRefund(UUID orderId) {
+        return jdbc.query("SELECT id,total_amount_fen,status FROM trade_order WHERE id=? FOR UPDATE",
+            rs -> rs.next() ? new OrderRecord(UUID.fromString(rs.getString("id")), rs.getLong("total_amount_fen"), rs.getString("status")) : null,
+            orderId.toString());
+    }
+
+    /** 与订单锁配套的支付行锁，固定订单→支付的锁顺序。 */
+    public PaymentRecord findLatestSuccessfulPaymentByOrderForUpdate(UUID orderId) {
+        return jdbc.query("SELECT id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,request_hash,response_utf8 "
+                + "FROM payment_order WHERE order_id=? AND status='SUCCEEDED' ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
+            rs -> rs.next() ? new PaymentRecord(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),
+                rs.getString("provider"), rs.getString("idempotency_key"), rs.getLong("amount_fen"), rs.getLong("paid_amount_fen"),
+                rs.getString("provider_reference"), rs.getString("status"), rs.getBytes("request_hash"), rs.getBytes("response_utf8")) : null,
+            orderId.toString());
+    }
+
     public PaymentRecord findPaymentByReference(String provider, String reference) {
         return jdbc.query("SELECT id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,request_hash,response_utf8 FROM payment_order WHERE provider=? AND provider_reference=?",
             rs -> rs.next() ? new PaymentRecord(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),

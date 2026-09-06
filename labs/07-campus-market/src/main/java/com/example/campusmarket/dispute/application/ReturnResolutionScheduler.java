@@ -28,7 +28,8 @@ public final class ReturnResolutionScheduler {
 
     public int runOnce(int limit) {
         if (limit <= 0 || limit > 1000) throw new IllegalArgumentException("退回解析批量大小必须在1到1000之间");
-        List<UUID> ids = jdbc.query("SELECT f.id FROM refund_order f JOIN return_case r ON r.refund_id=f.id WHERE f.status='SUCCEEDED' AND (r.refund_status<>'SUCCEEDED' OR (r.resolution_type='RETURN_AND_REFUND' AND r.quarantined_at IS NULL)) ORDER BY f.updated_at,f.id LIMIT ?",
+        List<UUID> ids = jdbc.query("SELECT DISTINCT f.id FROM refund_order f JOIN return_case r ON (r.refund_id=f.id OR (r.refund_id IS NULL AND r.order_id=f.order_id AND (f.idempotency_key=CONCAT('dispute-return-',r.dispute_case_id) OR f.idempotency_key=CONCAT('dispute-hard-refund-',r.dispute_case_id)))) "
+                + "WHERE f.status='SUCCEEDED' AND (r.refund_id IS NULL OR r.refund_status<>'SUCCEEDED' OR (r.resolution_type='RETURN_AND_REFUND' AND r.quarantined_at IS NULL)) ORDER BY f.updated_at,f.id LIMIT ?",
             (rs, n) -> UUID.fromString(rs.getString(1)), limit);
         int completed = 0;
         for (UUID id : ids) {
