@@ -121,9 +121,12 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
     void sellerExplicitWriteOffConsumesQuarantineIdempotentlyAndChecksQuantity() {
         Fixture f = fixture(2, 100);
         assertThat(inventory.quarantine(f.listing(), 2, "return-q-writeoff-" + f.listing())).isTrue();
-        assertThat(inventory.writeOffQuarantined(f.listing(), 1, "return-writeoff-" + f.listing())).isTrue();
-        assertThat(inventory.writeOffQuarantined(f.listing(), 1, "return-writeoff-" + f.listing())).isTrue();
-        assertThat(inventory.writeOffQuarantined(f.listing(), 1, "return-writeoff-too-much-" + f.listing())).isFalse();
+        assertThat(inventory.scrapQuarantined(f.listing(), 1, "return-writeoff-" + f.listing())).isTrue();
+        assertThat(inventory.scrapQuarantined(f.listing(), 1, "return-writeoff-" + f.listing())).isTrue();
+        assertThat(jdbc.queryForObject("SELECT quarantined_quantity FROM listing WHERE id=?", Integer.class, f.listing().toString())).isEqualTo(1);
+        assertThat(inventory.scrapQuarantined(f.listing(), 2, "return-writeoff-too-much-" + f.listing())).isFalse();
+        assertThat(jdbc.queryForObject("SELECT quarantined_quantity FROM listing WHERE id=?", Integer.class, f.listing().toString())).isEqualTo(1);
+        assertThat(inventory.scrapQuarantined(f.listing(), 1, "return-writeoff-final-" + f.listing())).isTrue();
         assertThat(jdbc.queryForObject("SELECT available_quantity FROM listing WHERE id=?", Integer.class, f.listing().toString())).isZero();
         assertThat(jdbc.queryForObject("SELECT quarantined_quantity FROM listing WHERE id=?", Integer.class, f.listing().toString())).isZero();
     }
