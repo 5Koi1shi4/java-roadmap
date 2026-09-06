@@ -66,6 +66,8 @@ public class SettlementService {
         if (active != null && active > 0) return false;
         Integer pending = jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN')", Integer.class, order.id().toString());
         if (pending != null && pending > 0) return false;
+        Integer unreconciled = jdbc.queryForObject("SELECT COUNT(*) FROM refund_order f JOIN return_case r ON r.order_id=f.order_id AND (r.refund_id=f.id OR (r.refund_id IS NULL AND (f.idempotency_key=CONCAT('dispute-return-',r.dispute_case_id) OR f.idempotency_key=CONCAT('dispute-hard-refund-',r.dispute_case_id)))) WHERE f.order_id=? AND f.status='SUCCEEDED' AND (COALESCE(r.refund_status,'')<>'SUCCEEDED' OR (r.resolution_type='RETURN_AND_REFUND' AND r.quarantined_at IS NULL))", Integer.class, order.id().toString());
+        if (unreconciled != null && unreconciled > 0) return false;
         Long reserved = jdbc.queryForObject("SELECT COALESCE(SUM(reserved_refund_fen),0) FROM payment_order WHERE order_id=?", Long.class, order.id().toString());
         return reserved == null || reserved == 0;
     }
@@ -77,6 +79,8 @@ public class SettlementService {
         if (active != null && active > 0) return "ACTIVE_DISPUTE";
         Integer pending = jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=? AND status IN ('REQUESTED','PROCESSING','UNKNOWN')", Integer.class, order.id().toString());
         if (pending != null && pending > 0) return "PENDING_REFUND";
+        Integer unreconciled = jdbc.queryForObject("SELECT COUNT(*) FROM refund_order f JOIN return_case r ON r.order_id=f.order_id AND (r.refund_id=f.id OR (r.refund_id IS NULL AND (f.idempotency_key=CONCAT('dispute-return-',r.dispute_case_id) OR f.idempotency_key=CONCAT('dispute-hard-refund-',r.dispute_case_id)))) WHERE f.order_id=? AND f.status='SUCCEEDED' AND (COALESCE(r.refund_status,'')<>'SUCCEEDED' OR (r.resolution_type='RETURN_AND_REFUND' AND r.quarantined_at IS NULL))", Integer.class, order.id().toString());
+        if (unreconciled != null && unreconciled > 0) return "UNRECONCILED_RETURN";
         return "REFUND_RESERVATION";
     }
 

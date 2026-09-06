@@ -58,6 +58,12 @@ public class ReturnResolutionService {
         RefundService.RefundResult refund = refunds.requestRefund(facts.orderId(),
             "dispute-return-" + disputeCaseId, Money.ofFen(facts.amountFen()), "DISPUTE", disputeCaseId);
         Resolution pending = transactions.execute(status -> finish(facts, decision, refund));
+        if ("FAILED".equals(refund.status())) {
+            transactions.execute(status -> {
+                jdbc.update("UPDATE dispute_case SET status='ESCALATED',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='RESOLVED'", disputeCaseId.toString());
+                return null;
+            });
+        }
         return "SUCCEEDED".equals(refund.status()) ? reconcileSuccessfulRefund(refund.refundId()) : pending;
     }
 
@@ -100,6 +106,11 @@ public class ReturnResolutionService {
 
     /** 人工队列中的硬期限失败退款恢复；只允许查询到提供方成功事实后重新占额并收敛。 */
     public Resolution retryHardDeadlineRefund(UUID disputeCaseId) {
+        return retryFailedRefund(disputeCaseId);
+    }
+
+    /** 普通裁决与硬期限共用的人工恢复入口；始终复用原退款 ID 与提供方 reference。 */
+    public Resolution retryFailedRefund(UUID disputeCaseId) {
         Objects.requireNonNull(disputeCaseId, "争议ID不能为空");
         UUID refundId = jdbc.query("SELECT refund_id FROM return_case WHERE dispute_case_id=? AND status='ESCALATED' AND refund_status='FAILED'",
             rs -> rs.next() && rs.getString(1) != null ? UUID.fromString(rs.getString(1)) : null, disputeCaseId.toString());
@@ -182,8 +193,8 @@ public class ReturnResolutionService {
 
     private Resolution finish(CaseFacts facts, DisputeDecision decision, RefundService.RefundResult refund) {
         Instant now = databaseNow();
-        jdbc.update("UPDATE return_case SET refund_id=?,refund_status=?,resolution_type=?,status=CASE WHEN ?='SUCCEEDED' THEN 'CONFIRMED' ELSE 'AWAITING_PROOF' END,refunded_at=CASE WHEN ?='SUCCEEDED' THEN ? ELSE refunded_at END,updated_at=? WHERE dispute_case_id=?",
-            refund.refundId().toString(), refund.status(), decision.name(), refund.status(), refund.status(), TimestampValue.of(now), TimestampValue.of(now), facts.caseId().toString());
+        jdbc.update("UPDATE return_case SET refund_id=?,refund_status=?,resolution_type=?,status=CASE WHEN ?='SUCCEEDED' THEN 'CONFIRMED' WHEN ?='FAILED' THEN 'ESCALATED' ELSE 'AWAITING_PROOF' END,refunded_at=CASE WHEN ?='SUCCEEDED' THEN ? ELSE refunded_at END,updated_at=? WHERE dispute_case_id=?",
+            refund.refundId().toString(), refund.status(), decision.name(), refund.status(), refund.status(), refund.status(), TimestampValue.of(now), TimestampValue.of(now), facts.caseId().toString());
         return new Resolution(facts.caseId(), refund.refundId(), refund.status(), facts.amountFen(), false);
     }
 
@@ -212,7 +223,7 @@ public class ReturnResolutionService {
         final boolean doneQuarantine = quarantined;
         return transactions.execute(status -> {
             Instant now = databaseNow();
-            jdbc.update("UPDATE return_case SET refund_status='SUCCEEDED',status='CONFIRMED',refunded_at=COALESCE(refunded_at,?),quarantined_at=CASE WHEN ? THEN COALESCE(quarantined_at,?) ELSE quarantined_at END,updated_at=? WHERE refund_id=? AND refund_status IN ('REQUESTED','PROCESSING','UNKNOWN','FAILED')",
+            jdbc.update("UPDATE return_case SET refund_status='SUCCEEDED',status='CONFIRMED',refunded_at=COALESCE(refunded_at,?),quarantined_at=CASE WHEN ? THEN COALESCE(quarantined_at,?) ELSE quarantined_at END,updated_at=? WHERE refund_id=? AND refund_status IN ('REQUESTED','PROCESSING','UNKNOWN','SUCCEEDED','FAILED')",
                 TimestampValue.of(now), doneQuarantine, TimestampValue.of(now), TimestampValue.of(now), refundId.toString());
             Integer refundedQuantity = jdbc.queryForObject("SELECT COALESCE(SUM(approved_quantity),0) FROM return_case WHERE order_id=? AND refund_status='SUCCEEDED'", Integer.class, facts.orderId().toString());
             String target = refundedQuantity != null && refundedQuantity >= facts.purchasedQuantity() ? "REFUNDED" : "AFTERSALE_WINDOW";
