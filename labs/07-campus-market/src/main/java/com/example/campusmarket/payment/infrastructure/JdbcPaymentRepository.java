@@ -468,6 +468,17 @@ public class JdbcPaymentRepository {
             """, owner, token, refundId.toString()) == 1;
     }
 
+    /** 人工恢复明确失败的退款；先把记录置为 PROCESSING，调用方随后必须以同一 fencing token 查询提供方。 */
+    public boolean claimFailedRefundRecovery(UUID refundId, String owner, String token) {
+        return jdbc.update("UPDATE refund_order SET status='PROCESSING',reconcile_owner=?,reconcile_token=?,reconcile_lease_until=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 30 SECOND),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='FAILED' AND provider_reference IS NOT NULL",
+            owner, token, refundId.toString()) == 1;
+    }
+
+    public boolean markFailedRefundRecovery(UUID refundId, String owner, String token) {
+        return jdbc.update("UPDATE refund_order SET status='FAILED',reconcile_owner=NULL,reconcile_token=NULL,reconcile_lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='PROCESSING' AND reconcile_owner=? AND reconcile_token=? AND reconcile_lease_until>CURRENT_TIMESTAMP(6)",
+            refundId.toString(), owner, token) == 1;
+    }
+
     public boolean recordCallback(PaymentGateway.VerifiedCallback callback, byte[] rawBody) {
         try {
             return jdbc.update("""

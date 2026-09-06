@@ -66,6 +66,52 @@ public class RefundService {
         return queryRefund(refundId);
     }
 
+    /** 人工恢复失败退款：先重新占用同一支付额度，再查询原提供方 reference，禁止凭空创建第二笔退款。 */
+    public RefundResult retryFailedRefund(UUID refundId) {
+        Objects.requireNonNull(refundId, "退款ID不能为空");
+        String owner = "refund-failed-recovery-" + UUID.randomUUID();
+        String token = UUID.randomUUID().toString();
+        RecoveryIntent intent = transactions.execute(ignored -> {
+            JdbcPaymentRepository.RefundRecord row = repository.findRefund(refundId);
+            if (row == null || !"FAILED".equals(row.status())) return null;
+            if (!repository.claimFailedRefundRecovery(refundId, owner, token)) return null;
+            JdbcPaymentRepository.PaymentRecord payment = repository.findPayment(row.paymentId());
+            if (payment == null || !repository.reserveRefund(payment.id(), row.amountFen())) {
+                repository.markFailedRefundRecovery(refundId, owner, token);
+                return null;
+            }
+            return new RecoveryIntent(row.id(), row.paymentId(), row.providerReference(), row.amountFen());
+        });
+        if (intent == null) return queryRefund(refundId);
+        PaymentGateway.RefundStatus result;
+        try {
+            result = gateway.queryRefund(intent.providerReference());
+        } catch (RuntimeException failure) {
+            releaseFailedRecovery(intent, owner, token);
+            return queryRefund(refundId);
+        }
+        if (result.providerReference() == null || result.amountFen() != intent.amountFen()
+            || !intent.providerReference().equals(result.providerReference())
+            || result.status() != PaymentGateway.RefundStatus.Status.SUCCEEDED) {
+            releaseFailedRecovery(intent, owner, token);
+            return queryRefund(refundId);
+        }
+        transactions.execute(ignored -> {
+            settleTerminal(intent.refundId(), intent.paymentId(), intent.amountFen(), intent.providerReference(),
+                result.providerReference(), "SUCCEEDED", owner, token);
+            return null;
+        });
+        return queryRefund(refundId);
+    }
+
+    private void releaseFailedRecovery(RecoveryIntent intent, String owner, String token) {
+        transactions.execute(ignored -> {
+            repository.releaseRefund(intent.paymentId(), intent.amountFen());
+            repository.markFailedRefundRecovery(intent.refundId(), owner, token);
+            return null;
+        });
+    }
+
     public RefundResult requestRefund(UUID orderId, String idempotencyKey, Money amount, String sourceType, UUID sourceId) {
         return requestRefund(orderId, idempotencyKey, amount, sourceType, sourceId, new byte[0]);
     }
@@ -245,6 +291,7 @@ public class RefundService {
     public record RefundResult(UUID refundId, String providerReference, String status, byte[] responseUtf8) {
         public RefundResult(UUID refundId, String providerReference, String status) { this(refundId, providerReference, status, null); }
     }
+    private record RecoveryIntent(UUID refundId, UUID paymentId, String providerReference, long amountFen) {}
     private record RefundIntent(UUID refundId, UUID paymentId, String paymentReference, long amountFen,
                                 String owner, String token, RefundResult existing) {}
     public static class RefundLimitExceededException extends RuntimeException { }

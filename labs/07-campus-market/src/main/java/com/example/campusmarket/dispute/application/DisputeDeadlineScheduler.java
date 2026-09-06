@@ -138,7 +138,8 @@ public final class DisputeDeadlineScheduler {
             defer(handle, claim, deadline == null ? plusDays(row.sellerDeadline(), 14, now) : deadline);
             return;
         }
-        boolean trusted = row.proofType() != null && ReturnProofType.parse(row.proofType()).isTrusted();
+        boolean trusted = resolutions.isHardDeadlineProofAuthorized(row.caseId(), row.orderId(), row.disputedQuantity(),
+            row.proofType(), row.proofReference(), row.provider());
         Long amount;
         try {
             amount = amount(row.unitPriceFen(), row.disputedQuantity());
