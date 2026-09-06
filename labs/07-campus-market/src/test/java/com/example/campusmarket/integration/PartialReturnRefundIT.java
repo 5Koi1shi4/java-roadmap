@@ -1,6 +1,7 @@
 package com.example.campusmarket.integration;
 
 import com.example.campusmarket.CampusMarketApplication;
+import com.example.campusmarket.catalog.application.InventoryPort;
 import com.example.campusmarket.dispute.application.ReturnResolutionService;
 import com.example.campusmarket.dispute.domain.DisputeDecision;
 import com.example.campusmarket.dispute.domain.ReturnProofType;
@@ -16,6 +17,9 @@ import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.annotation.DirtiesContext;
 
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -33,6 +37,7 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
     @Autowired SettlementService settlements;
     @Autowired RefundService refunds;
     @Autowired SimulatedPaymentProviderController provider;
+    @Autowired InventoryPort inventory;
 
     @Test
     void returnsOneOfThreeQuarantinesOnlyOneAndSettlesTheRemainingNetAmount() {
@@ -85,6 +90,42 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
         jdbc.update("INSERT INTO refund_order (id,order_id,payment_order_id,provider,idempotency_key,source_type,source_id,paid_amount_fen,amount_fen,status,created_at,updated_at) VALUES (?,?,?,?,?,'DISPUTE',?,?,?,?,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
             refund.toString(), f.order().toString(), f.payment().toString(), "simulated", "unknown-" + refund, f.dispute().toString(), 100, 100, "UNKNOWN");
         assertThat(settlements.settle(f.order()).status()).isEqualTo("BLOCKED");
+    }
+
+    @Test
+    void concurrentDecisionsCreateOneRefundAndOneQuarantine() throws Exception {
+        Fixture f = fixture(1, 100);
+        var pool = Executors.newFixedThreadPool(2);
+        var ready = new CountDownLatch(2);
+        var start = new CountDownLatch(1);
+        try {
+            var first = pool.submit(() -> { ready.countDown(); start.await(5, TimeUnit.SECONDS); return returns.resolve(f.dispute(), DisputeDecision.RETURN_AND_REFUND, 1, ReturnProofType.SELLER_CONFIRMED, "seller-confirmed"); });
+            var second = pool.submit(() -> { ready.countDown(); start.await(5, TimeUnit.SECONDS); return returns.resolve(f.dispute(), DisputeDecision.RETURN_AND_REFUND, 1, ReturnProofType.SELLER_CONFIRMED, "seller-confirmed"); });
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+            var firstResult = first.get(20, TimeUnit.SECONDS);
+            var secondResult = second.get(20, TimeUnit.SECONDS);
+            assertThat(firstResult.refundId()).isEqualTo(secondResult.refundId());
+            provider.setRefundStatus(refunds.queryRefund(firstResult.refundId()).providerReference(), "SUCCEEDED");
+            refunds.reconcileRefund(firstResult.refundId());
+            returns.reconcileSuccessfulRefund(firstResult.refundId());
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, f.order().toString())).isEqualTo(1);
+            assertThat(jdbc.queryForObject("SELECT successful_refund_fen FROM payment_order WHERE id=?", Long.class, f.payment().toString())).isEqualTo(100L);
+            assertThat(jdbc.queryForObject("SELECT quarantined_quantity FROM listing WHERE id=?", Integer.class, f.listing().toString())).isEqualTo(1);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void sellerExplicitWriteOffConsumesQuarantineIdempotentlyAndChecksQuantity() {
+        Fixture f = fixture(2, 100);
+        assertThat(inventory.quarantine(f.listing(), 2, "return-q-writeoff-" + f.listing())).isTrue();
+        assertThat(inventory.writeOffQuarantined(f.listing(), 1, "return-writeoff-" + f.listing())).isTrue();
+        assertThat(inventory.writeOffQuarantined(f.listing(), 1, "return-writeoff-" + f.listing())).isTrue();
+        assertThat(inventory.writeOffQuarantined(f.listing(), 1, "return-writeoff-too-much-" + f.listing())).isFalse();
+        assertThat(jdbc.queryForObject("SELECT available_quantity FROM listing WHERE id=?", Integer.class, f.listing().toString())).isZero();
+        assertThat(jdbc.queryForObject("SELECT quarantined_quantity FROM listing WHERE id=?", Integer.class, f.listing().toString())).isZero();
     }
 
     private Fixture fixture(int quantity, long unitPrice) {

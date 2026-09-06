@@ -14,4 +14,8 @@ public interface InventoryPort {
     boolean relistQuarantined(UUID listingId, int quantity, String businessKey);
     /** 卖家显式报损隔离库存；幂等且不增加可售数量。 */
     boolean scrapQuarantined(UUID listingId, int quantity, String businessKey);
+    /** writeOffQuarantined 的语义别名，供卖家报损命令使用。 */
+    default boolean writeOffQuarantined(UUID listingId, int quantity, String businessKey) {
+        return scrapQuarantined(listingId, quantity, businessKey);
+    }
 }

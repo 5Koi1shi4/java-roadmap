@@ -50,12 +50,13 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
         assertThat(deadlines.runOne(dispute)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT status FROM dispute_deadline_claim WHERE dispute_case_id=? AND deadline_type='ADMIN_SLA'", String.class, dispute.toString())).isEqualTo("COMPLETED");
         assertThat(jdbc.queryForObject("SELECT owner_id FROM dispute_deadline_claim WHERE dispute_case_id=? AND deadline_type='ADMIN_SLA'", String.class, dispute.toString())).isNull();
+        assertThat(jdbc.update("UPDATE dispute_deadline_claim SET status='COMPLETED' WHERE dispute_case_id=? AND deadline_type='ADMIN_SLA' AND owner_id='old-owner' AND claim_token='old-token'", dispute.toString())).isZero();
     }
 
     @Test
     void hardDeadlineWithoutTrustedProofEscalatesAndFreezesFunds() {
         UUID buyer = user(), seller = user(), listing = UUID.randomUUID(), order = UUID.randomUUID(), dispute = UUID.randomUUID();
-        insertOrder(buyer, seller, listing, order, "UNDER_REVIEW");
+        insertOrder(buyer, seller, listing, order, "DISPUTED");
         jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,admin_deadline,hard_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?,1,'QUANTITY','UNDER_REVIEW',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 3 DAY),DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", dispute.toString(), order.toString(), buyer.toString());
         claim(dispute, "HARD_DEADLINE");
 
@@ -67,7 +68,7 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
     @Test
     void trustedHardDeadlineCreatesOneRefundOutboxAndSlaAlertIsOneShot() {
         UUID buyer = user(), seller = user(), listing = UUID.randomUUID(), order = UUID.randomUUID(), payment = UUID.randomUUID(), dispute = UUID.randomUUID();
-        insertOrder(buyer, seller, listing, order, "UNDER_REVIEW");
+        insertOrder(buyer, seller, listing, order, "DISPUTED");
         jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,100,100,?,'SUCCEEDED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", payment.toString(), order.toString(), "simulated", "pay-" + payment, "sim-pay-" + payment);
         jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,disputed_quantity,reason,status,proof_type,seller_deadline,admin_deadline,hard_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?,1,'QUANTITY','UNDER_REVIEW','ADMIN_CONFIRMED',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 3 DAY),DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", dispute.toString(), order.toString(), buyer.toString());
         claim(dispute, "HARD_DEADLINE");
