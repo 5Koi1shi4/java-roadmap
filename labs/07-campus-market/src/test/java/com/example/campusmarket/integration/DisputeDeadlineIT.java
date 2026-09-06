@@ -11,7 +11,9 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.boot.test.mock.mockito.SpyBean;
+import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.annotation.DirtiesContext;
@@ -32,12 +34,16 @@ import static org.assertj.core.api.Assertions.assertThat;
     "campus.market.dispute.deadline.initial-delay-ms=86400000", "campus.market.dispute.deadline.fixed-delay-ms=86400000",
     "campus.market.dispute.return-reconciliation.enabled=false"})
 class DisputeDeadlineIT extends Task11MySqlContainers {
-    @SpyBean JdbcTemplate jdbc;
+    @Autowired JdbcTemplate jdbc;
+    /** root 连接只读取 Performance Schema，观察截止事务实际等待的业务行锁。 */
+    private final JdbcTemplate lockObserver = new JdbcTemplate(
+        new DriverManagerDataSource(MYSQL.getJdbcUrl(), "root", MYSQL.getPassword()));
     @Autowired DisputeDeadlineScheduler deadlines;
     @Autowired RefundService refunds;
     @Autowired ReturnResolutionService returns;
     @Autowired SimulatedPaymentProviderController provider;
     @Autowired DisputeService disputes;
+    @Autowired PlatformTransactionManager transactionManager;
 
     @Test
     void ordinaryRefundWinsAgainstStaleHardDeadlineAndKeepsRefundOnlyResolution() throws Exception {
@@ -46,20 +52,24 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
         jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,100,100,?,'SUCCEEDED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", payment.toString(), order.toString(), "simulated", "pay-" + payment, "sim-pay-" + payment);
         insertHardCase(dispute, order, buyer, admin);
         claim(dispute, "HARD_DEADLINE");
-        CountDownLatch proofRead = new CountDownLatch(1);
-        CountDownLatch releaseHardDeadline = new CountDownLatch(1);
-        gateHardCaseSnapshot(dispute, proofRead, releaseHardDeadline);
+        CountDownLatch orderLocked = new CountDownLatch(1);
+        CountDownLatch allowOrdinary = new CountDownLatch(1);
         var pool = Executors.newFixedThreadPool(2);
         try {
+            var ordinary = pool.submit(() -> new TransactionTemplate(transactionManager).execute(status -> {
+                lockOrder(order, orderLocked);
+                awaitBarrier(allowOrdinary);
+                return returns.resolve(dispute, com.example.campusmarket.dispute.domain.DisputeDecision.REFUND_ONLY, 1,
+                    com.example.campusmarket.dispute.domain.ReturnProofType.SELLER_CONFIRMED, seller.toString(), ProofAuthority.seller(seller));
+            }));
+            assertThat(orderLocked.await(10, TimeUnit.SECONDS)).isTrue();
             var hard = pool.submit(() -> deadlines.runOne(dispute));
-            assertThat(proofRead.await(10, TimeUnit.SECONDS)).isTrue();
-            var ordinary = returns.resolve(dispute, com.example.campusmarket.dispute.domain.DisputeDecision.REFUND_ONLY, 1,
-                com.example.campusmarket.dispute.domain.ReturnProofType.SELLER_CONFIRMED, seller.toString(), ProofAuthority.seller(seller));
-            assertThat(ordinary.refundStatus()).isEqualTo("PROCESSING");
-            releaseHardDeadline.countDown();
+            awaitOrderLockWait(order);
+            allowOrdinary.countDown();
+            assertThat(ordinary.get(20, TimeUnit.SECONDS).refundStatus()).isEqualTo("PROCESSING");
             assertThat(hard.get(20, TimeUnit.SECONDS)).isEqualTo(1);
         } finally {
-            releaseHardDeadline.countDown();
+            allowOrdinary.countDown();
             pool.shutdownNow();
         }
         assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, dispute.toString())).isEqualTo("RESOLVED");
@@ -76,18 +86,24 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
         jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,100,100,?,'SUCCEEDED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", payment.toString(), order.toString(), "simulated", "pay-" + payment, "sim-pay-" + payment);
         insertHardCase(dispute, order, buyer, admin);
         claim(dispute, "HARD_DEADLINE");
-        CountDownLatch proofRead = new CountDownLatch(1);
-        CountDownLatch releaseHardDeadline = new CountDownLatch(1);
-        gateHardCaseSnapshot(dispute, proofRead, releaseHardDeadline);
+        CountDownLatch orderLocked = new CountDownLatch(1);
+        CountDownLatch allowOrdinary = new CountDownLatch(1);
         var pool = Executors.newFixedThreadPool(2);
         try {
+            var ordinary = pool.submit(() -> new TransactionTemplate(transactionManager).execute(status -> {
+                lockOrder(order, orderLocked);
+                awaitBarrier(allowOrdinary);
+                return disputes.decide(dispute, admin, "reject-race-" + dispute,
+                    com.example.campusmarket.dispute.domain.DisputeDecision.REJECT, 0, "reject".getBytes());
+            }));
+            assertThat(orderLocked.await(10, TimeUnit.SECONDS)).isTrue();
             var hard = pool.submit(() -> deadlines.runOne(dispute));
-            assertThat(proofRead.await(10, TimeUnit.SECONDS)).isTrue();
-            disputes.decide(dispute, admin, "reject-race-" + dispute, com.example.campusmarket.dispute.domain.DisputeDecision.REJECT, 0, "reject".getBytes());
-            releaseHardDeadline.countDown();
+            awaitOrderLockWait(order);
+            allowOrdinary.countDown();
+            assertThat(ordinary.get(20, TimeUnit.SECONDS)).isNotNull();
             assertThat(hard.get(20, TimeUnit.SECONDS)).isEqualTo(1);
         } finally {
-            releaseHardDeadline.countDown();
+            allowOrdinary.countDown();
             pool.shutdownNow();
         }
         assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, dispute.toString())).isEqualTo("REJECTED");
@@ -104,26 +120,23 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
         UUID dispute = opened.disputeId();
         jdbc.update("UPDATE dispute_case SET seller_deadline=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE id=?", dispute.toString());
         jdbc.update("UPDATE dispute_deadline_claim SET due_at=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE dispute_case_id=? AND deadline_type='SELLER_RESPONSE'", dispute.toString());
-        CountDownLatch timeoutUpdateEntered = new CountDownLatch(1);
-        CountDownLatch releaseTimeoutUpdate = new CountDownLatch(1);
-        org.mockito.Mockito.doAnswer(invocation -> {
-            String sql = invocation.getArgument(0, String.class);
-            Object[] args = invocation.getArgument(1, Object[].class);
-            if (sql.startsWith("UPDATE dispute_case SET status='UNDER_REVIEW'") && dispute.toString().equals(String.valueOf(args[0]))) {
-                timeoutUpdateEntered.countDown();
-                assertThat(releaseTimeoutUpdate.await(10, TimeUnit.SECONDS)).isTrue();
-            }
-            return invocation.callRealMethod();
-        }).when(jdbc).update(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(Object[].class));
+        CountDownLatch caseLocked = new CountDownLatch(1);
+        CountDownLatch allowResponse = new CountDownLatch(1);
         var pool = Executors.newFixedThreadPool(2);
         try {
+            var response = pool.submit(() -> new TransactionTemplate(transactionManager).execute(status -> {
+                lockCase(dispute, caseLocked);
+                awaitBarrier(allowResponse);
+                return disputes.respond(dispute, seller, "seller-response-race-" + dispute, "已响应", "response".getBytes());
+            }));
+            assertThat(caseLocked.await(10, TimeUnit.SECONDS)).isTrue();
             var timeout = pool.submit(() -> deadlines.runOne(dispute));
-            assertThat(timeoutUpdateEntered.await(10, TimeUnit.SECONDS)).isTrue();
-            disputes.respond(dispute, seller, "seller-response-race-" + dispute, "已响应", "response".getBytes());
-            releaseTimeoutUpdate.countDown();
+            awaitCaseLockWait(dispute);
+            allowResponse.countDown();
+            assertThat(response.get(20, TimeUnit.SECONDS)).isNotNull();
             assertThat(timeout.get(20, TimeUnit.SECONDS)).isEqualTo(1);
         } finally {
-            releaseTimeoutUpdate.countDown();
+            allowResponse.countDown();
             pool.shutdownNow();
         }
         assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, dispute.toString())).isEqualTo("SELLER_RESPONDED");
@@ -295,19 +308,69 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
             dispute.toString(), order.toString(), buyer.toString(), admin.toString(), admin.toString());
     }
 
-    /** 在硬期限取得初始一致性读快照后暂停，确保普通事务先完成再释放截止线程。 */
-    private void gateHardCaseSnapshot(UUID dispute, CountDownLatch snapshotRead, CountDownLatch release) {
-        org.mockito.Mockito.doAnswer(invocation -> {
-            String sql = invocation.getArgument(0, String.class);
-            Object[] args = invocation.getArgument(2, Object[].class);
-            Object result = invocation.callRealMethod();
-            if (sql.startsWith("SELECT c.id,c.status,c.seller_deadline") && args.length == 1 && dispute.toString().equals(String.valueOf(args[0]))) {
-                snapshotRead.countDown();
-                assertThat(release.await(10, TimeUnit.SECONDS)).isTrue();
-            }
-            return result;
-        }).when(jdbc).query(org.mockito.ArgumentMatchers.anyString(),
-            org.mockito.ArgumentMatchers.any(org.springframework.jdbc.core.ResultSetExtractor.class), org.mockito.ArgumentMatchers.any(Object[].class));
+    private void lockOrder(UUID order, CountDownLatch locked) {
+        jdbc.queryForObject("SELECT id FROM trade_order WHERE id=? FOR UPDATE", String.class, order.toString());
+        locked.countDown();
+    }
+
+    private void lockCase(UUID dispute, CountDownLatch locked) {
+        jdbc.queryForObject("SELECT id FROM dispute_case WHERE id=? FOR UPDATE", String.class, dispute.toString());
+        locked.countDown();
+    }
+
+    private void awaitOrderLockWait(UUID order) {
+        org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(10)).untilAsserted(() ->
+            assertThat(lockObserver.queryForObject("""
+                SELECT COUNT(*)
+                FROM performance_schema.data_lock_waits w
+                JOIN performance_schema.data_locks requesting
+                  ON requesting.ENGINE='INNODB'
+                 AND requesting.ENGINE_LOCK_ID=w.REQUESTING_ENGINE_LOCK_ID
+                 AND requesting.ENGINE_TRANSACTION_ID=w.REQUESTING_ENGINE_TRANSACTION_ID
+                JOIN performance_schema.data_locks blocking
+                  ON blocking.ENGINE='INNODB'
+                 AND blocking.ENGINE_LOCK_ID=w.BLOCKING_ENGINE_LOCK_ID
+                 AND blocking.ENGINE_TRANSACTION_ID=w.BLOCKING_ENGINE_TRANSACTION_ID
+                WHERE requesting.OBJECT_SCHEMA=DATABASE()
+                  AND requesting.OBJECT_NAME='trade_order'
+                  AND requesting.LOCK_STATUS='WAITING'
+                  AND blocking.OBJECT_SCHEMA=DATABASE()
+                  AND blocking.OBJECT_NAME='trade_order'
+                  AND blocking.LOCK_STATUS='GRANTED'
+                  AND requesting.INDEX_NAME IN ('PRIMARY','PRIMARY KEY')
+                  AND blocking.INDEX_NAME IN ('PRIMARY','PRIMARY KEY')""", Long.class)).isGreaterThan(0L));
+    }
+
+    private void awaitCaseLockWait(UUID dispute) {
+        org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(10)).untilAsserted(() ->
+            assertThat(lockObserver.queryForObject("""
+                SELECT COUNT(*)
+                FROM performance_schema.data_lock_waits w
+                JOIN performance_schema.data_locks requesting
+                  ON requesting.ENGINE='INNODB'
+                 AND requesting.ENGINE_LOCK_ID=w.REQUESTING_ENGINE_LOCK_ID
+                 AND requesting.ENGINE_TRANSACTION_ID=w.REQUESTING_ENGINE_TRANSACTION_ID
+                JOIN performance_schema.data_locks blocking
+                  ON blocking.ENGINE='INNODB'
+                 AND blocking.ENGINE_LOCK_ID=w.BLOCKING_ENGINE_LOCK_ID
+                 AND blocking.ENGINE_TRANSACTION_ID=w.BLOCKING_ENGINE_TRANSACTION_ID
+                WHERE requesting.OBJECT_SCHEMA=DATABASE()
+                  AND requesting.OBJECT_NAME='dispute_case'
+                  AND requesting.LOCK_STATUS='WAITING'
+                  AND blocking.OBJECT_SCHEMA=DATABASE()
+                  AND blocking.OBJECT_NAME='dispute_case'
+                  AND blocking.LOCK_STATUS='GRANTED'
+                  AND requesting.INDEX_NAME IN ('PRIMARY','PRIMARY KEY')
+                  AND blocking.INDEX_NAME IN ('PRIMARY','PRIMARY KEY')""", Long.class)).isGreaterThan(0L));
+    }
+
+    private static void awaitBarrier(CountDownLatch barrier) {
+        try {
+            if (!barrier.await(10, TimeUnit.SECONDS)) throw new AssertionError("并发测试栅栏超时");
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("并发测试线程被中断", interrupted);
+        }
     }
 
     private void insertOrder(UUID buyer, UUID seller, UUID listing, UUID order, String status) {
