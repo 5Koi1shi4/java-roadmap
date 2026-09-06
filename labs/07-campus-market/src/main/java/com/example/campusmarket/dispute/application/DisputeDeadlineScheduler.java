@@ -107,9 +107,9 @@ public final class DisputeDeadlineScheduler {
             return false;
         }
         if ("OPEN".equals(row.status())) {
-            jdbc.update("UPDATE dispute_case SET status='UNDER_REVIEW',admin_deadline=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 7 DAY),hard_deadline=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 14 DAY),version=version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='OPEN'",
+            int changed = jdbc.update("UPDATE dispute_case SET status='UNDER_REVIEW',admin_deadline=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 7 DAY),hard_deadline=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 14 DAY),version=version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='OPEN'",
                 row.caseId().toString());
-            armAdminClaims(row.caseId());
+            if (changed == 1) armAdminClaims(row.caseId());
         }
         return true;
     }
@@ -135,42 +135,46 @@ public final class DisputeDeadlineScheduler {
     }
 
     private void hardDeadline(CaseFacts row, Instant now, ClaimHandle handle, Claim claim) {
-        if (terminal(row.status())) return;
-        Instant deadline = row.hardDeadline();
+        // 先锁订单，再锁当前案件；初始 row 只是用于找到订单，不能作为裁决依据。
+        OrderFacts order = jdbc.query("SELECT listing_id,unit_price_fen,quantity FROM trade_order WHERE id=? FOR UPDATE",
+            rs -> rs.next() ? new OrderFacts(UUID.fromString(rs.getString(1)), rs.getLong(2), rs.getInt(3)) : null, row.orderId().toString());
+        if (order == null) return;
+        CaseHeader current = jdbc.query("SELECT id,status,seller_deadline,admin_deadline,hard_deadline,proof_type,proof_reference,disputed_quantity,order_id "
+                + "FROM dispute_case WHERE id=? AND order_id=? FOR UPDATE", rs -> rs.next()
+            ? new CaseHeader(UUID.fromString(rs.getString(1)), rs.getString(2), ts(rs.getTimestamp(3)), ts(rs.getTimestamp(4)), ts(rs.getTimestamp(5)),
+                rs.getString(6), rs.getString(7), rs.getInt(8), UUID.fromString(rs.getString(9))) : null,
+            row.caseId().toString(), row.orderId().toString());
+        if (current == null || terminal(current.status())) return;
+        Instant deadline = current.hardDeadline();
         if (deadline == null || now.isBefore(deadline)) {
-            defer(handle, claim, deadline == null ? plusDays(row.sellerDeadline(), 14, now) : deadline);
+            defer(handle, claim, deadline == null ? plusDays(current.sellerDeadline(), 14, now) : deadline);
             return;
         }
-        boolean trusted = resolutions.isHardDeadlineProofAuthorized(row.caseId(), row.orderId(), row.disputedQuantity(),
-            row.proofType(), row.proofReference(), row.provider());
         Long amount;
         try {
-            amount = amount(row.unitPriceFen(), row.disputedQuantity());
+            amount = amount(order.unitPriceFen(), current.disputedQuantity());
         } catch (IllegalArgumentException overflow) {
-            escalate(row.caseId());
+            escalate(current.caseId());
             return;
         }
-        if (!trusted || row.paymentId() == null || row.paidAmountFen() < amount) {
-            escalate(row.caseId());
+        // 当前案件锁后才锁其它争议；支付行在累计检查后锁定，保持订单→当前 case→其它争议/支付。
+        int reserved = disputeRepository.cumulativeReservedQuantityForHardDeadline(current.orderId(), current.caseId());
+        if (reserved + current.disputedQuantity() > order.quantity()) {
+            escalate(current.caseId());
             return;
         }
-        // 所有硬期限案件按固定订单→支付锁序串行；累计规则与普通裁决共用。
-        Integer purchased = jdbc.query("SELECT quantity FROM trade_order WHERE id=? FOR UPDATE",
-            rs -> rs.next() ? rs.getInt(1) : null, row.orderId().toString());
-        if (purchased == null || disputeRepository.cumulativeReservedQuantityForHardDeadline(row.orderId(), row.caseId()) + row.disputedQuantity() > purchased) {
-            escalate(row.caseId());
+        PaymentFacts payment = jdbc.query("SELECT id,paid_amount_fen,provider FROM payment_order WHERE order_id=? AND status='SUCCEEDED' FOR UPDATE",
+            rs -> rs.next() ? new PaymentFacts(UUID.fromString(rs.getString(1)), rs.getLong(2), rs.getString(3)) : null, current.orderId().toString());
+        boolean trusted = payment != null && resolutions.isHardDeadlineProofAuthorized(current.caseId(), current.orderId(), current.disputedQuantity(),
+            current.proofType(), current.proofReference(), payment.provider());
+        if (!trusted || payment == null || payment.paidAmountFen() < amount) {
+            escalate(current.caseId());
             return;
         }
-        Long paidAmount = jdbc.query("SELECT paid_amount_fen FROM payment_order WHERE id=? AND status='SUCCEEDED' FOR UPDATE",
-            rs -> rs.next() ? rs.getLong(1) : null, row.paymentId().toString());
-        if (paidAmount == null || amount > paidAmount) {
-            escalate(row.caseId());
-            return;
-        }
-        UUID returnCaseId = UUID.nameUUIDFromBytes((row.caseId() + "|RETURN_AND_REFUND").getBytes(StandardCharsets.UTF_8));
+        UUID returnCaseId = UUID.nameUUIDFromBytes((current.caseId() + "|RETURN_AND_REFUND").getBytes(StandardCharsets.UTF_8));
         jdbc.update("INSERT INTO return_case (id,dispute_case_id,order_id,listing_id,payment_order_id,unit_price_fen,status,proof_type,proof_reference,resolution_type,approved_quantity,deadline,created_at,updated_at) VALUES (?,?,?,?,?,?, 'REQUESTED',?,?, 'RETURN_AND_REFUND',?,?,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE proof_type=VALUES(proof_type),proof_reference=VALUES(proof_reference),resolution_type=VALUES(resolution_type),approved_quantity=VALUES(approved_quantity),updated_at=CURRENT_TIMESTAMP(6)",
-            returnCaseId.toString(), row.caseId().toString(), row.orderId().toString(), row.listingId().toString(), row.paymentId().toString(), row.unitPriceFen(), row.proofType(), row.proofReference(), row.disputedQuantity(), Timestamp.from(deadline));
-        jdbc.update("UPDATE dispute_case SET status='RESOLVED',decision='RETURN_AND_REFUND',approved_quantity=?,resolved_at=CURRENT_TIMESTAMP(6),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('OPEN','SELLER_RESPONDED','UNDER_REVIEW')", row.disputedQuantity(), row.caseId().toString());
+            returnCaseId.toString(), current.caseId().toString(), current.orderId().toString(), order.listingId().toString(), payment.id().toString(), order.unitPriceFen(), current.proofType(), current.proofReference(), current.disputedQuantity(), Timestamp.from(deadline));
+        jdbc.update("UPDATE dispute_case SET status='RESOLVED',decision='RETURN_AND_REFUND',approved_quantity=?,resolved_at=CURRENT_TIMESTAMP(6),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('OPEN','SELLER_RESPONDED','UNDER_REVIEW')", current.disputedQuantity(), current.caseId().toString());
     }
 
     private void escalate(UUID caseId) {
@@ -206,6 +210,10 @@ public final class DisputeDeadlineScheduler {
     private record Claim(UUID caseId, String type, Instant dueAt, String owner, String token, Instant leaseUntil) {}
     private record ClaimMetadata(UUID caseId, String type) {}
     private record ClaimHandle(UUID id, String owner, String token) {}
+    private record OrderFacts(UUID listingId, long unitPriceFen, int quantity) {}
+    private record CaseHeader(UUID caseId, String status, Instant sellerDeadline, Instant adminDeadline, Instant hardDeadline,
+                               String proofType, String proofReference, int disputedQuantity, UUID orderId) {}
+    private record PaymentFacts(UUID id, long paidAmountFen, String provider) {}
     private record CaseFacts(UUID caseId, String status, Instant sellerDeadline, Instant adminDeadline, Instant hardDeadline, String proofType,
                              String proofReference, int disputedQuantity, UUID orderId, UUID listingId, long unitPriceFen,
                              UUID paymentId, long paidAmountFen, String provider) {}

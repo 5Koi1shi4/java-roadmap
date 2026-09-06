@@ -3,6 +3,7 @@ package com.example.campusmarket.integration;
 import com.example.campusmarket.CampusMarketApplication;
 import com.example.campusmarket.dispute.application.DisputeDeadlineScheduler;
 import com.example.campusmarket.dispute.application.DisputeService;
+import com.example.campusmarket.dispute.application.ProofAuthority;
 import com.example.campusmarket.dispute.application.ReturnResolutionService;
 import com.example.campusmarket.payment.application.RefundService;
 import com.example.campusmarket.payment.infrastructure.SimulatedPaymentProviderController;
@@ -10,11 +11,13 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.boot.test.mock.mockito.SpyBean;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.annotation.DirtiesContext;
 
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
@@ -29,12 +32,103 @@ import static org.assertj.core.api.Assertions.assertThat;
     "campus.market.dispute.deadline.initial-delay-ms=86400000", "campus.market.dispute.deadline.fixed-delay-ms=86400000",
     "campus.market.dispute.return-reconciliation.enabled=false"})
 class DisputeDeadlineIT extends Task11MySqlContainers {
-    @Autowired JdbcTemplate jdbc;
+    @SpyBean JdbcTemplate jdbc;
     @Autowired DisputeDeadlineScheduler deadlines;
     @Autowired RefundService refunds;
     @Autowired ReturnResolutionService returns;
     @Autowired SimulatedPaymentProviderController provider;
     @Autowired DisputeService disputes;
+
+    @Test
+    void ordinaryRefundWinsAgainstStaleHardDeadlineAndKeepsRefundOnlyResolution() throws Exception {
+        UUID buyer = user(), seller = user(), admin = user(), listing = UUID.randomUUID(), order = UUID.randomUUID(), payment = UUID.randomUUID(), dispute = UUID.randomUUID();
+        insertOrder(buyer, seller, listing, order, "DISPUTED");
+        jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,100,100,?,'SUCCEEDED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", payment.toString(), order.toString(), "simulated", "pay-" + payment, "sim-pay-" + payment);
+        insertHardCase(dispute, order, buyer, admin);
+        claim(dispute, "HARD_DEADLINE");
+        CountDownLatch proofRead = new CountDownLatch(1);
+        CountDownLatch releaseHardDeadline = new CountDownLatch(1);
+        gateHardCaseSnapshot(dispute, proofRead, releaseHardDeadline);
+        var pool = Executors.newFixedThreadPool(2);
+        try {
+            var hard = pool.submit(() -> deadlines.runOne(dispute));
+            assertThat(proofRead.await(10, TimeUnit.SECONDS)).isTrue();
+            var ordinary = returns.resolve(dispute, com.example.campusmarket.dispute.domain.DisputeDecision.REFUND_ONLY, 1,
+                com.example.campusmarket.dispute.domain.ReturnProofType.SELLER_CONFIRMED, seller.toString(), ProofAuthority.seller(seller));
+            assertThat(ordinary.refundStatus()).isEqualTo("PROCESSING");
+            releaseHardDeadline.countDown();
+            assertThat(hard.get(20, TimeUnit.SECONDS)).isEqualTo(1);
+        } finally {
+            releaseHardDeadline.countDown();
+            pool.shutdownNow();
+        }
+        assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, dispute.toString())).isEqualTo("RESOLVED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM return_case WHERE dispute_case_id=?", Integer.class, dispute.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT resolution_type FROM return_case WHERE dispute_case_id=?", String.class, dispute.toString())).isEqualTo("REFUND_ONLY");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, order.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT quarantined_quantity FROM listing WHERE id=?", Integer.class, listing.toString())).isZero();
+    }
+
+    @Test
+    void ordinaryRejectWinsAgainstStaleHardDeadlineWithoutCreatingRefundIntent() throws Exception {
+        UUID buyer = user(), seller = user(), admin = user(), listing = UUID.randomUUID(), order = UUID.randomUUID(), payment = UUID.randomUUID(), dispute = UUID.randomUUID();
+        insertOrder(buyer, seller, listing, order, "DISPUTED");
+        jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,100,100,?,'SUCCEEDED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", payment.toString(), order.toString(), "simulated", "pay-" + payment, "sim-pay-" + payment);
+        insertHardCase(dispute, order, buyer, admin);
+        claim(dispute, "HARD_DEADLINE");
+        CountDownLatch proofRead = new CountDownLatch(1);
+        CountDownLatch releaseHardDeadline = new CountDownLatch(1);
+        gateHardCaseSnapshot(dispute, proofRead, releaseHardDeadline);
+        var pool = Executors.newFixedThreadPool(2);
+        try {
+            var hard = pool.submit(() -> deadlines.runOne(dispute));
+            assertThat(proofRead.await(10, TimeUnit.SECONDS)).isTrue();
+            disputes.decide(dispute, admin, "reject-race-" + dispute, com.example.campusmarket.dispute.domain.DisputeDecision.REJECT, 0, "reject".getBytes());
+            releaseHardDeadline.countDown();
+            assertThat(hard.get(20, TimeUnit.SECONDS)).isEqualTo(1);
+        } finally {
+            releaseHardDeadline.countDown();
+            pool.shutdownNow();
+        }
+        assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, dispute.toString())).isEqualTo("REJECTED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM return_case WHERE dispute_case_id=?", Integer.class, dispute.toString())).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, order.toString())).isZero();
+        assertThat(jdbc.queryForObject("SELECT quarantined_quantity FROM listing WHERE id=?", Integer.class, listing.toString())).isZero();
+    }
+
+    @Test
+    void sellerResponseWinningAgainstSellerTimeoutDoesNotRearmAdminClaims() throws Exception {
+        UUID buyer = user(), seller = user(), listing = UUID.randomUUID(), order = UUID.randomUUID();
+        insertAfterSaleOrder(buyer, seller, listing, order);
+        var opened = disputes.open(order, buyer, "seller-timeout-race-" + order, 1, "FUNCTIONAL_DEFECT", "race".getBytes());
+        UUID dispute = opened.disputeId();
+        jdbc.update("UPDATE dispute_case SET seller_deadline=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE id=?", dispute.toString());
+        jdbc.update("UPDATE dispute_deadline_claim SET due_at=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE dispute_case_id=? AND deadline_type='SELLER_RESPONSE'", dispute.toString());
+        CountDownLatch timeoutUpdateEntered = new CountDownLatch(1);
+        CountDownLatch releaseTimeoutUpdate = new CountDownLatch(1);
+        org.mockito.Mockito.doAnswer(invocation -> {
+            String sql = invocation.getArgument(0, String.class);
+            Object[] args = invocation.getArgument(1, Object[].class);
+            if (sql.startsWith("UPDATE dispute_case SET status='UNDER_REVIEW'") && dispute.toString().equals(String.valueOf(args[0]))) {
+                timeoutUpdateEntered.countDown();
+                assertThat(releaseTimeoutUpdate.await(10, TimeUnit.SECONDS)).isTrue();
+            }
+            return invocation.callRealMethod();
+        }).when(jdbc).update(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.any(Object[].class));
+        var pool = Executors.newFixedThreadPool(2);
+        try {
+            var timeout = pool.submit(() -> deadlines.runOne(dispute));
+            assertThat(timeoutUpdateEntered.await(10, TimeUnit.SECONDS)).isTrue();
+            disputes.respond(dispute, seller, "seller-response-race-" + dispute, "已响应", "response".getBytes());
+            releaseTimeoutUpdate.countDown();
+            assertThat(timeout.get(20, TimeUnit.SECONDS)).isEqualTo(1);
+        } finally {
+            releaseTimeoutUpdate.countDown();
+            pool.shutdownNow();
+        }
+        assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, dispute.toString())).isEqualTo("SELLER_RESPONDED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM dispute_deadline_claim WHERE dispute_case_id=? AND deadline_type IN ('ADMIN_SLA','HARD_DEADLINE')", Integer.class, dispute.toString())).isZero();
+    }
 
     @Test
     void normalOpenRearmsAdminClaimsAfterSeller72HoursAndAlertsOnlyAtRealSla() {
@@ -199,6 +293,21 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
     private void insertHardCase(UUID dispute, UUID order, UUID buyer, UUID admin) {
         jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,assigned_admin_id,disputed_quantity,reason,status,proof_type,proof_reference,seller_deadline,admin_deadline,hard_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?, ?,1,'QUANTITY','UNDER_REVIEW','ADMIN_CONFIRMED',?,DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 3 DAY),DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
             dispute.toString(), order.toString(), buyer.toString(), admin.toString(), admin.toString());
+    }
+
+    /** 在硬期限取得初始一致性读快照后暂停，确保普通事务先完成再释放截止线程。 */
+    private void gateHardCaseSnapshot(UUID dispute, CountDownLatch snapshotRead, CountDownLatch release) {
+        org.mockito.Mockito.doAnswer(invocation -> {
+            String sql = invocation.getArgument(0, String.class);
+            Object[] args = invocation.getArgument(2, Object[].class);
+            Object result = invocation.callRealMethod();
+            if (sql.startsWith("SELECT c.id,c.status,c.seller_deadline") && args.length == 1 && dispute.toString().equals(String.valueOf(args[0]))) {
+                snapshotRead.countDown();
+                assertThat(release.await(10, TimeUnit.SECONDS)).isTrue();
+            }
+            return result;
+        }).when(jdbc).query(org.mockito.ArgumentMatchers.anyString(),
+            org.mockito.ArgumentMatchers.any(org.springframework.jdbc.core.ResultSetExtractor.class), org.mockito.ArgumentMatchers.any(Object[].class));
     }
 
     private void insertOrder(UUID buyer, UUID seller, UUID listing, UUID order, String status) {
