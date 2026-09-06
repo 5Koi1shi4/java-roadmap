@@ -2,6 +2,7 @@ package com.example.campusmarket.integration;
 
 import com.example.campusmarket.CampusMarketApplication;
 import com.example.campusmarket.dispute.application.DisputeDeadlineScheduler;
+import com.example.campusmarket.dispute.application.DisputeService;
 import com.example.campusmarket.dispute.application.ReturnResolutionService;
 import com.example.campusmarket.payment.application.RefundService;
 import com.example.campusmarket.payment.infrastructure.SimulatedPaymentProviderController;
@@ -31,6 +32,41 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
     @Autowired RefundService refunds;
     @Autowired ReturnResolutionService returns;
     @Autowired SimulatedPaymentProviderController provider;
+    @Autowired DisputeService disputes;
+
+    @Test
+    void normalOpenRearmsAdminClaimsAfterSeller72HoursAndAlertsOnlyAtRealSla() {
+        UUID buyer = user(), seller = user(), listing = UUID.randomUUID(), order = UUID.randomUUID();
+        insertAfterSaleOrder(buyer, seller, listing, order);
+        var opened = disputes.open(order, buyer, "matrix-open-" + order, 1, "FUNCTIONAL_DEFECT", "matrix".getBytes());
+        UUID dispute = opened.disputeId();
+        jdbc.update("UPDATE dispute_deadline_claim SET due_at=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE dispute_case_id=? AND deadline_type='SELLER_RESPONSE'", dispute.toString());
+        assertThat(deadlines.runOne(dispute)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, dispute.toString())).isEqualTo("UNDER_REVIEW");
+        assertThat(jdbc.queryForObject("SELECT due_at > DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 6 DAY) FROM dispute_deadline_claim WHERE dispute_case_id=? AND deadline_type='ADMIN_SLA'", Boolean.class, dispute.toString())).isTrue();
+        assertThat(jdbc.queryForObject("SELECT due_at > DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 13 DAY) FROM dispute_deadline_claim WHERE dispute_case_id=? AND deadline_type='HARD_DEADLINE'", Boolean.class, dispute.toString())).isTrue();
+
+        jdbc.update("UPDATE dispute_deadline_claim SET due_at=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE dispute_case_id=? AND deadline_type='ADMIN_SLA'", dispute.toString());
+        assertThat(deadlines.runOne(dispute)).isZero();
+        assertThat(jdbc.queryForObject("SELECT status FROM dispute_deadline_claim WHERE dispute_case_id=? AND deadline_type='ADMIN_SLA'", String.class, dispute.toString())).isEqualTo("NEW");
+        jdbc.update("UPDATE dispute_case SET admin_deadline=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE id=?", dispute.toString());
+        assertThat(deadlines.runOne(dispute)).isEqualTo(1);
+        assertThat(deadlines.runOne(dispute)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='DISPUTE_SLA_ALERT' AND payload->>'$.orderId'=?", Integer.class, dispute.toString())).isEqualTo(1);
+    }
+
+    @Test
+    void deadlineClaimOnlyChangesItsOwnCaseWhenOrderHasTwoCases() {
+        UUID buyer = user(), seller = user(), listing = UUID.randomUUID(), order = UUID.randomUUID(), first = UUID.randomUUID(), second = UUID.randomUUID();
+        insertOrder(buyer, seller, listing, order, "DISPUTED");
+        insertOpenCase(first, order, buyer);
+        insertOpenCase(second, order, buyer);
+        claim(first, "SELLER_RESPONSE");
+        claim(second, "SELLER_RESPONSE");
+        assertThat(deadlines.runOne(first)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, first.toString())).isEqualTo("UNDER_REVIEW");
+        assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, second.toString())).isEqualTo("OPEN");
+    }
 
     @Test
     void sellerSilenceMovesCaseToAdminReviewWithoutBlockingLaterDecision() {
@@ -103,6 +139,15 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
     private void insertOrder(UUID buyer, UUID seller, UUID listing, UUID order, String status) {
         jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,?,100,0,'SOLD_OUT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", listing.toString(), seller.toString(), "教材", "描述", "教材");
         jdbc.update("INSERT INTO trade_order (id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,paid_amount_fen,status,version,t0,created_at,updated_at) VALUES (?,?,?,?,?,?,100,1,100,100,?,0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", order.toString(), buyer.toString(), seller.toString(), listing.toString(), "教材", "描述", status);
+    }
+
+    private void insertAfterSaleOrder(UUID buyer, UUID seller, UUID listing, UUID order) {
+        jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,?,100,0,'SOLD_OUT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", listing.toString(), seller.toString(), "教材", "描述", "教材");
+        jdbc.update("INSERT INTO trade_order (id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,paid_amount_fen,status,version,t0,created_at,updated_at) VALUES (?,?,?,?,?,?,100,1,100,100,'AFTERSALE_WINDOW',0,DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", order.toString(), buyer.toString(), seller.toString(), listing.toString(), "教材", "描述");
+    }
+
+    private void insertOpenCase(UUID dispute, UUID order, UUID buyer) {
+        jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?,1,'QUANTITY','OPEN',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", dispute.toString(), order.toString(), buyer.toString());
     }
 
     private void claim(UUID dispute, String type) {

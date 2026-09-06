@@ -149,6 +149,49 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
     }
 
     @Test
+    void twoDifferentDisputesSameOrderCannotExceedQuantityOrPaidAmount() throws Exception {
+        Fixture f = fixture(2, 100);
+        UUID secondDispute = UUID.randomUUID();
+        jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,hard_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?,1,'QUANTITY','UNDER_REVIEW',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            secondDispute.toString(), f.order().toString(), f.buyer().toString());
+        var pool = Executors.newFixedThreadPool(2);
+        var ready = new CountDownLatch(2);
+        var start = new CountDownLatch(1);
+        try {
+            var first = pool.submit(() -> { ready.countDown(); start.await(5, TimeUnit.SECONDS); return returns.resolve(f.dispute(), DisputeDecision.REFUND_ONLY, 1, ReturnProofType.SELLER_CONFIRMED, "seller-a", ProofAuthority.seller(f.seller())); });
+            var second = pool.submit(() -> { ready.countDown(); start.await(5, TimeUnit.SECONDS); return returns.resolve(secondDispute, DisputeDecision.REFUND_ONLY, 1, ReturnProofType.SELLER_CONFIRMED, "seller-b", ProofAuthority.seller(f.seller())); });
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+            first.get(20, TimeUnit.SECONDS);
+            second.get(20, TimeUnit.SECONDS);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, f.order().toString())).isEqualTo(2);
+            assertThat(jdbc.queryForObject("SELECT COALESCE(SUM(amount_fen),0) FROM refund_order WHERE order_id=?", Long.class, f.order().toString())).isEqualTo(200L);
+            assertThat(jdbc.queryForObject("SELECT COALESCE(SUM(approved_quantity),0) FROM dispute_case WHERE order_id=? AND status='RESOLVED'", Integer.class, f.order().toString())).isEqualTo(2);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void settlementAndNewRefundRaceNeverSettlesThenCreatesRefund() throws Exception {
+        Fixture f = fixture(1, 100);
+        var pool = Executors.newFixedThreadPool(2);
+        var start = new CountDownLatch(1);
+        try {
+            var refund = pool.submit(() -> { start.await(5, TimeUnit.SECONDS); return returns.resolve(f.dispute(), DisputeDecision.REFUND_ONLY, 1, ReturnProofType.SELLER_CONFIRMED, "settlement-race", ProofAuthority.seller(f.seller())); });
+            var settlement = pool.submit(() -> { start.await(5, TimeUnit.SECONDS); return settlements.settle(f.order()); });
+            start.countDown();
+            refund.get(20, TimeUnit.SECONDS);
+            var settled = settlement.get(20, TimeUnit.SECONDS);
+            assertThat(settled.status()).isEqualTo("BLOCKED");
+            assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, f.order().toString())).isNotEqualTo("SETTLED");
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, f.order().toString())).isEqualTo(1);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
     void sellerExplicitWriteOffConsumesQuarantineIdempotentlyAndChecksQuantity() {
         Fixture f = fixture(2, 100);
         assertThat(inventory.quarantine(f.listing(), 2, "return-q-writeoff-" + f.listing())).isTrue();
@@ -168,10 +211,10 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
         jdbc.update("INSERT INTO trade_order (id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,paid_amount_fen,status,version,t0,created_at,updated_at) VALUES (?,?,?,?,?,?,?, ?,?,?, 'DISPUTED',0,DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 8 DAY),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", order.toString(), buyer.toString(), seller.toString(), listing.toString(), "教材", "描述", unitPrice, quantity, unitPrice * quantity, unitPrice * quantity);
         jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,'SUCCEEDED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", payment.toString(), order.toString(), "simulated", "pay-" + payment, unitPrice * quantity, unitPrice * quantity, "sim-pay-" + payment);
         jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,hard_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?,?,'QUANTITY','UNDER_REVIEW',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", dispute.toString(), order.toString(), buyer.toString(), quantity);
-        return new Fixture(listing, order, payment, dispute, seller);
+        return new Fixture(listing, order, payment, dispute, seller, buyer);
     }
 
-    private record Fixture(UUID listing, UUID order, UUID payment, UUID dispute, UUID seller) {}
+    private record Fixture(UUID listing, UUID order, UUID payment, UUID dispute, UUID seller, UUID buyer) {}
 
     private UUID user() {
         UUID id = UUID.randomUUID();
