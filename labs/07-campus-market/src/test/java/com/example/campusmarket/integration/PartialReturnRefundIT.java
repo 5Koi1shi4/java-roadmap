@@ -3,6 +3,7 @@ package com.example.campusmarket.integration;
 import com.example.campusmarket.CampusMarketApplication;
 import com.example.campusmarket.catalog.application.InventoryPort;
 import com.example.campusmarket.dispute.application.ReturnResolutionService;
+import com.example.campusmarket.dispute.application.ProofAuthority;
 import com.example.campusmarket.dispute.domain.DisputeDecision;
 import com.example.campusmarket.dispute.domain.ReturnProofType;
 import com.example.campusmarket.payment.application.SettlementService;
@@ -47,7 +48,7 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
         jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,300,300,?,'SUCCEEDED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", payment.toString(), order.toString(), "simulated", "pay-" + payment, "sim-pay-" + payment);
         jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,hard_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?,1,'QUANTITY','UNDER_REVIEW',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),0, CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", dispute.toString(), order.toString(), buyer.toString());
 
-        var result = returns.resolve(dispute, DisputeDecision.RETURN_AND_REFUND, 1, ReturnProofType.SELLER_CONFIRMED, "seller-confirmed");
+        var result = returns.resolve(dispute, DisputeDecision.RETURN_AND_REFUND, 1, ReturnProofType.SELLER_CONFIRMED, "seller-confirmed", ProofAuthority.seller(seller));
         assertThat(result.refundStatus()).isEqualTo("PROCESSING");
         assertThat(result.amountFen()).isEqualTo(100L);
         provider.setRefundStatus(refunds.queryRefund(result.refundId()).providerReference(), "SUCCEEDED");
@@ -66,7 +67,7 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
     @Test
     void successfulRefundReconcilesWhenProcessCrashesAfterPrepare() {
         Fixture f = fixture(1, 100);
-        var result = returns.resolve(f.dispute(), DisputeDecision.RETURN_AND_REFUND, 1, ReturnProofType.SELLER_CONFIRMED, "seller-confirmed");
+        var result = returns.resolve(f.dispute(), DisputeDecision.RETURN_AND_REFUND, 1, ReturnProofType.SELLER_CONFIRMED, "seller-confirmed", ProofAuthority.seller(f.seller()));
         jdbc.update("UPDATE return_case SET refund_id=NULL,refund_status='PROCESSING' WHERE dispute_case_id=?", f.dispute().toString());
         provider.setRefundStatus(refunds.queryRefund(result.refundId()).providerReference(), "SUCCEEDED");
         refunds.reconcileRefund(result.refundId());
@@ -78,7 +79,9 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
     @Test
     void refundOnlySuccessDoesNotTouchQuarantine() {
         Fixture f = fixture(1, 100);
-        var result = returns.resolve(f.dispute(), DisputeDecision.REFUND_ONLY, 1, ReturnProofType.PROVIDER_DELIVERED, "provider-delivered");
+        jdbc.update("INSERT INTO return_proof_attestation (id,proof_reference,order_id,provider,delivered_quantity,status,verified_at,created_at) VALUES (?,?,?,?,1,'DELIVERED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            UUID.randomUUID().toString(), "provider-delivered", f.order().toString(), "simulated");
+        var result = returns.resolve(f.dispute(), DisputeDecision.REFUND_ONLY, 1, ReturnProofType.PROVIDER_DELIVERED, "provider-delivered", ProofAuthority.provider("provider-delivered"));
         provider.setRefundStatus(refunds.queryRefund(result.refundId()).providerReference(), "SUCCEEDED");
         refunds.reconcileRefund(result.refundId());
         returns.reconcileSuccessfulRefund(result.refundId());
@@ -89,7 +92,22 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
     @Test
     void buyerEvidenceCannotTriggerRefund() {
         Fixture f = fixture(1, 100);
-        assertThatThrownBy(() -> returns.resolve(f.dispute(), DisputeDecision.REFUND_ONLY, 1, ReturnProofType.BUYER_EVIDENCE, "buyer-video"))
+        assertThatThrownBy(() -> returns.resolve(f.dispute(), DisputeDecision.REFUND_ONLY, 1, ReturnProofType.BUYER_EVIDENCE, "buyer-video", ProofAuthority.provider("buyer-video")))
+            .isInstanceOf(IllegalStateException.class);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, f.order().toString())).isZero();
+    }
+
+    @Test
+    void trustedProofMustHaveAuthorizedSource() {
+        Fixture f = fixture(1, 100);
+        assertThatThrownBy(() -> returns.resolve(f.dispute(), DisputeDecision.REFUND_ONLY, 1,
+            ReturnProofType.SELLER_CONFIRMED, "seller-confirmed", ProofAuthority.seller(UUID.randomUUID())))
+            .isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> returns.resolve(f.dispute(), DisputeDecision.REFUND_ONLY, 1,
+            ReturnProofType.ADMIN_CONFIRMED, "admin-confirmed", ProofAuthority.admin(UUID.randomUUID())))
+            .isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> returns.resolve(f.dispute(), DisputeDecision.REFUND_ONLY, 1,
+            ReturnProofType.PROVIDER_DELIVERED, "fake-provider-reference", ProofAuthority.provider("fake-provider-reference")))
             .isInstanceOf(IllegalStateException.class);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, f.order().toString())).isZero();
     }
@@ -112,8 +130,8 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
         var ready = new CountDownLatch(2);
         var start = new CountDownLatch(1);
         try {
-            var first = pool.submit(() -> { ready.countDown(); start.await(5, TimeUnit.SECONDS); return returns.resolve(f.dispute(), DisputeDecision.RETURN_AND_REFUND, 1, ReturnProofType.SELLER_CONFIRMED, "seller-confirmed"); });
-            var second = pool.submit(() -> { ready.countDown(); start.await(5, TimeUnit.SECONDS); return returns.resolve(f.dispute(), DisputeDecision.RETURN_AND_REFUND, 1, ReturnProofType.SELLER_CONFIRMED, "seller-confirmed"); });
+            var first = pool.submit(() -> { ready.countDown(); start.await(5, TimeUnit.SECONDS); return returns.resolve(f.dispute(), DisputeDecision.RETURN_AND_REFUND, 1, ReturnProofType.SELLER_CONFIRMED, "seller-confirmed", ProofAuthority.seller(f.seller())); });
+            var second = pool.submit(() -> { ready.countDown(); start.await(5, TimeUnit.SECONDS); return returns.resolve(f.dispute(), DisputeDecision.RETURN_AND_REFUND, 1, ReturnProofType.SELLER_CONFIRMED, "seller-confirmed", ProofAuthority.seller(f.seller())); });
             assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
             start.countDown();
             var firstResult = first.get(20, TimeUnit.SECONDS);
@@ -150,10 +168,10 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
         jdbc.update("INSERT INTO trade_order (id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,paid_amount_fen,status,version,t0,created_at,updated_at) VALUES (?,?,?,?,?,?,?, ?,?,?, 'DISPUTED',0,DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 8 DAY),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", order.toString(), buyer.toString(), seller.toString(), listing.toString(), "教材", "描述", unitPrice, quantity, unitPrice * quantity, unitPrice * quantity);
         jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,'SUCCEEDED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", payment.toString(), order.toString(), "simulated", "pay-" + payment, unitPrice * quantity, unitPrice * quantity, "sim-pay-" + payment);
         jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,hard_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?,?,'QUANTITY','UNDER_REVIEW',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", dispute.toString(), order.toString(), buyer.toString(), quantity);
-        return new Fixture(listing, order, payment, dispute);
+        return new Fixture(listing, order, payment, dispute, seller);
     }
 
-    private record Fixture(UUID listing, UUID order, UUID payment, UUID dispute) {}
+    private record Fixture(UUID listing, UUID order, UUID payment, UUID dispute, UUID seller) {}
 
     private UUID user() {
         UUID id = UUID.randomUUID();

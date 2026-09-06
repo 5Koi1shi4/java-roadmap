@@ -34,6 +34,12 @@ public class ReturnResolutionService {
     /** 只接受固定裁决；同一 dispute 的重复调用返回已持久化结果。 */
     public Resolution resolve(UUID disputeCaseId, DisputeDecision decision, int approvedQuantity,
                               ReturnProofType proofType, String proofReference) {
+        if (decision == DisputeDecision.REJECT) return resolve(disputeCaseId, decision, approvedQuantity, proofType, proofReference, null);
+        throw new IllegalStateException("可信退款必须携带受控证明授权");
+    }
+
+    public Resolution resolve(UUID disputeCaseId, DisputeDecision decision, int approvedQuantity,
+                              ReturnProofType proofType, String proofReference, ProofAuthority authority) {
         Objects.requireNonNull(disputeCaseId, "争议ID不能为空");
         Objects.requireNonNull(decision, "裁决不能为空");
         if (decision == DisputeDecision.REJECT) {
@@ -45,8 +51,9 @@ public class ReturnResolutionService {
             throw new IllegalStateException("买家证据不能直接触发退款");
         if (proofType == null || proofReference == null || proofReference.isBlank())
             throw new IllegalArgumentException("可信证明不能为空");
+        Objects.requireNonNull(authority, "证明授权不能为空");
 
-        CaseFacts facts = transactions.execute(status -> prepare(disputeCaseId, decision, approvedQuantity, proofType, proofReference));
+        CaseFacts facts = transactions.execute(status -> prepare(disputeCaseId, decision, approvedQuantity, proofType, proofReference, authority));
         if (facts.existingRefundId() != null) return queryResolution(facts);
         RefundService.RefundResult refund = refunds.requestRefund(facts.orderId(),
             "dispute-return-" + disputeCaseId, Money.ofFen(facts.amountFen()), "DISPUTE", disputeCaseId);
@@ -57,7 +64,7 @@ public class ReturnResolutionService {
     public Resolution resolve(ResolutionRequest request) {
         Objects.requireNonNull(request, "裁决请求不能为空");
         return resolve(request.disputeCaseId(), request.decision(), request.approvedQuantity(),
-            request.proofType(), request.proofReference());
+            request.proofType(), request.proofReference(), request.authority());
     }
 
     /** 硬期限任务提交的退款意图在截止事务外执行；失败或进程崩溃可由收敛器重试。 */
@@ -104,7 +111,7 @@ public class ReturnResolutionService {
     }
 
     private CaseFacts prepare(UUID caseId, DisputeDecision decision, int approvedQuantity,
-                              ReturnProofType proofType, String proofReference) {
+                              ReturnProofType proofType, String proofReference, ProofAuthority authority) {
         var row = jdbc.query("SELECT c.order_id,c.disputed_quantity,c.status,o.listing_id,o.unit_price_fen,o.quantity,p.id,p.paid_amount_fen,p.status "
                 + "FROM dispute_case c JOIN trade_order o ON o.id=c.order_id "
                 + "LEFT JOIN payment_order p ON p.order_id=o.id AND p.status='SUCCEEDED' "
@@ -127,6 +134,10 @@ public class ReturnResolutionService {
         }
         int disputed = (Integer) row[1];
         if (approvedQuantity > disputed) throw new IllegalArgumentException("批准数量超过争议数量");
+        UUID sellerId = jdbc.queryForObject("SELECT seller_id FROM trade_order WHERE id=?", (rs, n) -> UUID.fromString(rs.getString(1)), orderId.toString());
+        UUID assignedAdminId = jdbc.query("SELECT assigned_admin_id FROM dispute_case WHERE id=?",
+            rs -> rs.next() && rs.getString(1) != null ? UUID.fromString(rs.getString(1)) : null, caseId.toString());
+        authorizeProof(authority, proofType, proofReference, orderId, approvedQuantity, sellerId, assignedAdminId);
         Integer used = jdbc.queryForObject("SELECT COALESCE(SUM(approved_quantity),0) FROM dispute_case WHERE order_id=? AND id<>? AND status='RESOLVED'", Integer.class, orderId.toString(), caseId.toString());
         if (used != null && used + approvedQuantity > (Integer) row[5]) throw new IllegalArgumentException("累计裁决数量超过购买数量");
         UUID listingId = (UUID) row[3];
@@ -138,10 +149,11 @@ public class ReturnResolutionService {
         if (paymentId == null) throw new IllegalStateException("没有成功支付");
         Instant now = databaseNow();
         UUID returnId = UUID.nameUUIDFromBytes((caseId + "|" + decision.name()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        jdbc.update("INSERT INTO return_case (id,dispute_case_id,order_id,listing_id,payment_order_id,unit_price_fen,status,proof_type,proof_reference,resolution_type,approved_quantity,deadline,created_at,updated_at) "
-                + "VALUES (?,?,?,?,?,?,'CONFIRMED',?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE proof_type=VALUES(proof_type),proof_reference=VALUES(proof_reference),resolution_type=VALUES(resolution_type),updated_at=VALUES(updated_at)",
+        UUID confirmer = authority.kind() == ProofAuthority.Kind.PROVIDER ? null : authority.actorId();
+        jdbc.update("INSERT INTO return_case (id,dispute_case_id,order_id,listing_id,payment_order_id,unit_price_fen,status,proof_type,proof_reference,confirmed_by,resolution_type,approved_quantity,deadline,created_at,updated_at) "
+                + "VALUES (?,?,?,?,?,?,'CONFIRMED',?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE proof_type=VALUES(proof_type),proof_reference=VALUES(proof_reference),confirmed_by=VALUES(confirmed_by),resolution_type=VALUES(resolution_type),updated_at=VALUES(updated_at)",
             returnId.toString(), caseId.toString(), orderId.toString(), listingId.toString(), paymentId.toString(), unitPriceFen,
-            proofType.name(), proofReference, decision.name(), approvedQuantity, TimestampValue.of(now.plusSeconds(14 * 86400L)), TimestampValue.of(now), TimestampValue.of(now));
+            proofType.name(), proofReference, confirmer == null ? null : confirmer.toString(), decision.name(), approvedQuantity, TimestampValue.of(now.plusSeconds(14 * 86400L)), TimestampValue.of(now), TimestampValue.of(now));
         jdbc.update("UPDATE dispute_case SET decision=?,approved_quantity=?,proof_type=?,proof_reference=?,status='RESOLVED',resolved_at=?,version=version+1,updated_at=? WHERE id=? AND status IN ('OPEN','SELLER_RESPONDED','UNDER_REVIEW','ESCALATED')",
             decision.name(), approvedQuantity, proofType.name(), proofReference, TimestampValue.of(now), TimestampValue.of(now), caseId.toString());
         return new CaseFacts(caseId, orderId, listingId, (Integer) row[5], approvedQuantity, unitPriceFen, amountFen, null, "REQUESTED");
@@ -204,12 +216,40 @@ public class ReturnResolutionService {
     private Instant databaseNow() { return jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", java.sql.Timestamp.class).toInstant(); }
     public record Resolution(UUID disputeCaseId, UUID refundId, String refundStatus, long amountFen, boolean quarantined) {}
     public record ResolutionRequest(UUID disputeCaseId, DisputeDecision decision, int approvedQuantity,
-                                    ReturnProofType proofType, String proofReference) {}
+                                    ReturnProofType proofType, String proofReference, ProofAuthority authority) {
+        public ResolutionRequest(UUID disputeCaseId, DisputeDecision decision, int approvedQuantity,
+                                 ReturnProofType proofType, String proofReference) {
+            this(disputeCaseId, decision, approvedQuantity, proofType, proofReference, null);
+        }
+    }
     private record CaseFacts(UUID caseId, UUID orderId, UUID listingId, int purchasedQuantity, int approvedQuantity, long unitPriceFen,
                              long amountFen, UUID existingRefundId, String refundStatus) {}
     private record ReturnFacts(UUID disputeCaseId, UUID orderId, UUID listingId, int approvedQuantity, String resolutionType,
                                boolean quarantined, String refundStatus, long amountFen, int purchasedQuantity) {}
     private record HardFacts(UUID refundId, UUID orderId, long unitPriceFen, int approvedQuantity, String refundStatus, String resolutionType) {}
+
+    private void authorizeProof(ProofAuthority authority, ReturnProofType proofType, String proofReference,
+                                UUID orderId, int quantity, UUID sellerId, UUID assignedAdminId) {
+        if (proofType == ReturnProofType.SELLER_CONFIRMED) {
+            if (authority.kind() != ProofAuthority.Kind.SELLER || !sellerId.equals(authority.actorId()))
+                throw new IllegalStateException("卖家证明主体未授权");
+            return;
+        }
+        if (proofType == ReturnProofType.ADMIN_CONFIRMED) {
+            if (authority.kind() != ProofAuthority.Kind.ADMIN || assignedAdminId == null || !assignedAdminId.equals(authority.actorId()))
+                throw new IllegalStateException("管理员证明主体未分配");
+            return;
+        }
+        if (proofType == ReturnProofType.PROVIDER_DELIVERED) {
+            if (authority.kind() != ProofAuthority.Kind.PROVIDER || !proofReference.equals(authority.attestationReference()))
+                throw new IllegalStateException("物流证明引用未验签");
+            Integer verified = jdbc.queryForObject("SELECT COUNT(*) FROM return_proof_attestation WHERE proof_reference=? AND order_id=? AND status='DELIVERED' AND delivered_quantity>=?",
+                Integer.class, proofReference, orderId.toString(), quantity);
+            if (verified == null || verified != 1) throw new IllegalStateException("物流签收事实不存在或数量不足");
+            return;
+        }
+        throw new IllegalStateException("证明来源不可信");
+    }
     private static final class TimestampValue {
         private TimestampValue() {}
         static java.sql.Timestamp of(Instant value) { return java.sql.Timestamp.from(value); }
