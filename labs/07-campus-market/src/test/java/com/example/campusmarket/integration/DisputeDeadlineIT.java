@@ -54,7 +54,9 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
         jdbc.update("UPDATE dispute_deadline_claim SET due_at=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE dispute_case_id=? AND deadline_type='ADMIN_SLA'", dispute.toString());
         assertThat(deadlines.runOne(dispute)).isZero();
         assertThat(jdbc.queryForObject("SELECT status FROM dispute_deadline_claim WHERE dispute_case_id=? AND deadline_type='ADMIN_SLA'", String.class, dispute.toString())).isEqualTo("NEW");
+        assertThat(jdbc.queryForObject("SELECT ABS(TIMESTAMPDIFF(MICROSECOND,cl.due_at,c.admin_deadline)) < 1000000 FROM dispute_deadline_claim cl JOIN dispute_case c ON c.id=cl.dispute_case_id WHERE cl.dispute_case_id=? AND cl.deadline_type='ADMIN_SLA'", Boolean.class, dispute.toString())).isTrue();
         jdbc.update("UPDATE dispute_case SET admin_deadline=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE id=?", dispute.toString());
+        jdbc.update("UPDATE dispute_deadline_claim SET due_at=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE dispute_case_id=? AND deadline_type='ADMIN_SLA'", dispute.toString());
         assertThat(deadlines.runOne(dispute)).isEqualTo(1);
         assertThat(deadlines.runOne(dispute)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='DISPUTE_SLA_ALERT' AND payload->>'$.orderId'=?", Integer.class, dispute.toString())).isEqualTo(1);
