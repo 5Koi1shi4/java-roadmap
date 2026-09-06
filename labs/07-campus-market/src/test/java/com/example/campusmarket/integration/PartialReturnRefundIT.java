@@ -120,7 +120,7 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
         assertThat(recovered.refundId()).isEqualTo(failed.refundId());
         assertThat(recovered.refundStatus()).isEqualTo("SUCCEEDED");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, f.order().toString())).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, f.order().toString())).isEqualTo("AFTERSALE_WINDOW");
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, f.order().toString())).isEqualTo("REFUNDED");
     }
 
     @Test
@@ -313,7 +313,7 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
                 releaseSettlement.await(10, TimeUnit.SECONDS);
             }
             return result;
-        }).when(jdbc).query(anyString(), any(ResultSetExtractor.class), any());
+        }).when(jdbc).query(anyString(), any(ResultSetExtractor.class), any(Object[].class));
         var pool = Executors.newFixedThreadPool(2);
         try {
             var settlement = pool.submit(() -> settlements.settle(f.order()));

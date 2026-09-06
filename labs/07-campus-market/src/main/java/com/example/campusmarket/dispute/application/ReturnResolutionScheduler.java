@@ -35,7 +35,7 @@ public final class ReturnResolutionScheduler {
             resolutions.executeHardDeadlineRefund(caseId);
             completed++;
         }
-        List<UUID> ids = jdbc.query("SELECT DISTINCT f.id FROM refund_order f JOIN return_case r ON (r.refund_id=f.id OR (r.refund_id IS NULL AND r.order_id=f.order_id AND (f.idempotency_key=CONCAT('dispute-return-',r.dispute_case_id) OR f.idempotency_key=CONCAT('dispute-hard-refund-',r.dispute_case_id)))) "
+        List<UUID> ids = jdbc.query("SELECT DISTINCT f.id,f.updated_at FROM refund_order f JOIN return_case r ON (r.refund_id=f.id OR (r.refund_id IS NULL AND r.order_id=f.order_id AND (f.idempotency_key=CONCAT('dispute-return-',r.dispute_case_id) OR f.idempotency_key=CONCAT('dispute-hard-refund-',r.dispute_case_id)))) "
                 + "WHERE f.status='SUCCEEDED' AND (r.refund_id IS NULL OR r.refund_status<>'SUCCEEDED' OR (r.resolution_type='RETURN_AND_REFUND' AND r.quarantined_at IS NULL)) ORDER BY f.updated_at,f.id LIMIT ?",
             (rs, n) -> UUID.fromString(rs.getString(1)), limit);
         for (UUID id : ids) {
