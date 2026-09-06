@@ -5,6 +5,7 @@ import com.example.campusmarket.catalog.application.InventoryPort;
 import com.example.campusmarket.dispute.application.ReturnResolutionService;
 import com.example.campusmarket.dispute.application.ProofAuthority;
 import com.example.campusmarket.dispute.application.ReturnProofAttestationService;
+import com.example.campusmarket.dispute.application.ReturnResolutionScheduler;
 import com.example.campusmarket.dispute.domain.DisputeDecision;
 import com.example.campusmarket.dispute.domain.ReturnProofType;
 import com.example.campusmarket.payment.application.SettlementService;
@@ -12,8 +13,10 @@ import com.example.campusmarket.payment.application.RefundService;
 import com.example.campusmarket.payment.infrastructure.SimulatedPaymentProviderController;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.mock.mockito.SpyBean;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.ResultSetExtractor;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.annotation.DirtiesContext;
@@ -25,6 +28,9 @@ import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 
 /** 真实 MySQL：三件退一件只隔离一件，剩余金额可在七天后净结算。 */
 @SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
@@ -32,11 +38,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @TestPropertySource(properties = {"server.port=18082", "campus.market.payment.provider-url=http://localhost:18082/simulated-provider",
     "campus.market.search.dispatcher.enabled=false", "campus.market.dispute.deadline.enabled=false",
-    "campus.market.dispute.return-reconciliation.enabled=false"})
+    "campus.market.dispute.return-reconciliation.enabled=true",
+    "campus.market.dispute.return-reconciliation.initial-delay-ms=86400000",
+    "campus.market.dispute.return-reconciliation.fixed-delay-ms=86400000"})
 class PartialReturnRefundIT extends Task11MySqlContainers {
-    @Autowired JdbcTemplate jdbc;
+    @SpyBean JdbcTemplate jdbc;
     @Autowired ReturnResolutionService returns;
     @Autowired ReturnProofAttestationService attestations;
+    @Autowired ReturnResolutionScheduler reconciliation;
     @Autowired SettlementService settlements;
     @Autowired RefundService refunds;
     @Autowired SimulatedPaymentProviderController provider;
@@ -75,6 +84,60 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
         refunds.reconcileRefund(result.refundId());
         assertThat(returns.reconcileSuccessfulRefund(result.refundId()).refundStatus()).isEqualTo("SUCCEEDED");
         assertThat(jdbc.queryForObject("SELECT refund_id FROM return_case WHERE dispute_case_id=?", String.class, f.dispute().toString())).isEqualTo(result.refundId().toString());
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, f.order().toString())).isEqualTo("REFUNDED");
+    }
+
+    @Test
+    void directSuccessfulReturnRefundPersistsQuarantineAndSchedulerSecondRunIsIdle() {
+        Fixture f = fixture(1, 100);
+        provider.setNextRefundStatusForTest("SUCCEEDED");
+        var result = returns.resolve(f.dispute(), DisputeDecision.RETURN_AND_REFUND, 1,
+            ReturnProofType.SELLER_CONFIRMED, "seller-confirmed", ProofAuthority.seller(f.seller()));
+        assertThat(result.refundStatus()).isEqualTo("SUCCEEDED");
+        assertThat(jdbc.queryForObject("SELECT quarantined_at IS NOT NULL FROM return_case WHERE dispute_case_id=?", Boolean.class, f.dispute().toString())).isTrue();
+        assertThat(reconciliation.runOnce(50)).isZero();
+        assertThat(jdbc.queryForObject("SELECT quarantined_at IS NOT NULL FROM return_case WHERE dispute_case_id=?", Boolean.class, f.dispute().toString())).isTrue();
+    }
+
+    @Test
+    void ordinaryFailedRefundEscalatesAndReusesSameRefundOnControlledRecovery() {
+        Fixture f = fixture(1, 100);
+        provider.setNextRefundStatusForTest("FAILED");
+        var failed = returns.resolve(f.dispute(), DisputeDecision.REFUND_ONLY, 1,
+            ReturnProofType.SELLER_CONFIRMED, "seller-confirmed", ProofAuthority.seller(f.seller()));
+        assertThat(failed.refundStatus()).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, f.dispute().toString())).isEqualTo("ESCALATED");
+        assertThat(jdbc.queryForObject("SELECT status FROM return_case WHERE dispute_case_id=?", String.class, f.dispute().toString())).isEqualTo("ESCALATED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, f.order().toString())).isEqualTo(1);
+        String providerReference = refunds.queryRefund(failed.refundId()).providerReference();
+        assertThat(returns.retryFailedRefund(f.dispute()).refundStatus()).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT reserved_refund_fen FROM payment_order WHERE id=?", Long.class, f.payment().toString())).isZero();
+        provider.setRefundStatus(providerReference, "UNKNOWN");
+        assertThat(returns.retryFailedRefund(f.dispute()).refundStatus()).isEqualTo("FAILED");
+        assertThat(jdbc.queryForObject("SELECT reserved_refund_fen FROM payment_order WHERE id=?", Long.class, f.payment().toString())).isZero();
+        provider.setRefundStatus(providerReference, "SUCCEEDED");
+        var recovered = returns.retryFailedRefund(f.dispute());
+        assertThat(recovered.refundId()).isEqualTo(failed.refundId());
+        assertThat(recovered.refundStatus()).isEqualTo("SUCCEEDED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, f.order().toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, f.order().toString())).isEqualTo("AFTERSALE_WINDOW");
+    }
+
+    @Test
+    void successfulRefundBeforeReturnReconciliationBlocksSettlementUntilOrderConverges() {
+        Fixture f = fixture(1, 100);
+        var result = returns.resolve(f.dispute(), DisputeDecision.RETURN_AND_REFUND, 1,
+            ReturnProofType.SELLER_CONFIRMED, "seller-confirmed", ProofAuthority.seller(f.seller()));
+        provider.setRefundStatus(refunds.queryRefund(result.refundId()).providerReference(), "SUCCEEDED");
+        assertThat(refunds.reconcileRefund(result.refundId()).status()).isEqualTo("SUCCEEDED");
+        jdbc.update("UPDATE trade_order SET status='AFTERSALE_WINDOW' WHERE id=?", f.order().toString());
+
+        var blocked = settlements.settle(f.order());
+        assertThat(blocked.status()).isEqualTo("BLOCKED");
+        assertThat(blocked.blockedReason()).isEqualTo("UNRECONCILED_RETURN");
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, f.order().toString())).isEqualTo("AFTERSALE_WINDOW");
+
+        assertThat(returns.reconcileSuccessfulRefund(result.refundId()).refundStatus()).isEqualTo("SUCCEEDED");
         assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, f.order().toString())).isEqualTo("REFUNDED");
     }
 
@@ -234,14 +297,42 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
     }
 
     @Test
-    void settlementFirstThenRefundCannotCreateAfterSettlement() {
+    void settlementFirstThenRefundWaitsForOrderLockAndCannotCreateAfterSettlement() throws Exception {
         Fixture f = fixture(1, 100);
         jdbc.update("UPDATE trade_order SET status='AFTERSALE_WINDOW',t0=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 8 DAY) WHERE id=?", f.order().toString());
         jdbc.update("DELETE FROM dispute_case WHERE id=?", f.dispute().toString());
-        assertThat(settlements.settle(f.order()).status()).isEqualTo("SETTLED");
-        assertThatThrownBy(() -> refunds.requestRefund(f.order(), "settlement-first-" + f.order(), com.example.campusmarket.shared.Money.ofFen(100)))
-            .isInstanceOf(IllegalStateException.class);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, f.order().toString())).isZero();
+        CountDownLatch orderLockEntered = new CountDownLatch(1);
+        CountDownLatch releaseSettlement = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            String sql = invocation.getArgument(0, String.class);
+            Object result = invocation.callRealMethod();
+            Object[] parameters = invocation.getArgument(2, Object[].class);
+            if (sql.startsWith("SELECT id,status,t0 FROM trade_order WHERE id=? FOR UPDATE")
+                && parameters.length == 1 && f.order().toString().equals(parameters[0])) {
+                orderLockEntered.countDown();
+                releaseSettlement.await(10, TimeUnit.SECONDS);
+            }
+            return result;
+        }).when(jdbc).query(anyString(), any(ResultSetExtractor.class), any());
+        var pool = Executors.newFixedThreadPool(2);
+        try {
+            var settlement = pool.submit(() -> settlements.settle(f.order()));
+            assertThat(orderLockEntered.await(10, TimeUnit.SECONDS)).isTrue();
+            var refund = pool.submit(() -> {
+                try {
+                    return refunds.requestRefund(f.order(), "settlement-first-" + f.order(), com.example.campusmarket.shared.Money.ofFen(100));
+                } catch (RuntimeException failure) {
+                    return null;
+                }
+            });
+            releaseSettlement.countDown();
+            assertThat(settlement.get(20, TimeUnit.SECONDS).status()).isEqualTo("SETTLED");
+            assertThat(refund.get(20, TimeUnit.SECONDS)).isNull();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class, f.order().toString())).isZero();
+        } finally {
+            releaseSettlement.countDown();
+            pool.shutdownNow();
+        }
     }
 
     @Test
