@@ -108,7 +108,7 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
     void hardDeadlineWithoutTrustedProofEscalatesAndFreezesFunds() {
         UUID buyer = user(), seller = user(), listing = UUID.randomUUID(), order = UUID.randomUUID(), dispute = UUID.randomUUID();
         insertOrder(buyer, seller, listing, order, "DISPUTED");
-        jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,admin_deadline,hard_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?,1,'QUANTITY','UNDER_REVIEW',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 3 DAY),DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", dispute.toString(), order.toString(), buyer.toString());
+        jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,disputed_quantity,reason,status,proof_type,seller_deadline,admin_deadline,hard_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?,1,'QUANTITY','UNDER_REVIEW','ADMIN_CONFIRMED',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 3 DAY),DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", dispute.toString(), order.toString(), buyer.toString());
         claim(dispute, "HARD_DEADLINE");
 
         assertThat(deadlines.runOne(dispute)).isEqualTo(1);
@@ -119,9 +119,10 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
     @Test
     void trustedHardDeadlineCreatesOneRefundOutboxAndSlaAlertIsOneShot() {
         UUID buyer = user(), seller = user(), listing = UUID.randomUUID(), order = UUID.randomUUID(), payment = UUID.randomUUID(), dispute = UUID.randomUUID();
+        UUID admin = user();
         insertOrder(buyer, seller, listing, order, "DISPUTED");
         jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,100,100,?,'SUCCEEDED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", payment.toString(), order.toString(), "simulated", "pay-" + payment, "sim-pay-" + payment);
-        jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,disputed_quantity,reason,status,proof_type,seller_deadline,admin_deadline,hard_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?,1,'QUANTITY','UNDER_REVIEW','ADMIN_CONFIRMED',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 3 DAY),DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", dispute.toString(), order.toString(), buyer.toString());
+        jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,assigned_admin_id,disputed_quantity,reason,status,proof_type,proof_reference,seller_deadline,admin_deadline,hard_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?, ?,1,'QUANTITY','UNDER_REVIEW','ADMIN_CONFIRMED',?,DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 3 DAY),DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", dispute.toString(), order.toString(), buyer.toString(), admin.toString(), admin.toString());
         claim(dispute, "HARD_DEADLINE");
         assertThat(deadlines.runOne(dispute)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, dispute.toString())).isEqualTo("RESOLVED");
@@ -141,6 +142,27 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
         assertThat(deadlines.runOne(slaCase)).isEqualTo(1);
         assertThat(deadlines.runOne(slaCase)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='DISPUTE_SLA_ALERT' AND aggregate_id=?", Integer.class, order.toString())).isEqualTo(1);
+    }
+
+    @Test
+    void failedHardDeadlineRefundEscalatesAndControlledRecoveryConverges() {
+        UUID buyer = user(), seller = user(), admin = user(), listing = UUID.randomUUID(), order = UUID.randomUUID(), payment = UUID.randomUUID(), dispute = UUID.randomUUID();
+        insertOrder(buyer, seller, listing, order, "DISPUTED");
+        jdbc.update("INSERT INTO payment_order (id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,100,100,?,'SUCCEEDED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", payment.toString(), order.toString(), "simulated", "pay-" + payment, "sim-pay-" + payment);
+        jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,assigned_admin_id,disputed_quantity,reason,status,proof_type,proof_reference,seller_deadline,admin_deadline,hard_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?, ?,1,'QUANTITY','UNDER_REVIEW','ADMIN_CONFIRMED',?,DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 3 DAY),DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", dispute.toString(), order.toString(), buyer.toString(), admin.toString(), admin.toString());
+        claim(dispute, "HARD_DEADLINE");
+        provider.setNextRefundStatusForTest("FAILED");
+
+        assertThat(deadlines.runOne(dispute)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, dispute.toString())).isEqualTo("ESCALATED");
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("DISPUTED");
+        assertThat(jdbc.queryForObject("SELECT refund_status FROM return_case WHERE dispute_case_id=?", String.class, dispute.toString())).isEqualTo("FAILED");
+        String reference = jdbc.queryForObject("SELECT provider_reference FROM refund_order WHERE order_id=?", String.class, order.toString());
+        provider.setRefundStatus(reference, "SUCCEEDED");
+
+        assertThat(returns.retryHardDeadlineRefund(dispute).refundStatus()).isEqualTo("SUCCEEDED");
+        assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, dispute.toString())).isEqualTo("RESOLVED");
+        assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("REFUNDED");
     }
 
     private void insertOrder(UUID buyer, UUID seller, UUID listing, UUID order, String status) {
