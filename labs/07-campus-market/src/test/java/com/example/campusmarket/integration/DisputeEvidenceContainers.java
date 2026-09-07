@@ -53,5 +53,8 @@ abstract class DisputeEvidenceContainers {
         registry.add("spring.task.scheduling.enabled", () -> "false");
         registry.add("campus.market.search.dispatcher.enabled", () -> "false");
         registry.add("campus.market.payment.reconciliation.enabled", () -> "false");
+        registry.add("campus.market.dispute.return-reconciliation.enabled", () -> "false");
+        registry.add("campus.market.dispute.deadline.enabled", () -> "false");
+        registry.add("campus.market.warranty.deadline.enabled", () -> "false");
     }
 }
