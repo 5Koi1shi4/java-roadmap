@@ -146,8 +146,8 @@ public class JdbcDisputeRepository {
     }
 
     public EvidenceRow evidence(UUID evidenceId) {
-        return jdbc.query("SELECT e.id,COALESCE(e.dispute_case_id,e.warranty_case_id),e.object_key,e.media_type,e.size_bytes,COALESCE(d.order_id,w.order_id),COALESCE(o.buyer_id,w.buyer_id),COALESCE(o.seller_id,w.seller_id),COALESCE(d.assigned_admin_id,w.assigned_admin_id) FROM dispute_evidence e LEFT JOIN dispute_case d ON d.id=e.dispute_case_id LEFT JOIN warranty_case w ON w.id=e.warranty_case_id LEFT JOIN trade_order o ON o.id=d.order_id WHERE e.id=?",
-            rs -> rs.next() ? new EvidenceRow(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("dispute_case_id")),
+        return jdbc.query("SELECT e.id,COALESCE(e.dispute_case_id,e.warranty_case_id) AS case_id,e.object_key,e.media_type,e.size_bytes,COALESCE(d.order_id,w.order_id) AS order_id,COALESCE(o.buyer_id,w.buyer_id) AS buyer_id,COALESCE(o.seller_id,w.seller_id) AS seller_id,COALESCE(d.assigned_admin_id,w.assigned_admin_id) AS assigned_admin_id FROM dispute_evidence e LEFT JOIN dispute_case d ON d.id=e.dispute_case_id LEFT JOIN warranty_case w ON w.id=e.warranty_case_id LEFT JOIN trade_order o ON o.id=d.order_id WHERE e.id=?",
+            rs -> rs.next() ? new EvidenceRow(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("case_id")),
                 rs.getString("object_key"), rs.getString("media_type"), rs.getLong("size_bytes"), UUID.fromString(rs.getString("order_id")),
                 UUID.fromString(rs.getString("buyer_id")), UUID.fromString(rs.getString("seller_id")), uuid(rs.getString("assigned_admin_id"))) : null,
             evidenceId.toString());

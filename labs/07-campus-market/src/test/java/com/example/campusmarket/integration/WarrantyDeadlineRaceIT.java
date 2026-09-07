@@ -51,9 +51,10 @@ class WarrantyDeadlineRaceIT extends Task11MySqlContainers {
         jdbc.update("INSERT INTO seller_obligation(id,warranty_case_id,seller_id,obligation_business_key,obligation_amount_fen,funded_amount_fen,funding_deadline,restriction_status,status,version,created_at,updated_at) VALUES (?,?,?, ?,1000,0,DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),'RESTRICTED','AWAITING_FUNDING',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", obligation.toString(), f[2].toString(), f[1].toString(), "race-" + obligation);
         jdbc.update("INSERT INTO seller_account_restriction(seller_id,restriction_type,source_obligation_id,status,created_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6)),(?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6))", f[1].toString(), "PUBLISH", obligation.toString(), f[1].toString(), "WITHDRAW", obligation.toString());
         ExecutorService pool = Executors.newFixedThreadPool(2);
+        CyclicBarrier barrier = new CyclicBarrier(2);
         try {
-            Future<?> funding = pool.submit(() -> { try { obligations.fundObligation(obligation, f[1], com.example.campusmarket.shared.Money.ofFen(1000)); } catch (RuntimeException ignored) {} });
-            Future<?> expiry = pool.submit(() -> deadlines.runOnce(100));
+            Future<?> funding = pool.submit(() -> { await(barrier); obligations.fundObligation(obligation, f[1], com.example.campusmarket.shared.Money.ofFen(1000)); });
+            Future<?> expiry = pool.submit(() -> { await(barrier); deadlines.runOnce(100); });
             funding.get(20, TimeUnit.SECONDS); expiry.get(20, TimeUnit.SECONDS);
         } finally { pool.shutdownNow(); }
         String state = jdbc.queryForObject("SELECT status FROM seller_obligation WHERE id=?", String.class, obligation.toString());
@@ -71,4 +72,5 @@ class WarrantyDeadlineRaceIT extends Task11MySqlContainers {
         return new UUID[]{buyer,seller,caseId};
     }
     private UUID user(){UUID id=UUID.randomUUID();jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",id.toString(),id+"@stu.example.edu.cn","hash");return id;}
+    private static void await(CyclicBarrier barrier) { try { barrier.await(20, TimeUnit.SECONDS); } catch (Exception e) { throw new AssertionError("并发屏障失败", e); } }
 }

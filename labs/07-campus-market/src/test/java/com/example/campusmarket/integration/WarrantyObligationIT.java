@@ -42,7 +42,8 @@ class WarrantyObligationIT extends Task11MySqlContainers {
         UUID admin = user();
         WarrantyService.Result opened = warranties.openWarrantyCase(f.order(), 1, "FUNCTIONAL_DEFECT", "warranty-open-" + f.order(), f.buyer());
         assertThat(opened.status()).isEqualTo("OPEN");
-        WarrantyService.Result decided = warranties.decide(opened.caseId(), admin, WarrantyDecision.REPAIR_COMPENSATION, 1200, "repair-quote-1");
+        UUID quote = evidence(opened.caseId(), f.buyer());
+        WarrantyService.Result decided = warranties.decide(opened.caseId(), admin, WarrantyDecision.REPAIR_COMPENSATION, 1200, quote.toString());
         assertThat(decided.status()).isEqualTo("RESOLVED");
         UUID obligation = UUID.fromString(jdbc.queryForObject("SELECT id FROM seller_obligation WHERE warranty_case_id=?", String.class, opened.caseId().toString()));
         assertThat(jdbc.queryForObject("SELECT obligation_amount_fen FROM seller_obligation WHERE id=?", Long.class, obligation.toString())).isEqualTo(1200L);
@@ -61,7 +62,8 @@ class WarrantyObligationIT extends Task11MySqlContainers {
         Fixture f = fixture(1000, 30);
         UUID admin = user();
         WarrantyService.Result opened = warranties.openWarrantyCase(f.order(), 1, "FUNCTIONAL_DEFECT", "warranty-deduct-" + f.order(), f.buyer());
-        warranties.decide(opened.caseId(), admin, WarrantyDecision.REPAIR_COMPENSATION, 800, "quote-2");
+        UUID quote = evidence(opened.caseId(), f.buyer());
+        warranties.decide(opened.caseId(), admin, WarrantyDecision.REPAIR_COMPENSATION, 800, quote.toString());
         UUID obligation = UUID.fromString(jdbc.queryForObject("SELECT id FROM seller_obligation WHERE warranty_case_id=?", String.class, opened.caseId().toString()));
         UUID settlement = UUID.randomUUID();
         jdbc.update("INSERT INTO settlement(id,order_id,paid_amount_fen,successful_refund_fen,net_settlement_fen,status,created_at) VALUES (?,?,1000,0,1000,'SETTLED',CURRENT_TIMESTAMP(6))", settlement.toString(), f.order().toString());
@@ -81,5 +83,6 @@ class WarrantyObligationIT extends Task11MySqlContainers {
         return new Fixture(buyer, seller, order);
     }
     private UUID user() { UUID id=UUID.randomUUID(); jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",id.toString(),id+"@stu.example.edu.cn","hash"); return id; }
+    private UUID evidence(UUID caseId, UUID actor) { UUID id=UUID.randomUUID(); jdbc.update("INSERT INTO dispute_evidence(id,dispute_case_id,warranty_case_id,case_type,submitted_by,object_key,media_type,size_bytes,created_at) VALUES (?,NULL,?,'WARRANTY',?,'fixture-proof','application/pdf',4,CURRENT_TIMESTAMP(6))",id.toString(),caseId.toString(),actor.toString()); return id; }
     private record Fixture(UUID buyer, UUID seller, UUID order) {}
 }

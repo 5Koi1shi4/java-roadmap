@@ -101,8 +101,8 @@ public class SettlementService {
     private void applySellerObligations(UUID orderId, UUID settlementId, long net, Instant now) {
         UUID seller = jdbc.queryForObject("SELECT seller_id FROM trade_order WHERE id=?", (rs, n) -> UUID.fromString(rs.getString(1)), orderId.toString());
         long remaining = net;
-        var obligations = jdbc.query("SELECT id,obligation_amount_fen,funded_amount_fen FROM seller_obligation WHERE seller_id=? AND status IN ('AWAITING_FUNDING','PARTIALLY_FUNDED') AND funding_deadline>=? ORDER BY funding_deadline,id FOR UPDATE",
-            (rs, n) -> new Obligation(UUID.fromString(rs.getString(1)), rs.getLong(2), rs.getLong(3)), seller.toString(), Timestamp.from(now));
+        var obligations = jdbc.query("SELECT id,warranty_case_id,obligation_amount_fen,funded_amount_fen,version FROM seller_obligation WHERE seller_id=? AND status IN ('AWAITING_FUNDING','PARTIALLY_FUNDED','CANCELLED') ORDER BY funding_deadline,id FOR UPDATE",
+            (rs, n) -> new Obligation(UUID.fromString(rs.getString(1)), UUID.fromString(rs.getString(2)), rs.getLong(3), rs.getLong(4), rs.getLong(5)), seller.toString());
         for (Obligation obligation : obligations) {
             if (remaining <= 0) break;
             long due = Math.min(remaining, obligation.amount() - obligation.funded());
@@ -113,6 +113,11 @@ public class SettlementService {
                 jdbc.update("UPDATE seller_obligation SET funded_amount_fen=?,status=?,restriction_status=?,version=version+1,updated_at=? WHERE id=? AND funded_amount_fen=?",
                     funded, funded == obligation.amount() ? "FUNDED" : "PARTIALLY_FUNDED", funded == obligation.amount() ? "NONE" : "RESTRICTED", Timestamp.from(now), obligation.id().toString(), obligation.funded());
                 if (funded == obligation.amount()) jdbc.update("UPDATE seller_account_restriction SET status='CLEARED',cleared_at=? WHERE source_obligation_id=? AND status='ACTIVE'", Timestamp.from(now), obligation.id().toString());
+                if (funded == obligation.amount()) {
+                    UUID event=UUID.nameUUIDFromBytes(("warranty-refund:"+obligation.id()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    String payload="{\"orderId\":\""+orderId+"\",\"caseId\":\""+obligation.caseId()+"\",\"obligationId\":\""+obligation.id()+"\",\"amountFen\":"+obligation.amount()+"}";
+                    jdbc.update("INSERT INTO integration_outbox(id,event_id,event_type,aggregate_id,aggregate_version,schema_version,occurred_at,payload,status,attempt_count,available_at,created_at) VALUES (?,?, 'WARRANTY_REFUND_REQUESTED',?,?,1,CURRENT_TIMESTAMP(6),CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",event.toString(),event.toString(),obligation.id().toString(),obligation.version()+1,payload);
+                }
                 remaining -= due;
             }
         }
@@ -122,5 +127,5 @@ public class SettlementService {
     public record SettlementResult(UUID orderId, String status, long netSettlementFen, String blockedReason) {}
     private record OrderFacts(UUID id, String status, Instant t0) {}
     private record PaymentFacts(long paidAmountFen, long successfulRefundFen, long reservedRefundFen) {}
-    private record Obligation(UUID id, long amount, long funded) {}
+    private record Obligation(UUID id, UUID caseId, long amount, long funded, long version) {}
 }
