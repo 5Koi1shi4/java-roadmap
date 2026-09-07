@@ -43,7 +43,7 @@ public final class SellerObligationService {
     /** 按最早到期义务抵扣一笔未来结算；(settlementId, obligationId) 唯一键提供幂等。 */
     public long deductFutureSettlement(UUID settlementId, UUID obligationId, Money amount) {
         Objects.requireNonNull(settlementId); Objects.requireNonNull(obligationId); Objects.requireNonNull(amount);
-        return transactions.execute(s->{
+        long deducted = transactions.execute(s->{
             Obligation row=jdbc.query("SELECT id,seller_id,obligation_amount_fen,funded_amount_fen,status FROM seller_obligation WHERE id=? FOR UPDATE",rs->rs.next()?new Obligation(UUID.fromString(rs.getString(1)),null,UUID.fromString(rs.getString(2)),rs.getLong(3),rs.getLong(4),rs.getString(5),null):null,obligationId.toString());
             if(row==null) throw new NotFoundException();
             long remaining=row.amount()-row.funded(); if(remaining<=0) return 0L;
@@ -52,6 +52,15 @@ public final class SellerObligationService {
             if(inserted==1){ long next=row.funded()+deduction; jdbc.update("UPDATE seller_obligation SET funded_amount_fen=?,status=?,restriction_status=?,version=version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND funded_amount_fen=?",next,next==row.amount()?"FUNDED":"PARTIALLY_FUNDED",next==row.amount()?"NONE":"RESTRICTED",obligationId.toString(),row.funded()); if(next==row.amount()) clearRestrictions(row.sellerId(),obligationId,dbNow()); }
             return deduction;
         });
+        if (deducted > 0) {
+            String status = jdbc.queryForObject("SELECT status FROM seller_obligation WHERE id=?", String.class, obligationId.toString());
+            if ("FUNDED".equals(status)) {
+                UUID orderId = jdbc.queryForObject("SELECT w.order_id FROM seller_obligation o JOIN warranty_case w ON w.id=o.warranty_case_id WHERE o.id=?", (rs,n)->UUID.fromString(rs.getString(1)), obligationId.toString());
+                UUID caseId = jdbc.queryForObject("SELECT warranty_case_id FROM seller_obligation WHERE id=?", (rs,n)->UUID.fromString(rs.getString(1)), obligationId.toString());
+                refunds.requestRefund(orderId, "warranty-refund-" + obligationId, Money.ofFen(jdbc.queryForObject("SELECT obligation_amount_fen FROM seller_obligation WHERE id=?", Long.class, obligationId.toString())), "WARRANTY", caseId);
+            }
+        }
+        return deducted;
     }
     public boolean isRestricted(UUID sellerId,String type){ Integer n=jdbc.queryForObject("SELECT COUNT(*) FROM seller_account_restriction WHERE seller_id=? AND restriction_type=? AND status='ACTIVE'",Integer.class,sellerId.toString(),type); return n!=null&&n>0; }
     private void clearRestrictions(UUID seller,UUID obligation,Instant now){jdbc.update("UPDATE seller_account_restriction SET status='CLEARED',cleared_at=? WHERE seller_id=? AND source_obligation_id=? AND status='ACTIVE'",Timestamp.from(now),seller.toString(),obligation.toString());}

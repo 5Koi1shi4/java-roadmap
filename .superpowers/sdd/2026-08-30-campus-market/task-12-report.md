@@ -19,8 +19,10 @@
 - `.\mvnw.cmd -DskipTests compile`：BUILD SUCCESS。
 - `git diff --check`：通过（仅 CRLF 转换提示）。
 - `.\mvnw.cmd test`：81 tests、0 failures、0 errors、0 skipped。
-- `docker info`：当前主机 Docker 引擎权限被拒绝，无法执行真实 MySQL/Testcontainers IT；因此两类 IT 未宣称通过。
+- 新增 `WarrantyObligationIT`（2 cases）与 `WarrantyDeadlineRaceIT`（2 cases），均使用 `Task11MySqlContainers` 的真实 MySQL 8.4/Testcontainers，覆盖结算后义务、筹资幂等、限制、复合抵扣幂等、ACL、seller/admin deadline、过期 claim takeover、owner/token/lease fencing 与筹资/过期竞态。
+- `.\mvnw.cmd '-Dit.test=WarrantyObligationIT' failsafe:integration-test failsafe:verify`：实际启动 Failsafe，测试在 Testcontainers beforeAll 因 `AccessDeniedException \\.\pipe\docker_engine` / `Could not find a valid Docker environment` 失败（1 test class error, 0 skipped）；不是以 skipped 冒充通过。
+- `.\mvnw.cmd test`：81 tests、0 failures、0 errors、0 skipped；新增 IT 已完成 `test-compile`。
 
 ## 自审与关注项
 
-已保持 Task11 订单→案件→支付锁顺序、settled 订单状态隔离、支付 provider 适配框架和退款额度硬上限。关注项：Docker 引擎不可用导致 `WarrantyObligationIT` 与 `WarrantyDeadlineRaceIT` 尚未在真实 MySQL 上验收；应在 Docker 可用环境重新运行简报指定的两条 Failsafe 命令并确认 0 skipped。
+已保持 Task11 订单→案件→支付锁顺序、settled 订单状态隔离、支付 provider 适配框架和退款额度硬上限。关注项：Docker 引擎不可用导致两类 IT 尚未在真实 MySQL 上完成 GREEN；应在 Docker 可用环境运行 `.\mvnw.cmd -Dit.test=WarrantyObligationIT,WarrantyDeadlineRaceIT verify` 并确认 4 cases、0 skipped。
