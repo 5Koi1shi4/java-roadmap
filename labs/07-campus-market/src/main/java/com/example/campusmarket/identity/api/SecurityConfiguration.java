@@ -46,8 +46,7 @@ public class SecurityConfiguration {
 
     private static void writeJsonError(jakarta.servlet.http.HttpServletResponse response,
                                        int status, String message) throws IOException {
-        response.setStatus(status);
-        response.setHeader("Content-Type", "application/json; charset=UTF-8");
-        response.getWriter().write("{\"error\":\"" + message + "\"}");
+        com.example.campusmarket.api.SecurityConfiguration.writeJsonError(
+            response, HttpStatus.valueOf(status), status == 401 ? "UNAUTHENTICATED" : "FORBIDDEN", message);
     }
 }
