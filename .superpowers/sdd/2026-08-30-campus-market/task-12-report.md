@@ -19,6 +19,8 @@
 - `.\mvnw.cmd -DskipTests compile`：BUILD SUCCESS。
 - `git diff --check`：通过（仅 CRLF 转换提示）。
 - `.\mvnw.cmd test`：81 tests、0 failures、0 errors、0 skipped。
+- 真实 Docker 验收暴露 `ListingService` 有两个 `@Autowired` 构造器（3 参数与 4 参数），导致 ApplicationContext 报 `Invalid autowire-marked constructor`；已移除 3 参数构造器的 `@Autowired`，保留 4 参数为唯一 Spring 注入路径，同时保留 3 参数兼容手动/单测构造。
+- 修复后 ` .\mvnw.cmd '-Dtest=WarrantyPolicyTest,ListingTest' test`：9 tests、0 failures、0 errors、0 skipped；`test-compile` 通过。
 - 新增 `WarrantyObligationIT`（2 cases）与 `WarrantyDeadlineRaceIT`（2 cases），均使用 `Task11MySqlContainers` 的真实 MySQL 8.4/Testcontainers，覆盖结算后义务、筹资幂等、限制、复合抵扣幂等、ACL、seller/admin deadline、过期 claim takeover、owner/token/lease fencing 与筹资/过期竞态。
 - `.\mvnw.cmd '-Dit.test=WarrantyObligationIT' failsafe:integration-test failsafe:verify`：实际启动 Failsafe，测试在 Testcontainers beforeAll 因 `AccessDeniedException \\.\pipe\docker_engine` / `Could not find a valid Docker environment` 失败（1 test class error, 0 skipped）；不是以 skipped 冒充通过。
 - `.\mvnw.cmd test`：81 tests、0 failures、0 errors、0 skipped；新增 IT 已完成 `test-compile`。

@@ -19,7 +19,6 @@ public class ListingService {
     private final SearchOutboxRepository searchOutbox;
     private final JdbcTemplate jdbc;
 
-    @Autowired
     public ListingService(ListingRepository listings, ObjectUploadCoordinator uploads, SearchOutboxRepository searchOutbox) {
         this(listings, uploads, searchOutbox, null);
     }
