@@ -10,6 +10,7 @@ import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.test.annotation.DirtiesContext;
 
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -22,10 +23,20 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** 交付 API 的真实 HTTP 状态码、私有资源边界和 UTF-8 响应测试。 */
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
+@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("local")
-@TestPropertySource(properties = {"server.port=18082"})
-class HandoffHttpIT extends SharedContainers {
+@TestPropertySource(properties = {
+    "campus.market.search.dispatcher.enabled=false",
+    "campus.market.dispute.deadline.enabled=false",
+    "campus.market.dispute.return-reconciliation.enabled=false",
+    "campus.market.warranty.deadline.enabled=false",
+    "campus.market.order.deadline.enabled=false",
+    "campus.market.payment.reconciliation.enabled=false",
+    "spring.rabbitmq.listener.simple.auto-startup=false",
+    "spring.rabbitmq.listener.direct.auto-startup=false"
+})
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
+class HandoffHttpIT extends Task11MySqlContainers {
     @LocalServerPort private int port;
     @Autowired private JdbcTemplate jdbc;
     @Autowired private JwtService jwtService;
