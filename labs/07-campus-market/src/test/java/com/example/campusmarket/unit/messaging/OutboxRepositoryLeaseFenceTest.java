@@ -12,9 +12,11 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 class OutboxRepositoryLeaseFenceTest {
     @Test
@@ -30,7 +32,32 @@ class OutboxRepositoryLeaseFenceTest {
 
         ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
         verify(jdbc, org.mockito.Mockito.times(4)).update(sql.capture(), any(Object[].class));
-        assertThat(sql.getAllValues()).allSatisfy(statement ->
+        assertThat(sql.getAllValues()).filteredOn(statement -> statement.startsWith("UPDATE")).allSatisfy(statement ->
             assertThat(statement).contains("lease_until > CURRENT_TIMESTAMP(6)"));
+    }
+
+    @Test
+    void failureOnlyWritesManualCopyAfterOutboxTerminalUpdate() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        when(jdbc.update(anyString(), any(Object[].class))).thenReturn(1);
+        OutboxRepository repository = new OutboxRepository(jdbc);
+
+        repository.fail(UUID.randomUUID(), "owner", "token", "PERMANENT");
+
+        InOrder order = org.mockito.Mockito.inOrder(jdbc);
+        order.verify(jdbc).update(org.mockito.ArgumentMatchers.startsWith("UPDATE integration_outbox"), any(Object[].class));
+        order.verify(jdbc).update(org.mockito.ArgumentMatchers.startsWith("INSERT INTO manual_failure"), any(Object[].class));
+    }
+
+    @Test
+    void failureDoesNotWriteManualCopyWhenOutboxFenceRejectsUpdate() {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        when(jdbc.update(anyString(), any(Object[].class))).thenReturn(0);
+        OutboxRepository repository = new OutboxRepository(jdbc);
+
+        assertThat(repository.fail(UUID.randomUUID(), "owner", "token", "PERMANENT")).isZero();
+
+        verify(jdbc).update(org.mockito.ArgumentMatchers.startsWith("UPDATE integration_outbox"), any(Object[].class));
+        verifyNoMoreInteractions(jdbc);
     }
 }

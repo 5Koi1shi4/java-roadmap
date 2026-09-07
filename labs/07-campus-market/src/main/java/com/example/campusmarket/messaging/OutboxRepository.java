@@ -109,20 +109,22 @@ public class OutboxRepository {
         if (!"PERMANENT".equals(failureClass) && !"EXHAUSTED".equals(failureClass)) {
             throw new IllegalArgumentException("failureClass 无效");
         }
-        jdbc.update("""
-            INSERT INTO manual_failure (id,source_type,source_id,consumer_name,failure_class,payload,status,created_at)
-            SELECT ?, 'OUTBOX', event_id, '', ?, payload, 'NEW', CURRENT_TIMESTAMP(6)
-            FROM integration_outbox
-            WHERE event_id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=?
-              AND lease_until > CURRENT_TIMESTAMP(6)
-            ON DUPLICATE KEY UPDATE id=manual_failure.id
-            """, UUID.randomUUID().toString(), failureClass, eventId.toString(), owner, claimToken);
-        return jdbc.update("""
+        int changed = jdbc.update("""
             UPDATE integration_outbox
             SET status='FAILED', failure_class=?, owner_id=NULL, claim_token=NULL, lease_until=NULL
             WHERE event_id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=?
               AND lease_until > CURRENT_TIMESTAMP(6)
             """, failureClass, eventId.toString(), owner, claimToken);
+        if (changed == 1) {
+            jdbc.update("""
+                INSERT INTO manual_failure (id,source_type,source_id,consumer_name,failure_class,payload,status,created_at)
+                SELECT ?, 'OUTBOX', event_id, '', ?, payload, 'NEW', CURRENT_TIMESTAMP(6)
+                FROM integration_outbox
+                WHERE event_id=? AND status='FAILED' AND failure_class=?
+                ON DUPLICATE KEY UPDATE id=manual_failure.id
+                """, UUID.randomUUID().toString(), failureClass, eventId.toString(), failureClass);
+        }
+        return changed;
     }
 
     private static long leaseMicros(Duration duration) {
