@@ -73,7 +73,7 @@ public class SettlementService {
         if (pending != null && pending > 0) return false;
         Integer unreconciled = jdbc.queryForObject("SELECT COUNT(*) FROM refund_order f JOIN return_case r ON r.order_id=f.order_id AND (r.refund_id=f.id OR (r.refund_id IS NULL AND (f.idempotency_key=CONCAT('dispute-return-',r.dispute_case_id) OR f.idempotency_key=CONCAT('dispute-hard-refund-',r.dispute_case_id)))) WHERE f.order_id=? AND f.status='SUCCEEDED' AND (COALESCE(r.refund_status,'')<>'SUCCEEDED' OR (r.resolution_type='RETURN_AND_REFUND' AND r.quarantined_at IS NULL))", Integer.class, order.id().toString());
         if (unreconciled != null && unreconciled > 0) return false;
-        Long reserved = jdbc.queryForObject("SELECT COALESCE(SUM(reserved_refund_fen),0) FROM payment_order WHERE order_id=?", Long.class, order.id().toString());
+        Long reserved = jdbc.queryForObject("SELECT reserved_refund_fen FROM payment_order WHERE order_id=? AND status='SUCCEEDED' ORDER BY created_at DESC,id DESC LIMIT 1", Long.class, order.id().toString());
         return reserved == null || reserved == 0;
     }
 
@@ -120,7 +120,7 @@ public class SettlementService {
                 if (funded == obligation.amount()) {
                     var types=jdbc.query("SELECT restriction_type FROM seller_account_restriction WHERE source_obligation_id=? AND status='ACTIVE' FOR UPDATE",(rs,n)->rs.getString(1),obligation.id().toString());
                     jdbc.update("UPDATE seller_account_restriction SET status='CLEARED',cleared_at=? WHERE source_obligation_id=? AND status='ACTIVE'", Timestamp.from(now), obligation.id().toString());
-                    for(String type:types) recordTransition(seller,"SELLER_RESTRICTION_CLEARED",obligation.id(),obligation.version()+1,"{\"restrictionType\":\""+type+"\"}");
+                    for(String type:types) recordTransition(seller,"SELLER_RESTRICTION_CLEARED",obligation.id(),obligation.version()+1,"{\"restrictionType\":\""+type+"\"}",now);
                 }
                 UUID auditId=UUID.nameUUIDFromBytes(("settlement-obligation:"+settlementId+":"+obligation.id()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
                 String auditDetails="{\"settlementId\":\""+settlementId+"\",\"amountFen\":"+due+"}";
@@ -136,9 +136,9 @@ public class SettlementService {
         if (remaining != net) jdbc.update("UPDATE settlement SET net_settlement_fen=? WHERE id=?", remaining, settlementId.toString());
     }
 
-    private void recordTransition(UUID seller,String action,UUID obligation,long version,String payload){
+    private void recordTransition(UUID seller,String action,UUID obligation,long version,String payload,Instant now){
         UUID event=UUID.nameUUIDFromBytes((action+":"+obligation+":"+version+":"+payload).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        jdbc.update("INSERT INTO audit_event(id,actor_id,action,resource_type,resource_id,result,details,occurred_at) VALUES (?,?,?,'SELLER_OBLIGATION',?,'SUCCESS',CAST(? AS JSON),?) ON DUPLICATE KEY UPDATE id=id",event.toString(),seller.toString(),action,obligation.toString(),payload,Timestamp.from(Instant.now()));
+        jdbc.update("INSERT INTO audit_event(id,actor_id,action,resource_type,resource_id,result,details,occurred_at) VALUES (?,?,?,'SELLER_OBLIGATION',?,'SUCCESS',CAST(? AS JSON),?) ON DUPLICATE KEY UPDATE id=id",event.toString(),seller.toString(),action,obligation.toString(),payload,Timestamp.from(now));
         jdbc.update("INSERT INTO integration_outbox(id,event_id,event_type,aggregate_id,aggregate_version,schema_version,occurred_at,payload,status,attempt_count,available_at,created_at) VALUES (?,?,?, ?,?,1,CURRENT_TIMESTAMP(6),CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",event.toString(),event.toString(),action,obligation.toString(),version,payload);
     }
 

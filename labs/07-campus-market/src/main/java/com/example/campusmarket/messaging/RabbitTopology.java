@@ -18,6 +18,7 @@ import java.util.List;
 public class RabbitTopology {
     public static final String EVENT_EXCHANGE = "campus.market.events";
     public static final String EVENT_QUEUE = "campus.market.events.order";
+    public static final String WARRANTY_QUEUE = "campus.market.events.warranty";
     public static final String MANUAL_EXCHANGE = "campus.market.manual";
     public static final String MANUAL_QUEUE = "campus.market.manual.failure";
 
@@ -33,7 +34,14 @@ public class RabbitTopology {
 
     @Bean
     Queue campusMarketOrderEventQueue() {
-        return QueueBuilder.durable(EVENT_QUEUE).quorum().build();
+        return QueueBuilder.durable(EVENT_QUEUE).quorum()
+            .deadLetterExchange(MANUAL_EXCHANGE).deadLetterRoutingKey("FAILURE").build();
+    }
+
+    @Bean
+    Queue campusMarketWarrantyEventQueue() {
+        return QueueBuilder.durable(WARRANTY_QUEUE).quorum()
+            .deadLetterExchange(MANUAL_EXCHANGE).deadLetterRoutingKey("FAILURE").build();
     }
 
     @Bean
@@ -45,7 +53,7 @@ public class RabbitTopology {
     Declarables campusMarketEventBindings(Queue campusMarketOrderEventQueue,
                                           DirectExchange campusMarketEventExchange) {
         List<Declarable> bindings = new ArrayList<>();
-        for (String eventType : ALLOWED_EVENT_TYPES) {
+        for (String eventType : ORDER_EVENT_TYPES) {
             bindings.add(BindingBuilder.bind(campusMarketOrderEventQueue)
                 .to(campusMarketEventExchange).with(eventType));
         }
@@ -53,16 +61,23 @@ public class RabbitTopology {
     }
 
     @Bean
+    Declarables campusMarketWarrantyEventBindings(Queue campusMarketWarrantyEventQueue,
+                                                  DirectExchange campusMarketEventExchange) {
+        return new Declarables(BindingBuilder.bind(campusMarketWarrantyEventQueue)
+            .to(campusMarketEventExchange).with("WARRANTY_REFUND_REQUESTED"));
+    }
+
+    @Bean
     Binding campusMarketManualBinding(Queue campusMarketManualQueue, DirectExchange campusMarketManualExchange) {
         return BindingBuilder.bind(campusMarketManualQueue).to(campusMarketManualExchange).with("FAILURE");
     }
 
-    private static final List<String> ALLOWED_EVENT_TYPES = List.of(
+    private static final List<String> ORDER_EVENT_TYPES = List.of(
         "LISTING_CREATED", "LISTING_UPDATED", "LISTING_PUBLISHED", "LISTING_OFF_SALE", "LISTING_SOLD_OUT",
         "INVENTORY_CHANGED", "ORDER_CREATED", "ORDER_CANCELLED", "ORDER_PAID", "ORDER_HANDOFF_CONFIRMED",
         "ORDER_RECEIPT_CONFIRMED", "ORDER_DISPUTED", "ORDER_REFUNDING_CANCEL", "ORDER_REFUNDED",
         "ORDER_SETTLED", "ORDER_TRIAL_ELAPSED", "PAYMENT_CREATED", "PAYMENT_SUCCEEDED", "PAYMENT_FAILED", "PAYMENT_CALLBACK_RECEIVED",
         "REFUND_REQUESTED", "REFUND_SUCCEEDED", "REFUND_FAILED", "DISPUTE_CREATED", "DISPUTE_RESOLVED", "DISPUTE_SLA_ALERT",
-        "WARRANTY_CASE_CREATED", "WARRANTY_RESOLVED", "WARRANTY_DECIDED", "WARRANTY_REFUND_REQUESTED", "SELLER_OBLIGATION_CREATED", "SELLER_OBLIGATION_FUNDED", "SELLER_RESTRICTION_ACTIVATED", "SELLER_RESTRICTION_CLEARED", "SELLER_OBLIGATION_DEDUCTED", "SELLER_OBLIGATION_EXPIRED",
+        "SELLER_OBLIGATION_CREATED", "SELLER_OBLIGATION_FUNDED", "SELLER_RESTRICTION_ACTIVATED", "SELLER_RESTRICTION_CLEARED", "SELLER_OBLIGATION_DEDUCTED", "SELLER_OBLIGATION_EXPIRED",
         "SETTLEMENT_CREATED", "REVIEW_CREATED");
 }

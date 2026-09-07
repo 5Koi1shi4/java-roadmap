@@ -182,6 +182,15 @@ public class InboxRepository {
                 return true;
             });
             return Boolean.TRUE.equals(committed) ? DeliveryResult.COMPLETED : DeliveryResult.NOT_CLAIMED;
+        } catch (EventBusinessHandler.UnsupportedEventException unsupported) {
+            // The message was delivered to the wrong family queue. Persist a
+            // manual-failure record before the broker delivery is rejected;
+            // otherwise a requeue=false NACK leaves PROCESSING forever.
+            TransactionTemplate requiresNew = new TransactionTemplate(transactionManager);
+            requiresNew.setPropagationBehaviorName("PROPAGATION_REQUIRES_NEW");
+            Integer changed = requiresNew.execute(status -> markFailedInternal(consumerName, eventId,
+                claim.ownerId(), claim.claimToken()));
+            return Integer.valueOf(1).equals(changed) ? DeliveryResult.PERMANENT_FAILED : DeliveryResult.STALE;
         } catch (IllegalArgumentException permanentFailure) {
             TransactionTemplate requiresNew = new TransactionTemplate(transactionManager);
             requiresNew.setPropagationBehaviorName("PROPAGATION_REQUIRES_NEW");

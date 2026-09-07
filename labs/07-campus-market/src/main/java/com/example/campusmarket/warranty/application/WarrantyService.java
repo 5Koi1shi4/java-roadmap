@@ -125,7 +125,7 @@ public final class WarrantyService {
                 if(approvedCompensationFen<=0) throw new IllegalArgumentException("补偿金额必须为正数");
                 UUID obligation=UUID.nameUUIDFromBytes(("warranty-obligation:"+caseId).getBytes(StandardCharsets.UTF_8));
                 String key="warranty:"+caseId;
-                jdbc.update("INSERT INTO seller_obligation(id,warranty_case_id,seller_id,obligation_business_key,obligation_amount_fen,funding_deadline,future_settlement_deduction_key,restriction_status,status,version,created_at,updated_at) VALUES (?,?,?,?,?,DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 72 HOUR),NULL,'RESTRICTED','AWAITING_FUNDING',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",
+                jdbc.update("INSERT INTO seller_obligation(id,warranty_case_id,seller_id,obligation_business_key,obligation_amount_fen,funding_deadline,future_settlement_deduction_key,restriction_status,status,version,created_at,updated_at) VALUES (?,?,?,?,?,DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 72 HOUR),NULL,'RESTRICTED','AWAITING_FUNDING',1,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",
                     obligation.toString(),caseId.toString(),row.sellerId().toString(),key,approvedCompensationFen);
                 jdbc.update("INSERT INTO seller_account_restriction(seller_id,restriction_type,source_obligation_id,status,created_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE status='ACTIVE',cleared_at=NULL",
                     row.sellerId().toString(),"PUBLISH",obligation.toString());

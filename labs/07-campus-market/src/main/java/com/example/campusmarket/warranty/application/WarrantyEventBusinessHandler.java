@@ -20,6 +20,11 @@ public final class WarrantyEventBusinessHandler implements EventBusinessHandler 
     }
 
     @Override
+    public boolean supports(String eventType) {
+        return "WARRANTY_REFUND_REQUESTED".equals(eventType);
+    }
+
+    @Override
     public void handle(DomainEvent event) {
         if (!"WARRANTY_REFUND_REQUESTED".equals(event.eventType()))
             throw new UnsupportedEventException(event.eventType());

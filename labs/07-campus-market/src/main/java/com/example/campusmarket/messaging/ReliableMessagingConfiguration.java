@@ -19,12 +19,9 @@ public class ReliableMessagingConfiguration {
         // reject order/payment events instead of marking their Inbox completed;
         // test fixtures can still provide handlers for the legacy families.
         EventBusinessHandler router = event -> {
-            boolean warranty = event.eventType().startsWith("WARRANTY_");
             RuntimeException unsupported = null;
             for (EventBusinessHandler handler : handlers) {
-                String name = handler.getClass().getName();
-                boolean warrantyHandler = name.contains("WarrantyEventBusinessHandler");
-                if (warranty != warrantyHandler) continue;
+                if (!handler.supports(event.eventType())) continue;
                 try { handler.handle(event); return; }
                 catch (EventBusinessHandler.UnsupportedEventException ex) { unsupported = ex; }
             }
@@ -32,5 +29,17 @@ public class ReliableMessagingConfiguration {
             throw new EventBusinessHandler.UnsupportedEventException(event.eventType());
         };
         return new ReliableEventConsumer(codec, inbox, router);
+    }
+
+    @Bean
+    @Profile("!test")
+    @ConditionalOnBean(EventBusinessHandler.class)
+    WarrantyEventConsumer warrantyEventConsumer(EventEnvelopeCodec codec, InboxRepository inbox,
+                                                List<EventBusinessHandler> handlers) {
+        EventBusinessHandler handler = handlers.stream()
+            .filter(h -> h.supports("WARRANTY_REFUND_REQUESTED"))
+            .findFirst()
+            .orElseThrow(() -> new IllegalStateException("未配置质保事件处理器"));
+        return new WarrantyEventConsumer(codec, inbox, handler);
     }
 }

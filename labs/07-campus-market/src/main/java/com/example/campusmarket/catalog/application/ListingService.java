@@ -84,10 +84,15 @@ public class ListingService {
     @Transactional
     public UUID withdraw(UUID sellerId, long amountFen, String idempotencyKey) {
         if (sellerId == null || amountFen <= 0 || idempotencyKey == null || idempotencyKey.isBlank()) throw new IllegalArgumentException("提现请求无效");
-        if (activeRestrictionForUpdate(sellerId, "WITHDRAW")) throw new RestrictionException();
         if (jdbc == null) throw new IllegalStateException("提现账户存储不可用");
+        // The seller identity row is the durable seller-level mutex. It is
+        // acquired before reading either restrictions or balances, so two
+        // concurrent withdrawals cannot both spend the same settlement.
+        Integer sellerExists=jdbc.queryForObject("SELECT COUNT(*) FROM campus_user WHERE id=? FOR UPDATE",Integer.class,sellerId.toString());
+        if (sellerExists==null || sellerExists!=1) throw new NotFoundException();
         Withdrawal existing=jdbc.query("SELECT id,amount_fen FROM seller_withdrawal WHERE seller_id=? AND idempotency_key=? FOR UPDATE",rs->rs.next()?new Withdrawal(UUID.fromString(rs.getString(1)),rs.getLong(2)):null,sellerId.toString(),idempotencyKey);
         if(existing!=null){if(existing.amount()!=amountFen) throw new IllegalArgumentException("提现幂等冲突");return existing.id();}
+        if (activeRestrictionForUpdate(sellerId, "WITHDRAW")) throw new RestrictionException();
         Long available=jdbc.queryForObject("SELECT GREATEST(0,COALESCE((SELECT SUM(s.net_settlement_fen) FROM settlement s JOIN trade_order o ON o.id=s.order_id WHERE o.seller_id=? AND s.status='SETTLED'),0)-COALESCE((SELECT SUM(amount_fen) FROM seller_withdrawal WHERE seller_id=? AND status IN ('REQUESTED','COMPLETED')),0))",Long.class,sellerId.toString(),sellerId.toString());
         if(available==null||amountFen>available) throw new InsufficientBalanceException();
         UUID id=UUID.randomUUID();

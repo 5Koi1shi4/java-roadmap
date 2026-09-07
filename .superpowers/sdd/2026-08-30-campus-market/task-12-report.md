@@ -60,6 +60,18 @@ R3 控制端预审后的测试补强：新增 `WarrantyEventBusinessHandlerTest`
 
 ## 自审与关注项
 
+## R5 最终修复轮（c4a9c2e 基线）
+
+按 R4 规格/质量 OPEN 逐条复核并修复：
+
+- 截止后筹资先在事务内将未足额义务 CAS 为 `CANCELLED`，写入 `SELLER_OBLIGATION_EXPIRED` 审计与 Outbox，提交后再表达 `FundingExpiredException`，避免异常触发回滚丢失终态；筹资、清除限制使用数据库义务 `version`，不再以 epoch millis 冒充 aggregate version。义务创建版本从 1 开始。
+- `RefundService`/`JdbcPaymentRepository`/`WarrantyService`/`SettlementService` 全部使用同一 `created_at DESC,id DESC` 最新成功支付事实；结算资格的预占额也读取该行，消除旧成功支付退款与新支付实付混算。
+- Rabbit 拆出 `campus.market.events.warranty` 专用队列，仅绑定 `WARRANTY_REFUND_REQUESTED`；订单队列配置 manual DLX。事件处理器改为显式 `supports` 注册，Inbox 遇不支持事件先落 `manual_failure=PERMANENT` 再完成可靠 ACK，避免 NACK 丢失或 PROCESSING 卡死。
+- 新增低内存 `Task12RabbitMySqlContainers` 与 `WarrantyMessagingIT`（仅 MySQL+Rabbit）、`WarrantyHttpAclIT`（MySQL+InMemory 物理对象存储）和 `SellerWithdrawalConcurrencyIT`，分别覆盖消息确认/重放、真实 HTTP 认证/协议/同构 404，以及卖家级行锁、并发超提和限制后幂等重放。
+- 提现命令在事务内先锁 `campus_user` 卖家行，再查询幂等记录，之后才检查 WITHDRAW 限制并计算余额。
+
+R5 本地证据：`./mvnw.cmd -q -f pom.xml -DskipTests compile`、`-DskipTests test-compile`、`-Dtest=WarrantyPolicyTest,ListingTest,WarrantyEventBusinessHandlerTest,WarrantyOutboxDispatcherTest test` 均退出码 0。Docker 引擎在本机不可用，新增 MySQL/Rabbit Failsafe 未折算为通过，需控制端 Docker 可用时定向运行新增 IT 与既有 Warranty IT 并确认 0 skipped。
+
 已保持 Task11 订单→案件→支付锁顺序、settled 订单状态隔离、支付 provider 适配框架和退款额度硬上限。关注项：Docker 引擎不可用导致两类 IT 尚未在真实 MySQL 上完成 GREEN；应在 Docker 可用环境运行 `.\mvnw.cmd -Dit.test=WarrantyObligationIT,WarrantyDeadlineRaceIT verify` 并确认 4 cases、0 skipped。
 
 ## R4 例外轮复核与实现（基线 e9a9c93）

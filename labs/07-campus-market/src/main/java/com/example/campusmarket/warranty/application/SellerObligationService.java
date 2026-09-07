@@ -28,23 +28,25 @@ public final class SellerObligationService {
         Objects.requireNonNull(amount,"筹资金额不能为空");
         if (idempotencyKey==null||idempotencyKey.isBlank()) throw new IllegalArgumentException("幂等键不能为空");
         byte[] requestHash=digest(obligationId+"|"+sellerId+"|"+amount.fen()+"|"+idempotencyKey);
-        FundingResult result=transactions.execute(s -> {
-            Obligation row=jdbc.query("SELECT id,warranty_case_id,seller_id,obligation_amount_fen,funded_amount_fen,status,funding_deadline FROM seller_obligation WHERE id=? FOR UPDATE",rs->rs.next()?new Obligation(UUID.fromString(rs.getString(1)),UUID.fromString(rs.getString(2)),UUID.fromString(rs.getString(3)),rs.getLong(4),rs.getLong(5),rs.getString(6),rs.getTimestamp(7).toInstant()):null,obligationId.toString());
+        FundingOutcome outcome=transactions.execute(s -> {
+            Obligation row=jdbc.query("SELECT id,warranty_case_id,seller_id,obligation_amount_fen,funded_amount_fen,status,funding_deadline,version FROM seller_obligation WHERE id=? FOR UPDATE",rs->rs.next()?new Obligation(UUID.fromString(rs.getString(1)),UUID.fromString(rs.getString(2)),UUID.fromString(rs.getString(3)),rs.getLong(4),rs.getLong(5),rs.getString(6),rs.getTimestamp(7).toInstant(),rs.getLong(8)):null,obligationId.toString());
             if(row==null||!row.sellerId().equals(sellerId)) throw new NotFoundException();
             FundingCommand prior=jdbc.query("SELECT amount_fen,request_hash FROM seller_obligation_funding WHERE obligation_id=? AND idempotency_key=?",rs->rs.next()?new FundingCommand(rs.getLong(1),rs.getBytes(2)):null,obligationId.toString(),idempotencyKey);
-            if(prior!=null){if(prior.amount()==amount.fen()&&MessageDigest.isEqual(prior.hash(),requestHash))return new FundingResult(obligationId,row.caseId(),row.amount(),row.funded(),row.status());throw new IdempotencyConflictException();}
+            if(prior!=null){if(prior.amount()==amount.fen()&&MessageDigest.isEqual(prior.hash(),requestHash))return new FundingOutcome(new FundingResult(obligationId,row.caseId(),row.amount(),row.funded(),row.status()),false);throw new IdempotencyConflictException();}
             if(amount.fen()<=0) throw new IllegalArgumentException("筹资金额必须为正数");
-            Instant now=dbNow(); if(!now.isBefore(row.deadline())&&row.funded()<row.amount()) { jdbc.update("UPDATE seller_obligation SET status='CANCELLED',restriction_status='RESTRICTED',updated_at=? WHERE id=? AND status<>'FUNDED'",Timestamp.from(now),obligationId.toString()); throw new FundingExpiredException(); }
-            if(row.funded()==row.amount()) return new FundingResult(obligationId,row.caseId(),row.amount(),row.funded(),"FUNDED");
+            Instant now=dbNow(); if(!now.isBefore(row.deadline())&&row.funded()<row.amount()) { int changed=jdbc.update("UPDATE seller_obligation SET status='CANCELLED',restriction_status='RESTRICTED',version=version+1,updated_at=? WHERE id=? AND status IN ('AWAITING_FUNDING','PARTIALLY_FUNDED') AND funded_amount_fen<obligation_amount_fen",Timestamp.from(now),obligationId.toString()); if(changed==1) recordTransition(sellerId,"SELLER_OBLIGATION_EXPIRED",obligationId,row.version()+1,"{\"fundedAmountFen\":"+row.funded()+",\"obligationAmountFen\":"+row.amount()+"}"); return new FundingOutcome(new FundingResult(obligationId,row.caseId(),row.amount(),row.funded(),"CANCELLED"),true); }
+            if(row.funded()==row.amount()) return new FundingOutcome(new FundingResult(obligationId,row.caseId(),row.amount(),row.funded(),"FUNDED"),false);
             long next; try{next=Math.addExact(row.funded(),amount.fen());}catch(ArithmeticException e){throw new IllegalArgumentException("筹资金额溢出",e);}
             if(next>row.amount()) throw new IllegalArgumentException("筹资金额超出义务");
             String state=next==row.amount()?"FUNDED":"PARTIALLY_FUNDED";
             if(jdbc.update("UPDATE seller_obligation SET funded_amount_fen=?,status=?,restriction_status=?,version=version+1,updated_at=? WHERE id=? AND seller_id=? AND funded_amount_fen=? AND status IN ('AWAITING_FUNDING','PARTIALLY_FUNDED')",next,state,next==row.amount()?"NONE":"RESTRICTED",Timestamp.from(now),obligationId.toString(),sellerId.toString(),row.funded())!=1) throw new ConcurrentFundingException();
             jdbc.update("INSERT INTO seller_obligation_funding(id,obligation_id,idempotency_key,request_hash,amount_fen,created_at) VALUES (?,?,?,?,?,?)",UUID.randomUUID().toString(),obligationId.toString(),idempotencyKey,requestHash,amount.fen(),Timestamp.from(now));
             recordTransition(sellerId, "SELLER_OBLIGATION_FUNDED", obligationId, row.version()+1, "{\"fundedAmountFen\":"+next+"}");
-            if(next==row.amount()) { clearRestrictions(sellerId,obligationId,now); refundOutbox(row.caseId(), obligationId, row.amount(), row.version()+1); }
-            return new FundingResult(obligationId,row.caseId(),row.amount(),next,state);
+            if(next==row.amount()) { clearRestrictions(sellerId,obligationId,now,row.version()+1); refundOutbox(row.caseId(), obligationId, row.amount(), row.version()+1); }
+            return new FundingOutcome(new FundingResult(obligationId,row.caseId(),row.amount(),next,state),false);
         });
+        FundingResult result=outcome.result();
+        if(outcome.expired()) throw new FundingExpiredException();
         if(result!=null&&"FUNDED".equals(result.status())) {
             UUID orderId=jdbc.queryForObject("SELECT order_id FROM warranty_case WHERE id=?",(rs,n)->UUID.fromString(rs.getString(1)),result.warrantyCaseId().toString());
             refunds.requestRefund(orderId,"warranty-refund-"+obligationId,Money.ofFen(result.obligationAmountFen()),"WARRANTY",result.warrantyCaseId());
@@ -70,7 +72,7 @@ public final class SellerObligationService {
             if(jdbc.update("UPDATE seller_obligation SET funded_amount_fen=?,status=?,restriction_status=?,version=version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND funded_amount_fen=?",next,next==row.amount()?"FUNDED":"PARTIALLY_FUNDED",next==row.amount()?"NONE":"RESTRICTED",obligationId.toString(),row.funded())!=1) throw new ConcurrentFundingException();
             if(jdbc.update("UPDATE settlement SET net_settlement_fen=net_settlement_fen-? WHERE id=? AND net_settlement_fen>=?",deduction,settlementId.toString(),deduction)!=1) throw new ConcurrentFundingException();
             recordTransition(row.sellerId(), "SELLER_OBLIGATION_DEDUCTED", obligationId, row.version()+1, "{\"settlementId\":\""+settlementId+"\",\"amountFen\":"+deduction+"}");
-            if(next==row.amount()) { clearRestrictions(row.sellerId(),obligationId,dbNow()); refundOutbox(row.caseId(), obligationId, row.amount(), row.version()+1); }
+            if(next==row.amount()) { clearRestrictions(row.sellerId(),obligationId,dbNow(),row.version()+1); refundOutbox(row.caseId(), obligationId, row.amount(), row.version()+1); }
             return deduction;
         });
         if (deducted > 0) {
@@ -88,10 +90,10 @@ public final class SellerObligationService {
         return jdbc.query("SELECT id,warranty_case_id,obligation_amount_fen,funded_amount_fen,status,funding_deadline FROM seller_obligation WHERE seller_id=? ORDER BY funding_deadline,id",
             (rs,n)->new ObligationView(UUID.fromString(rs.getString(1)),UUID.fromString(rs.getString(2)),rs.getLong(3),rs.getLong(4),rs.getString(5),rs.getTimestamp(6).toInstant()),sellerId.toString());
     }
-    private void clearRestrictions(UUID seller,UUID obligation,Instant now){
+    private void clearRestrictions(UUID seller,UUID obligation,Instant now,long version){
         var types=jdbc.query("SELECT restriction_type FROM seller_account_restriction WHERE seller_id=? AND source_obligation_id=? AND status='ACTIVE' FOR UPDATE",(rs,n)->rs.getString(1),seller.toString(),obligation.toString());
         jdbc.update("UPDATE seller_account_restriction SET status='CLEARED',cleared_at=? WHERE seller_id=? AND source_obligation_id=? AND status='ACTIVE'",Timestamp.from(now),seller.toString(),obligation.toString());
-        for(String type:types) recordTransition(seller,"SELLER_RESTRICTION_CLEARED",obligation,now.toEpochMilli(),"{\"restrictionType\":\""+type+"\"}");
+        for(String type:types) recordTransition(seller,"SELLER_RESTRICTION_CLEARED",obligation,version,"{\"restrictionType\":\""+type+"\"}");
     }
     private void refundOutbox(UUID caseId, UUID obligationId, long amount, long version) {
         UUID event=UUID.nameUUIDFromBytes(("warranty-refund:"+obligationId).getBytes(StandardCharsets.UTF_8));
@@ -110,6 +112,7 @@ public final class SellerObligationService {
     private record FundingCommand(long amount,byte[] hash){}
     private record SettlementFacts(String status,long net,UUID seller,UUID orderSeller){}
     public record FundingResult(UUID obligationId,UUID warrantyCaseId,long obligationAmountFen,long fundedAmountFen,String status){}
+    private record FundingOutcome(FundingResult result, boolean expired){}
     public record ObligationView(UUID obligationId,UUID warrantyCaseId,long obligationAmountFen,long fundedAmountFen,String status,Instant fundingDeadline){}
     public static class NotFoundException extends RuntimeException{} public static class FundingExpiredException extends RuntimeException{} public static class ConcurrentFundingException extends RuntimeException{} public static class IdempotencyConflictException extends RuntimeException{}
 }

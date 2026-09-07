@@ -77,7 +77,7 @@ public class JdbcPaymentRepository {
     /** 查询订单最近一笔成功支付；退款服务只通过该业务查询获取可退款支付。 */
     public PaymentRecord findLatestSuccessfulPaymentByOrder(UUID orderId) {
         return jdbc.query("SELECT id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,request_hash,response_utf8 " +
-                "FROM payment_order WHERE order_id=? AND status='SUCCEEDED' ORDER BY created_at DESC LIMIT 1",
+                "FROM payment_order WHERE order_id=? AND status='SUCCEEDED' ORDER BY created_at DESC,id DESC LIMIT 1",
             rs -> rs.next() ? new PaymentRecord(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),
                 rs.getString("provider"), rs.getString("idempotency_key"), rs.getLong("amount_fen"), rs.getLong("paid_amount_fen"),
                 rs.getString("provider_reference"), rs.getString("status"), rs.getBytes("request_hash"), rs.getBytes("response_utf8")) : null,
@@ -94,7 +94,7 @@ public class JdbcPaymentRepository {
     /** 与订单锁配套的支付行锁，固定订单→支付的锁顺序。 */
     public PaymentRecord findLatestSuccessfulPaymentByOrderForUpdate(UUID orderId) {
         return jdbc.query("SELECT id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,request_hash,response_utf8 "
-                + "FROM payment_order WHERE order_id=? AND status='SUCCEEDED' ORDER BY created_at DESC LIMIT 1 FOR UPDATE",
+                + "FROM payment_order WHERE order_id=? AND status='SUCCEEDED' ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE",
             rs -> rs.next() ? new PaymentRecord(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("order_id")),
                 rs.getString("provider"), rs.getString("idempotency_key"), rs.getLong("amount_fen"), rs.getLong("paid_amount_fen"),
                 rs.getString("provider_reference"), rs.getString("status"), rs.getBytes("request_hash"), rs.getBytes("response_utf8")) : null,
