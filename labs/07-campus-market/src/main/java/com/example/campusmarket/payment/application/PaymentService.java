@@ -1,6 +1,7 @@
 package com.example.campusmarket.payment.application;
 
 import com.example.campusmarket.payment.infrastructure.JdbcPaymentRepository;
+import com.example.campusmarket.observability.CampusMetrics;
 import com.example.campusmarket.shared.Money;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
@@ -24,15 +25,17 @@ public class PaymentService {
     private final String provider;
     private final TransactionTemplate transactions;
     private final ObjectMapper mapper;
+    private final CampusMetrics metrics;
 
     public PaymentService(JdbcPaymentRepository repository, PaymentGateway gateway,
                           @Value("${campus.market.payment.provider:simulated}") String provider,
-                          PlatformTransactionManager transactionManager, ObjectMapper mapper) {
+                          PlatformTransactionManager transactionManager, ObjectMapper mapper, CampusMetrics metrics) {
         this.repository = Objects.requireNonNull(repository, "支付仓储不能为空");
         this.gateway = Objects.requireNonNull(gateway, "支付网关不能为空");
         this.provider = Objects.requireNonNull(provider, "支付提供方不能为空");
         this.transactions = new TransactionTemplate(Objects.requireNonNull(transactionManager, "事务管理器不能为空"));
         this.mapper = Objects.requireNonNull(mapper, "JSON序列化器不能为空");
+        this.metrics = Objects.requireNonNull(metrics, "指标门面不能为空");
     }
 
     public PaymentResult createPayment(UUID orderId, String idempotencyKey) {
@@ -155,13 +158,18 @@ public class PaymentService {
 
     @Transactional
     public CallbackResult handleCallback(PaymentGateway.VerifiedCallback callback, byte[] rawBody) {
-        if (!repository.recordCallback(callback, rawBody)) return new CallbackResult(true, false);
+        if (!repository.recordCallback(callback, rawBody)) {
+            metrics.recordPaymentCallback("DUPLICATE");
+            return new CallbackResult(true, false);
+        }
+        boolean matched = false;
         if (callback.type() == PaymentGateway.VerifiedCallback.CallbackType.PAYMENT
             && "SUCCEEDED".equals(callback.status())) {
             boolean changed = callback.orderId() == null
                 ? repository.markPaymentSucceededByReference(callback.provider(), callback.providerReference(), callback.amountFen())
                 : repository.markPaymentSucceededByReference(callback.orderId(), callback.provider(), callback.providerReference(), callback.amountFen());
             if (changed) {
+                matched = true;
                 JdbcPaymentRepository.PaymentRecord payment = repository.findPaymentByReference(callback.provider(), callback.providerReference());
                 if (payment != null) repository.savePaymentResponse(payment.id(), response(payment.id(), callback.providerReference(), "SUCCEEDED"));
                 if (payment != null && repository.advanceOrderAfterPayment(payment.id(), payment.orderId()) != 1) {
@@ -176,6 +184,7 @@ public class PaymentService {
                 UUID paymentId = repository.recordPaymentSuccessByOrder(callback.orderId(), callback.provider(),
                     callback.providerReference(), callback.amountFen());
                 if (paymentId != null) {
+                    matched = true;
                     if (repository.advanceOrderAfterPayment(paymentId, callback.orderId()) != 1
                         && repository.recordLatePaymentSuccessAfterCancellation(paymentId, callback.orderId(),
                             callback.providerReference(), callback.amountFen(), null, null) == null) {
@@ -188,6 +197,7 @@ public class PaymentService {
             }
         }
         repository.completeCallback(callback.provider(), callback.providerEventId());
+        metrics.recordPaymentCallback(matched ? "SUCCEEDED" : "UNKNOWN");
         return new CallbackResult(true, true);
     }
 

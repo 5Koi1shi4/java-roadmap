@@ -1,9 +1,11 @@
 package com.example.campusmarket.payment.application;
 
 import com.example.campusmarket.payment.infrastructure.JdbcPaymentRepository;
+import com.example.campusmarket.observability.CampusMetrics;
 import com.example.campusmarket.shared.Money;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.context.annotation.Profile;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.transaction.annotation.Transactional;
@@ -23,14 +25,22 @@ public class RefundService {
     private final PaymentGateway gateway;
     private final TransactionTemplate transactions;
     private final ObjectMapper mapper;
+    private final CampusMetrics metrics;
     private final ConcurrentHashMap<String, Object> idempotencyLocks = new ConcurrentHashMap<>();
 
     public RefundService(JdbcPaymentRepository repository, PaymentGateway gateway,
                          PlatformTransactionManager transactionManager, ObjectMapper mapper) {
+        this(repository, gateway, transactionManager, mapper, null);
+    }
+
+    @Autowired
+    public RefundService(JdbcPaymentRepository repository, PaymentGateway gateway,
+                         PlatformTransactionManager transactionManager, ObjectMapper mapper, CampusMetrics metrics) {
         this.repository = Objects.requireNonNull(repository, "支付仓储不能为空");
         this.gateway = Objects.requireNonNull(gateway, "支付网关不能为空");
         this.transactions = new TransactionTemplate(Objects.requireNonNull(transactionManager, "事务管理器不能为空"));
         this.mapper = Objects.requireNonNull(mapper, "JSON序列化器不能为空");
+        this.metrics = metrics;
     }
 
     public RefundResult requestRefund(UUID orderId, String idempotencyKey, Money amount) {
@@ -261,14 +271,16 @@ public class RefundService {
     @Transactional
     public void handleCallback(PaymentGateway.VerifiedCallback callback, byte[] rawBody) {
         if (!"REFUND".equals(callback.type().name())) return;
-        if (!repository.recordCallback(callback, rawBody)) return;
+        if (!repository.recordCallback(callback, rawBody)) { recordMetric("DUPLICATE"); return; }
         JdbcPaymentRepository.RefundRecord refund = repository.findRefundByProviderReference(callback.provider(), callback.providerReference());
         if (refund == null) {
             if (!repository.failCallback(callback.provider(), callback.providerEventId())) throw new IllegalStateException("退款回调失败 CAS 失败，等待重试");
+            recordMetric("UNKNOWN");
             return;
         }
         if (callback.amountFen() != refund.amountFen()) {
             if (!repository.failCallback(callback.provider(), callback.providerEventId())) throw new IllegalStateException("退款回调失败 CAS 失败，等待重试");
+            recordMetric("FAILURE");
             return;
         }
         if ("SUCCEEDED".equals(callback.status())) {
@@ -286,7 +298,10 @@ public class RefundService {
         }
         if (!repository.completeCallback(callback.provider(), callback.providerEventId()))
             throw new IllegalStateException("退款回调完成 CAS 失败，等待重试");
+        recordMetric("SUCCEEDED".equals(callback.status()) ? "SUCCEEDED" : "FAILED");
     }
+
+    private void recordMetric(String result) { if (metrics != null) metrics.recordRefund(result); }
 
     public record RefundResult(UUID refundId, String providerReference, String status, byte[] responseUtf8) {
         public RefundResult(UUID refundId, String providerReference, String status) { this(refundId, providerReference, status, null); }

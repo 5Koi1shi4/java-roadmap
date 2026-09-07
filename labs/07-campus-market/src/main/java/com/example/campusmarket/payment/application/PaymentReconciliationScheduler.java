@@ -1,6 +1,8 @@
 package com.example.campusmarket.payment.application;
 
 import com.example.campusmarket.payment.infrastructure.JdbcPaymentRepository;
+import com.example.campusmarket.observability.CampusMetrics;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Profile;
 import org.springframework.scheduling.annotation.EnableScheduling;
@@ -20,11 +22,19 @@ public final class PaymentReconciliationScheduler {
     private final JdbcPaymentRepository repository;
     private final PaymentService payments;
     private final RefundService refunds;
+    private final CampusMetrics metrics;
 
     public PaymentReconciliationScheduler(JdbcPaymentRepository repository, PaymentService payments, RefundService refunds) {
+        this(repository, payments, refunds, null);
+    }
+
+    @Autowired
+    public PaymentReconciliationScheduler(JdbcPaymentRepository repository, PaymentService payments, RefundService refunds,
+                                         CampusMetrics metrics) {
         this.repository = repository;
         this.payments = payments;
         this.refunds = refunds;
+        this.metrics = metrics;
     }
 
     @Scheduled(initialDelayString = "${campus.market.payment.reconciliation.initial-delay-ms:0}",
@@ -38,7 +48,8 @@ public final class PaymentReconciliationScheduler {
         for (var id : repository.duePaymentReconciliations(batchSize)) {
             String token = UUID.randomUUID().toString();
             if (repository.claimPaymentReconciliation(id, "payment-reconciler", token)) {
-                try { payments.reconcilePayment(id, "payment-reconciler", token); } catch (RuntimeException failure) {
+                try { payments.reconcilePayment(id, "payment-reconciler", token); if (metrics != null) metrics.recordRetry("PAYMENT", "SUCCESS"); } catch (RuntimeException failure) {
+                    if (metrics != null) metrics.recordRetry("PAYMENT", "RETRY");
                     LOG.warn("支付对账失败，保留 UNKNOWN 供下次重试 paymentId={} failureClass={}", id, failure.getClass().getSimpleName());
                 }
                 processed++;
@@ -47,7 +58,8 @@ public final class PaymentReconciliationScheduler {
         for (var id : repository.dueRefundReconciliations(batchSize)) {
             String token = UUID.randomUUID().toString();
             if (repository.claimRefundReconciliation(id, "refund-reconciler", token)) {
-                try { refunds.reconcileRefund(id, "refund-reconciler", token); } catch (RuntimeException failure) {
+                try { refunds.reconcileRefund(id, "refund-reconciler", token); if (metrics != null) metrics.recordRetry("REFUND", "SUCCESS"); } catch (RuntimeException failure) {
+                    if (metrics != null) metrics.recordRetry("REFUND", "RETRY");
                     LOG.warn("退款对账失败，保留状态供下次重试 refundId={} failureClass={}", id, failure.getClass().getSimpleName());
                 }
                 processed++;

@@ -1,6 +1,7 @@
 package com.example.campusmarket.messaging;
 
 import com.example.campusmarket.shared.DomainEvent;
+import com.example.campusmarket.observability.CampusMetrics;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.core.MessageDeliveryMode;
@@ -24,14 +25,16 @@ public class OutboxDispatcher {
     private final EventEnvelopeCodec codec;
     private final EventPublisher eventPublisher;
     private final String owner;
+    private final CampusMetrics metrics;
 
     @Autowired
-    public OutboxDispatcher(OutboxRepository repository, RabbitTemplate rabbitTemplate, EventEnvelopeCodec codec) {
+    public OutboxDispatcher(OutboxRepository repository, RabbitTemplate rabbitTemplate, EventEnvelopeCodec codec, CampusMetrics metrics) {
         this.repository = Objects.requireNonNull(repository, "outbox repository 不能为空");
         this.rabbitTemplate = Objects.requireNonNull(rabbitTemplate, "RabbitTemplate 不能为空");
         this.codec = Objects.requireNonNull(codec, "codec 不能为空");
         this.eventPublisher = this::publishWithConfirm;
         this.owner = "dispatcher-" + java.util.UUID.randomUUID();
+        this.metrics = Objects.requireNonNull(metrics, "指标门面不能为空");
         if (rabbitTemplate.getConnectionFactory() instanceof CachingConnectionFactory factory) {
             factory.setPublisherConfirmType(CachingConnectionFactory.ConfirmType.CORRELATED);
             factory.setPublisherReturns(true);
@@ -42,11 +45,17 @@ public class OutboxDispatcher {
     /** 供集成测试在 RabbitOperations/confirm 边界注入可控 NACK/timeout。 */
     public OutboxDispatcher(OutboxRepository repository, RabbitTemplate rabbitTemplate, EventEnvelopeCodec codec,
                             EventPublisher eventPublisher) {
+        this(repository, rabbitTemplate, codec, eventPublisher, null);
+    }
+
+    public OutboxDispatcher(OutboxRepository repository, RabbitTemplate rabbitTemplate, EventEnvelopeCodec codec,
+                            EventPublisher eventPublisher, CampusMetrics metrics) {
         this.repository = Objects.requireNonNull(repository, "outbox repository 不能为空");
         this.rabbitTemplate = Objects.requireNonNull(rabbitTemplate, "RabbitTemplate 不能为空");
         this.codec = Objects.requireNonNull(codec, "codec 不能为空");
         this.eventPublisher = Objects.requireNonNull(eventPublisher, "事件发布器不能为空");
         this.owner = "dispatcher-" + java.util.UUID.randomUUID();
+        this.metrics = metrics;
     }
 
     public int dispatchOnce(int limit) {
@@ -61,6 +70,7 @@ public class OutboxDispatcher {
             // row and its durable manual copy in one REQUIRES_NEW transaction.
             if (message.exhaustedTakeover()) {
                 repository.fail(message.eventId(), message.ownerId(), message.claimToken(), "EXHAUSTED");
+                recordLeaseTakeover();
                 continue;
             }
             try {
@@ -75,18 +85,26 @@ public class OutboxDispatcher {
                 eventPublisher.publish(message.eventType(),
                     new Message(codec.encode(event), properties));
                 completed += repository.complete(message.eventId(), message.ownerId(), message.claimToken());
+                recordOutbox("PUBLISHED");
             } catch (RuntimeException failure) {
                 if (failure instanceof IllegalArgumentException) {
                     repository.fail(message.eventId(), message.ownerId(), message.claimToken(), "PERMANENT");
+                    recordOutbox("FAILED");
                 } else if (message.attemptCount() >= 3) {
                     repository.fail(message.eventId(), message.ownerId(), message.claimToken(), "EXHAUSTED");
+                    recordOutbox("FAILED");
                 } else {
                     repository.releaseForRetry(message.eventId(), message.ownerId(), message.claimToken(), Duration.ofSeconds(1));
+                    recordRetry("RETRY");
                 }
             }
         }
         return completed;
     }
+
+    private void recordOutbox(String status) { if (metrics != null) metrics.recordOutbox(status); }
+    private void recordRetry(String result) { if (metrics != null) metrics.recordRetry("OUTBOX", result); }
+    private void recordLeaseTakeover() { if (metrics != null) metrics.recordLeaseTakeover("OUTBOX"); }
 
     private void publishWithConfirm(String routingKey, Message message) {
         rabbitTemplate.invoke(operations -> {

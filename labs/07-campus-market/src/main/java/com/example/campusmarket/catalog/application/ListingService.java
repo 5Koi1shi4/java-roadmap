@@ -4,6 +4,7 @@ import com.example.campusmarket.catalog.domain.Listing;
 import com.example.campusmarket.catalog.domain.WarrantyTerm;
 import com.example.campusmarket.catalog.search.SearchOutboxRepository;
 import com.example.campusmarket.storage.ObjectUploadCoordinator;
+import com.example.campusmarket.observability.CampusMetrics;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -18,17 +19,20 @@ public class ListingService {
     private final ObjectUploadCoordinator uploads;
     private final SearchOutboxRepository searchOutbox;
     private final JdbcTemplate jdbc;
+    private final CampusMetrics metrics;
 
     public ListingService(ListingRepository listings, ObjectUploadCoordinator uploads, SearchOutboxRepository searchOutbox) {
-        this(listings, uploads, searchOutbox, null);
+        this(listings, uploads, searchOutbox, null, null);
     }
 
     @Autowired
-    public ListingService(ListingRepository listings, ObjectUploadCoordinator uploads, SearchOutboxRepository searchOutbox, JdbcTemplate jdbc) {
+    public ListingService(ListingRepository listings, ObjectUploadCoordinator uploads, SearchOutboxRepository searchOutbox, JdbcTemplate jdbc,
+                          CampusMetrics metrics) {
         this.listings = listings;
         this.uploads = uploads;
         this.searchOutbox = java.util.Objects.requireNonNull(searchOutbox, "搜索 Outbox 不能为空");
         this.jdbc = jdbc;
+        this.metrics = metrics;
     }
 
     @Transactional
@@ -42,13 +46,22 @@ public class ListingService {
 
     @Transactional
     public Listing publish(UUID sellerId, UUID listingId) {
-        if (activeRestrictionForUpdate(sellerId, "PUBLISH")) throw new RestrictionException();
-        Listing listing = owned(sellerId, listingId);
-        if (!listings.hasMedia(listingId)) throw new IllegalStateException("商品至少需要一张媒体");
-        listing.publish();
-        Listing saved = listings.save(listing);
-        searchOutbox.enqueue(saved, "LISTING_PUBLISHED");
-        return saved;
+        try {
+            if (activeRestrictionForUpdate(sellerId, "PUBLISH")) throw new RestrictionException();
+            Listing listing = owned(sellerId, listingId);
+            if (!listings.hasMedia(listingId)) throw new IllegalStateException("商品至少需要一张媒体");
+            listing.publish();
+            Listing saved = listings.save(listing);
+            searchOutbox.enqueue(saved, "LISTING_PUBLISHED");
+            if (metrics != null) metrics.recordListingPublished("SUCCESS");
+            return saved;
+        } catch (RestrictionException rejected) {
+            if (metrics != null) metrics.recordListingPublished("REJECTED");
+            throw rejected;
+        } catch (RuntimeException failure) {
+            if (metrics != null) metrics.recordListingPublished("FAILURE");
+            throw failure;
+        }
     }
 
     @Transactional

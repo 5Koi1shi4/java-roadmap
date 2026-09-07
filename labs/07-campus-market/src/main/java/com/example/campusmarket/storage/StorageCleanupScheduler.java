@@ -1,5 +1,7 @@
 package com.example.campusmarket.storage;
 
+import com.example.campusmarket.observability.CampusMetrics;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.stereotype.Service;
@@ -14,12 +16,21 @@ public class StorageCleanupScheduler {
     private final JdbcTemplate jdbc;
     private final PrivateObjectStorage storage;
     private final TransactionTemplate transactions;
+    private final CampusMetrics metrics;
 
     public StorageCleanupScheduler(JdbcTemplate jdbc, PrivateObjectStorage storage,
                                   org.springframework.transaction.PlatformTransactionManager transactionManager) {
+        this(jdbc, storage, transactionManager, null);
+    }
+
+    @Autowired
+    public StorageCleanupScheduler(JdbcTemplate jdbc, PrivateObjectStorage storage,
+                                  org.springframework.transaction.PlatformTransactionManager transactionManager,
+                                  CampusMetrics metrics) {
         this.jdbc = jdbc;
         this.storage = storage;
         this.transactions = new TransactionTemplate(transactionManager);
+        this.metrics = metrics;
     }
 
     public int runOnce(int limit) {
@@ -27,20 +38,31 @@ public class StorageCleanupScheduler {
         List<Task> tasks = claim(limit);
         int completed = 0;
         for (Task task : tasks) {
+            long started = System.nanoTime();
             try {
                 storage.delete(task.objectKey());
                 complete(task);
+                recordStorage("SUCCESS", started);
                 completed++;
             } catch (MinioPrivateObjectStorage.ObjectNotFoundException e) {
                 complete(task);
+                recordStorage("SUCCESS", started);
                 completed++;
             } catch (MinioPrivateObjectStorage.StorageUnavailableException e) {
                 release(task, "TRANSIENT");
+                recordStorage("TIMEOUT", started);
             } catch (RuntimeException e) {
                 release(task, "UNKNOWN");
+                recordStorage("FAILURE", started);
             }
         }
         return completed;
+    }
+
+    private void recordStorage(String result, long started) {
+        if (metrics == null) return;
+        metrics.recordStorage(result);
+        metrics.recordOperationDuration("DELETE", java.time.Duration.ofNanos(System.nanoTime() - started));
     }
 
     protected List<Task> claimInternal(int limit) {

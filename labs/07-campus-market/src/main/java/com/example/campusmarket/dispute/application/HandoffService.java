@@ -9,12 +9,16 @@ import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 
 /** 交付和收货用例门面；争议裁决留给 Task10。 */
 @Service
 @Profile("!test")
 public final class HandoffService {
+    private static final Set<String> API_ERROR_CODES = Set.of("INVALID_REQUEST", "UNAUTHENTICATED", "FORBIDDEN",
+        "RESOURCE_NOT_FOUND", "CONFLICT", "BUSINESS_RULE_VIOLATION", "RATE_LIMITED", "DEPENDENCY_UNAVAILABLE",
+        "INTERNAL_ERROR", "REQUEST_FAILED");
     private final OrderLifecycleService lifecycle;
     private final IdempotentCommandService commands;
 
@@ -45,7 +49,15 @@ public final class HandoffService {
 
     private static Result parse(byte[] response) {
         String body = new String(response, StandardCharsets.UTF_8);
-        return new Result(!body.contains("\"error\""), response);
+        int codeStart = body.indexOf("\"code\"");
+        if (codeStart >= 0) {
+            int valueStart = body.indexOf('"', body.indexOf(':', codeStart) + 1);
+            int valueEnd = valueStart < 0 ? -1 : body.indexOf('"', valueStart + 1);
+            if (valueEnd > valueStart && API_ERROR_CODES.contains(body.substring(valueStart + 1, valueEnd))) {
+                return new Result(false, response);
+            }
+        }
+        return new Result(true, response);
     }
 
     public record Result(boolean success, byte[] responseUtf8) {}

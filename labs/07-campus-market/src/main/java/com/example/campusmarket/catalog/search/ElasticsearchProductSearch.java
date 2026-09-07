@@ -9,6 +9,7 @@ import co.elastic.clients.elasticsearch.core.SearchResponse;
 import co.elastic.clients.elasticsearch.core.search.Hit;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import com.example.campusmarket.observability.CampusMetrics;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Autowired;
 
@@ -31,32 +32,39 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     private final ElasticsearchClient client;
     private final SearchAliasCoordinator coordinator;
     private final MeterRegistry metrics;
+    private final CampusMetrics campusMetrics;
     private final Consumer<Set<String>> aliasMembersReadHook;
     private volatile boolean initialized;
     private final String cleanupOwner = "search-cleanup-" + UUID.randomUUID();
 
     public ElasticsearchProductSearch(ElasticsearchClient client, org.springframework.jdbc.core.JdbcTemplate jdbc) {
-        this(client, jdbc, ignored -> { }, new SimpleMeterRegistry());
+        this(client, jdbc, ignored -> { }, new SimpleMeterRegistry(), null);
+    }
+
+    public ElasticsearchProductSearch(ElasticsearchClient client, org.springframework.jdbc.core.JdbcTemplate jdbc,
+                                      MeterRegistry metrics) {
+        this(client, jdbc, ignored -> { }, metrics, null);
     }
 
     @Autowired
     public ElasticsearchProductSearch(ElasticsearchClient client, org.springframework.jdbc.core.JdbcTemplate jdbc,
-                                      MeterRegistry metrics) {
-        this(client, jdbc, ignored -> { }, metrics);
+                                      MeterRegistry metrics, CampusMetrics campusMetrics) {
+        this(client, jdbc, ignored -> { }, metrics, campusMetrics);
     }
 
     /** 跨实例互斥锁持有期间、读取 live 别名后且 ES 别名请求前触发的测试接缝。 */
     public ElasticsearchProductSearch(ElasticsearchClient client, org.springframework.jdbc.core.JdbcTemplate jdbc,
                                       Consumer<Set<String>> aliasMembersReadHook) {
-        this(client, jdbc, aliasMembersReadHook, new SimpleMeterRegistry());
+        this(client, jdbc, aliasMembersReadHook, new SimpleMeterRegistry(), null);
     }
 
     ElasticsearchProductSearch(ElasticsearchClient client, org.springframework.jdbc.core.JdbcTemplate jdbc,
-                               Consumer<Set<String>> aliasMembersReadHook, MeterRegistry metrics) {
+                               Consumer<Set<String>> aliasMembersReadHook, MeterRegistry metrics, CampusMetrics campusMetrics) {
         this.client = Objects.requireNonNull(client, "Elasticsearch 客户端不能为空");
         Objects.requireNonNull(jdbc, "JDBC不能为空");
         var dataSource = Objects.requireNonNull(jdbc.getDataSource(), "JDBC数据源不能为空");
         this.metrics = Objects.requireNonNull(metrics, "指标注册表不能为空");
+        this.campusMetrics = campusMetrics;
         this.coordinator = new SearchAliasCoordinator(dataSource, this.metrics);
         this.aliasMembersReadHook = Objects.requireNonNull(aliasMembersReadHook, "别名读取 hook 不能为空");
     }
@@ -100,6 +108,7 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     public SearchPage search(SearchRequest request) {
         initializeIfNeeded();
         Objects.requireNonNull(request, "搜索请求不能为空");
+        long started = System.nanoTime();
         String pit = null;
         try {
             Query query = query(request);
@@ -138,10 +147,18 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
                 next = null;
                 closePit(currentPit);
             }
+            if (campusMetrics != null) {
+                campusMetrics.recordSearch("SUCCESS");
+                campusMetrics.recordOperationDuration("SEARCH", java.time.Duration.ofNanos(System.nanoTime() - started));
+            }
             return new SearchPage(items, total, next);
         } catch (IOException | RuntimeException e) {
             if (pit != null) {
                 closePit(pit);
+            }
+            if (campusMetrics != null) {
+                campusMetrics.recordSearch("FAILURE");
+                campusMetrics.recordOperationDuration("SEARCH", java.time.Duration.ofNanos(System.nanoTime() - started));
             }
             if (e instanceof SearchUnavailableException unavailable) throw unavailable;
             if (e instanceof IllegalArgumentException invalid) throw invalid;

@@ -33,6 +33,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.nio.charset.StandardCharsets;
+import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.Base64;
 import java.util.Set;
 import java.util.UUID;
@@ -118,7 +121,7 @@ class DisputeEvidenceIT extends DisputeEvidenceContainers {
             HttpResponse<String> response = jsonPost(request[0], request[1], "json-" + UUID.randomUUID(), request[2]);
             assertThat(response.statusCode()).as(request[0]).isEqualTo(400);
             assertJsonUtf8(response);
-            assertThat(response.body()).startsWith("{").contains("error");
+            assertApiError(response);
         }
     }
 
@@ -288,6 +291,13 @@ class DisputeEvidenceIT extends DisputeEvidenceContainers {
         assertThat(mediaType.getType()).isEqualTo("application");
         assertThat(mediaType.getSubtype()).isEqualTo("json");
         assertThat(mediaType.getCharset()).isEqualTo(StandardCharsets.UTF_8);
+    }
+    private static void assertApiError(HttpResponse<String> response) {
+        assertThat(response.body()).startsWith("{").contains("\"code\":\"INVALID_REQUEST\"")
+            .contains("\"message\":").contains("\"correlationId\":").doesNotContain("\"error\"");
+        Matcher matcher = Pattern.compile("\\\"correlationId\\\":\\\"([^\\\"]+)\\\"").matcher(response.body());
+        assertThat(matcher.find()).isTrue();
+        assertThat(UUID.fromString(matcher.group(1))).isNotNull();
     }
     private static void assertMediaType(HttpResponse<?> response, String expected) {
         MediaType mediaType = MediaType.parseMediaType(response.headers().firstValue("Content-Type").orElseThrow());

@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -26,13 +27,22 @@ class CampusMetricsProductionBinderTest {
 
         assertThat(registry.get("campus.market.order.state.count").tag("state", "SETTLED").gauge().value())
             .isEqualTo(3.0);
-        assertThat(registry.get("campus.market.warranty.unfunded").tag("status", "AWAITING_FUNDING").gauge().value())
+        assertThat(registry.get("campus.market.warranty.unfunded").tag("status", "UNFUNDED").gauge().value())
             .isEqualTo(3.0);
         assertThat(registry.get("campus.market.warranty.funding.timeout").tag("result", "TIMEOUT").gauge().value())
+            .isEqualTo(3.0);
+        assertThat(registry.get("campus.market.order.handoff.timeout").tag("result", "TIMEOUT").gauge().value())
             .isEqualTo(3.0);
         assertThat(registry.get("campus.market.dispute.admin.hard_deadline").tag("result", "ESCALATED").gauge().value())
             .isEqualTo(3.0);
         assertThat(registry.get("campus.market.outbox.backlog").gauge().value()).isEqualTo(3.0);
         assertThat(registry.get("campus.market.refund.pending.oldest.delay").gauge().value()).isEqualTo(3.0);
+    }
+
+    @Test
+    void rejectsMissingProductionDependencies() {
+        CampusMetrics metrics = new CampusMetrics(new SimpleMeterRegistry());
+        assertThatThrownBy(() -> new CampusMetricsProductionBinder(null, metrics)).isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new CampusMetricsProductionBinder(mock(JdbcTemplate.class), null)).isInstanceOf(NullPointerException.class);
     }
 }

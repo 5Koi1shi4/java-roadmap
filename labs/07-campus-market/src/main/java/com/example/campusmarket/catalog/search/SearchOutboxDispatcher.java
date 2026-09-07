@@ -1,6 +1,7 @@
 package com.example.campusmarket.catalog.search;
 
 import com.example.campusmarket.shared.DomainEvent;
+import com.example.campusmarket.observability.CampusMetrics;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
@@ -20,13 +21,20 @@ public class SearchOutboxDispatcher {
     private final ObjectMapper mapper;
     private final SearchOutboxClaimer claimer;
     private final String owner = "search-dispatcher-" + UUID.randomUUID();
+    private final CampusMetrics metrics;
+
+    public SearchOutboxDispatcher(JdbcTemplate jdbc, SearchProjector projector, ObjectMapper mapper, SearchOutboxClaimer claimer) {
+        this(jdbc, projector, mapper, claimer, null);
+    }
 
     @Autowired
-    public SearchOutboxDispatcher(JdbcTemplate jdbc, SearchProjector projector, ObjectMapper mapper, SearchOutboxClaimer claimer) {
+    public SearchOutboxDispatcher(JdbcTemplate jdbc, SearchProjector projector, ObjectMapper mapper, SearchOutboxClaimer claimer,
+                                  CampusMetrics metrics) {
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.projector = Objects.requireNonNull(projector, "投影器不能为空");
         this.mapper = Objects.requireNonNull(mapper, "ObjectMapper不能为空");
         this.claimer = Objects.requireNonNull(claimer, "领取器不能为空");
+        this.metrics = metrics;
     }
 
     public int dispatchOnce(int limit) { return dispatchOnce(limit, Duration.ofSeconds(30)); }
@@ -46,10 +54,11 @@ public class SearchOutboxDispatcher {
                     claim.aggregateVersion(), claim.createdAt(), 1, decode(claim.payload()));
                 projector.project(event);
                 completed += complete(claim);
+                if (metrics != null) metrics.recordOutbox("PUBLISHED");
             } catch (RuntimeException failure) {
                 if (failure instanceof SearchGateRepository.SearchGateClosedException) defer(claim);
-                else if (claim.attemptCount() >= 3) fail(claim);
-                else releaseForRetry(claim);
+                else if (claim.attemptCount() >= 3) { fail(claim); if (metrics != null) metrics.recordOutbox("FAILED"); }
+                else { releaseForRetry(claim); if (metrics != null) metrics.recordRetry("OUTBOX", "RETRY"); }
             }
         }
         return completed;

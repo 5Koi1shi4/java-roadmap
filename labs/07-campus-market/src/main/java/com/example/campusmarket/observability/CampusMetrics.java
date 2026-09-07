@@ -32,8 +32,9 @@ public final class CampusMetrics {
 
     public CampusMetrics(MeterRegistry registry) {
         this.registry = registry;
-        registerGauge("campus.market.warranty.unfunded", "status", "AWAITING_FUNDING");
-        registerGauge("campus.market.seller.restricted", "status", "ACTIVE");
+        registerGauge("campus.market.warranty.unfunded", "status", "UNFUNDED");
+        registerGauge("campus.market.seller.restricted", "status", "RESTRICTED");
+        registerGauge("campus.market.order.handoff.timeout", "result", "TIMEOUT");
         registerGauge("campus.market.warranty.seller_response.timeout", "result", "TIMEOUT");
         registerGauge("campus.market.warranty.funding.timeout", "result", "TIMEOUT");
         registerGauge("campus.market.dispute.seller_response.timeout", "result", "TIMEOUT");
@@ -82,8 +83,9 @@ public final class CampusMetrics {
             .tag("operation", key).register(registry)).record(duration);
     }
 
-    public void setWarrantyUnfunded(int value) { snapshot("campus.market.warranty.unfunded", "status", "AWAITING_FUNDING").set(nonNegative(value)); }
-    public void setRestrictedSellers(int value) { snapshot("campus.market.seller.restricted", "status", "ACTIVE").set(nonNegative(value)); }
+    public void setWarrantyUnfunded(int value) { snapshot("campus.market.warranty.unfunded", "status", "UNFUNDED").set(nonNegative(value)); }
+    public void setRestrictedSellers(int value) { snapshot("campus.market.seller.restricted", "status", "RESTRICTED").set(nonNegative(value)); }
+    public void setHandoffTimeouts(int value) { snapshot("campus.market.order.handoff.timeout", "result", "TIMEOUT").set(nonNegative(value)); }
     public void setSellerResponseTimeouts(int value) { snapshot("campus.market.warranty.seller_response.timeout", "result", "TIMEOUT").set(nonNegative(value)); }
     public void setFundingTimeouts(int value) { snapshot("campus.market.warranty.funding.timeout", "result", "TIMEOUT").set(nonNegative(value)); }
     public void setDisputeSellerResponseTimeouts(int value) { snapshot("campus.market.dispute.seller_response.timeout", "result", "TIMEOUT").set(nonNegative(value)); }

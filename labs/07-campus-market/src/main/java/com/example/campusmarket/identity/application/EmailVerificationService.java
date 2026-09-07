@@ -2,6 +2,7 @@ package com.example.campusmarket.identity.application;
 
 import com.example.campusmarket.identity.domain.CampusEmail;
 import com.example.campusmarket.identity.infrastructure.RedisVerificationCodeStore;
+import com.example.campusmarket.observability.CampusMetrics;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -12,6 +13,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Set;
 import java.util.UUID;
+import java.util.Objects;
 
 @Service
 @Profile("!test")
@@ -20,15 +22,18 @@ public class EmailVerificationService {
     private final RedisVerificationCodeStore store;
     private final VerificationMailSender mailSender;
     private final Set<String> allowedDomains;
+    private final CampusMetrics metrics;
     private static final Duration TTL = Duration.ofMinutes(10);
 
     public EmailVerificationService(JdbcTemplate jdbc, RedisVerificationCodeStore store,
                                     VerificationMailSender mailSender,
-                                    @Value("${campus.market.identity.allowed-domains}") Set<String> allowedDomains) {
+                                    @Value("${campus.market.identity.allowed-domains}") Set<String> allowedDomains,
+                                    CampusMetrics metrics) {
         this.jdbc = jdbc;
-        this.store = store;
-        this.mailSender = mailSender;
-        this.allowedDomains = allowedDomains;
+        this.store = Objects.requireNonNull(store, "验证码存储不能为空");
+        this.mailSender = Objects.requireNonNull(mailSender, "验证码邮件发送器不能为空");
+        this.allowedDomains = Objects.requireNonNull(allowedDomains, "允许的邮箱域不能为空");
+        this.metrics = Objects.requireNonNull(metrics, "指标门面不能为空");
     }
 
     public String issue(String rawEmail, String client) {
@@ -40,18 +45,27 @@ public class EmailVerificationService {
     }
 
     public String issue(String rawEmail, String remoteIp, String deviceId, String purpose) {
-        CampusEmail email = CampusEmail.parse(rawEmail, allowedDomains);
-        String normalizedPurpose = normalizePurpose(purpose);
-        RedisVerificationCodeStore.IssuedCode issued = store.issue(email.value(), normalizedPurpose, remoteIp, deviceId);
-        Instant now = Instant.now();
-        jdbc.update("INSERT INTO email_verification "
-                + "(id, user_id, email, purpose, code_hmac, status, attempt_count, expires_at, created_at) "
-                + "VALUES (?, NULL, ?, ?, ?, 'PENDING', 0, ?, ?)",
-            UUID.randomUUID().toString(), email.value(), normalizedPurpose,
-            issued.hmac().getBytes(java.nio.charset.StandardCharsets.UTF_8),
-            Timestamp.from(now.plus(TTL)), Timestamp.from(now));
-        mailSender.send(email, issued.code());
-        return issued.code();
+        try {
+            CampusEmail email = CampusEmail.parse(rawEmail, allowedDomains);
+            String normalizedPurpose = normalizePurpose(purpose);
+            RedisVerificationCodeStore.IssuedCode issued = store.issue(email.value(), normalizedPurpose, remoteIp, deviceId);
+            Instant now = Instant.now();
+            jdbc.update("INSERT INTO email_verification "
+                    + "(id, user_id, email, purpose, code_hmac, status, attempt_count, expires_at, created_at) "
+                    + "VALUES (?, NULL, ?, ?, ?, 'PENDING', 0, ?, ?)",
+                UUID.randomUUID().toString(), email.value(), normalizedPurpose,
+                issued.hmac().getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                Timestamp.from(now.plus(TTL)), Timestamp.from(now));
+            mailSender.send(email, issued.code());
+            metrics.recordVerification("SENT");
+            return issued.code();
+        } catch (RedisVerificationCodeStore.TooManyVerificationRequestsException limited) {
+            metrics.recordVerification("RATE_LIMITED");
+            throw limited;
+        } catch (RuntimeException failure) {
+            metrics.recordVerification("FAILURE");
+            throw failure;
+        }
     }
 
     public boolean verify(String rawEmail, String code) {
@@ -63,12 +77,23 @@ public class EmailVerificationService {
     }
 
     public boolean verify(String rawEmail, String code, String remoteIp, String deviceId, String purpose) {
+        try {
+            return verifyInternal(rawEmail, code, remoteIp, deviceId, purpose);
+        } catch (RuntimeException failure) {
+            metrics.recordVerification("FAILURE");
+            throw failure;
+        }
+    }
+
+    private boolean verifyInternal(String rawEmail, String code, String remoteIp, String deviceId, String purpose) {
         CampusEmail email = CampusEmail.parse(rawEmail, allowedDomains);
         String normalizedPurpose = normalizePurpose(purpose);
         if (!store.reserveFailureAttempt(email.value(), normalizedPurpose, remoteIp, deviceId)) {
+            metrics.recordVerification("RATE_LIMITED");
             jdbc.update("UPDATE email_verification SET status = 'LOCKED' "
                     + "WHERE email = ? AND purpose = ? AND status = 'PENDING' "
                     + "ORDER BY created_at DESC LIMIT 1", email.value(), normalizedPurpose);
+            metrics.recordVerification("FAILURE");
             return false;
         }
         boolean consumed = store.consume(email.value(), normalizedPurpose, code);
@@ -78,11 +103,14 @@ public class EmailVerificationService {
                     + "attempt_count = attempt_count + 1 "
                     + "WHERE email = ? AND purpose = ? AND status = 'PENDING' "
                     + "ORDER BY created_at DESC LIMIT 1", email.value(), normalizedPurpose);
+            metrics.recordVerification("FAILURE");
             return false;
         }
         int updated = jdbc.update("UPDATE email_verification SET status = 'VERIFIED', consumed_at = ? "
                 + "WHERE email = ? AND purpose = ? AND status = 'PENDING' "
                 + "ORDER BY created_at DESC LIMIT 1", Timestamp.from(Instant.now()), email.value(), normalizedPurpose);
+        if (updated == 1) metrics.recordVerification("VERIFIED");
+        else metrics.recordVerification("FAILURE");
         return updated == 1;
     }
 
