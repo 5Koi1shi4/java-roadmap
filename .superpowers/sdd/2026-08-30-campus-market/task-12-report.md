@@ -72,6 +72,13 @@ R3 控制端预审后的测试补强：新增 `WarrantyEventBusinessHandlerTest`
 
 R5 本地证据：`./mvnw.cmd -q -f pom.xml -DskipTests compile`、`-DskipTests test-compile`、`-Dtest=WarrantyPolicyTest,ListingTest,WarrantyEventBusinessHandlerTest,WarrantyOutboxDispatcherTest test` 均退出码 0。Docker 引擎在本机不可用，新增 MySQL/Rabbit Failsafe 未折算为通过，需控制端 Docker 可用时定向运行新增 IT 与既有 Warranty IT 并确认 0 skipped。
 
+## R5 控制端失败修复追加
+
+- `SellerWithdrawalConcurrencyIT` 不再假定哪个并发 key 获胜；记录真实获胜 key，并在插入 WITHDRAW 限制且余额不变后重放该同一 key，断言仍返回原 `withdrawalId`。另一 key 仍严格断言 `InsufficientBalanceException`，没有放宽并发超提约束。
+- `WarrantyHttpAclIT` 不再手动覆盖 multipart Content-Type（由客户端生成 boundary），并新增无 boundary malformed multipart 请求必须返回 JSON 400 的断言。`WarrantyController` 增加 `MultipartException` 协议异常映射。
+
+追加本地证据：`-DskipTests test-compile` 与 Warranty/Listing 定向单测均退出码 0；Docker 端应重跑第一批 IT，确认 multipart 201/200、malformed 400 及提现同 key 限制后重放。
+
 已保持 Task11 订单→案件→支付锁顺序、settled 订单状态隔离、支付 provider 适配框架和退款额度硬上限。关注项：Docker 引擎不可用导致两类 IT 尚未在真实 MySQL 上完成 GREEN；应在 Docker 可用环境运行 `.\mvnw.cmd -Dit.test=WarrantyObligationIT,WarrantyDeadlineRaceIT verify` 并确认 4 cases、0 skipped。
 
 ## R4 例外轮复核与实现（基线 e9a9c93）

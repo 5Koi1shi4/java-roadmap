@@ -95,7 +95,6 @@ class WarrantyHttpAclIT extends Task11MySqlContainers {
         jdbc.update("INSERT INTO warranty_case(id,order_id,idempotency_key,buyer_id,seller_id,warranty_days,warranty_scope_snapshot,disputed_quantity,reason,status,seller_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?,?,?,90,'scope',1,'FUNCTIONAL_DEFECT','OPEN',DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", caseId.toString(), order.toString(), "evidence-" + caseId, buyer.toString(), seller.toString());
         HttpHeaders headers = new HttpHeaders();
         headers.setBearerAuth(jwt.issue(new AuthenticatedUser(buyer, Set.of("ROLE_USER"))));
-        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
         headers.set("X-Evidence-Purpose", "REPAIR_QUOTE");
         LinkedMultiValueMap<String, Object> form = new LinkedMultiValueMap<>();
         form.add("file", new ByteArrayResource("%PDF-1.4\nproof\n%%EOF".getBytes(java.nio.charset.StandardCharsets.US_ASCII)) {
@@ -109,6 +108,14 @@ class WarrantyHttpAclIT extends Task11MySqlContainers {
             HttpMethod.GET, new HttpEntity<>(headers), byte[].class);
         assertThat(read.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(read.getBody()).containsExactly("%PDF-1.4\nproof\n%%EOF".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+
+        HttpHeaders malformedHeaders = new HttpHeaders();
+        malformedHeaders.setBearerAuth(jwt.issue(new AuthenticatedUser(buyer, Set.of("ROLE_USER"))));
+        malformedHeaders.setContentType(MediaType.parseMediaType("multipart/form-data"));
+        ResponseEntity<String> malformed = http.postForEntity("/api/warranty-cases/" + caseId + "/evidence",
+            new HttpEntity<>("not-a-multipart-body", malformedHeaders), String.class);
+        assertThat(malformed.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(malformed.getHeaders().getContentType().toString()).startsWith("application/json");
     }
 
     private UUID user() {

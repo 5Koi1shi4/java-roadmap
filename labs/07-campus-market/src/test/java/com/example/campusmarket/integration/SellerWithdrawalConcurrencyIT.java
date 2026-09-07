@@ -38,19 +38,23 @@ class SellerWithdrawalConcurrencyIT extends Task11MySqlContainers {
         Fixture fixture = fixture();
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
-            Future<?> first = pool.submit(() -> listings.withdraw(fixture.seller(), 700, "w-1"));
-            Future<?> second = pool.submit(() -> listings.withdraw(fixture.seller(), 700, "w-2"));
+            Future<UUID> first = pool.submit(() -> listings.withdraw(fixture.seller(), 700, "w-1"));
+            Future<UUID> second = pool.submit(() -> listings.withdraw(fixture.seller(), 700, "w-2"));
             int successes = 0;
-            for (Future<?> f : new Future<?>[]{first, second}) {
-                try { f.get(20, TimeUnit.SECONDS); successes++; }
+            String winnerKey = null; UUID existing = null;
+            Future<?>[] attempts = new Future<?>[]{first, second};
+            String[] keys = {"w-1", "w-2"};
+            for (int i = 0; i < attempts.length; i++) {
+                Future<?> f = attempts[i];
+                try { existing = (UUID) f.get(20, TimeUnit.SECONDS); winnerKey = keys[i]; successes++; }
                 catch (ExecutionException e) { assertThat(e.getCause()).isInstanceOf(ListingService.InsufficientBalanceException.class); }
             }
             assertThat(successes).isEqualTo(1);
             assertThat(jdbc.queryForObject("SELECT COALESCE(SUM(amount_fen),0) FROM seller_withdrawal WHERE seller_id=? AND status='REQUESTED'", Long.class, fixture.seller().toString())).isEqualTo(700L);
 
-            UUID existing = listings.withdraw(fixture.seller(), 700, "w-1");
             jdbc.update("INSERT INTO seller_account_restriction(seller_id,restriction_type,source_obligation_id,status,created_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6))", fixture.seller().toString(), "WITHDRAW", fixture.obligation().toString());
-            assertThat(listings.withdraw(fixture.seller(), 700, "w-1")).isEqualTo(existing);
+            assertThat(winnerKey).isNotNull();
+            assertThat(listings.withdraw(fixture.seller(), 700, winnerKey)).isEqualTo(existing);
         } finally { pool.shutdownNow(); }
     }
 

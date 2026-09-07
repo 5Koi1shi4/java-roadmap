@@ -36,6 +36,6 @@ public final class WarrantyController {
     @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown=false) public record OpenRequest(int quantity,String reason){}
     @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown=false) public record DecisionRequest(WarrantyDecision decision,long compensationAmountFen,String evidenceId){}
     @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown=false) public record AssignmentRequest(UUID adminId){}
-    @ExceptionHandler({org.springframework.web.bind.MissingRequestHeaderException.class,org.springframework.http.converter.HttpMessageNotReadableException.class})
+    @ExceptionHandler({org.springframework.web.bind.MissingRequestHeaderException.class,org.springframework.http.converter.HttpMessageNotReadableException.class,org.springframework.web.multipart.MultipartException.class})
     ResponseEntity<byte[]> protocolError(Exception ignored){return error(HttpStatus.BAD_REQUEST,"请求参数无效");}
 }
