@@ -42,6 +42,14 @@ class DomainEventTest {
     }
 
     @Test
+    void acceptsWarrantyEventsWrittenByTheOutbox() {
+        assertThat(new DomainEvent(UUID.randomUUID(), "WARRANTY_DECIDED", "case-1", 1, Instant.now(), 1, Map.of()).eventType())
+            .isEqualTo("WARRANTY_DECIDED");
+        assertThat(new DomainEvent(UUID.randomUUID(), "WARRANTY_REFUND_REQUESTED", "obligation-1", 1, Instant.now(), 1, Map.of()).eventType())
+            .isEqualTo("WARRANTY_REFUND_REQUESTED");
+    }
+
+    @Test
     void rejectsInvalidRequiredValues() {
         assertThatThrownBy(() -> new DomainEvent(null, "ORDER_CREATED", "o1", 1,
             Instant.now(), 1, Map.of()))

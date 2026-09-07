@@ -19,6 +19,7 @@ import org.springframework.test.annotation.DirtiesContext;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** 真实 MySQL：结算后质保义务、退款额度、限制与抵扣的幂等协作。 */
 @SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
@@ -83,14 +84,49 @@ class WarrantyObligationIT extends Task11MySqlContainers {
         assertThat(evidenceAccess.canRead("WARRANTY", opened.caseId(), UUID.randomUUID())).isFalse();
     }
 
+    @Test
+    void returnAndRefundRequiresReturnProofAndQuarantinesInventory() {
+        Fixture f=fixture(1000,30); UUID admin=user();
+        WarrantyService.Result opened=warranties.openWarrantyCase(f.order(),1,"FUNCTIONAL_DEFECT","return-"+f.order(),f.buyer());
+        UUID generic=evidence(opened.caseId(),f.buyer());
+        assertThatThrownBy(()->warranties.decide(opened.caseId(),admin,WarrantyDecision.RETURN_AND_REFUND,0,generic.toString()))
+            .isInstanceOf(IllegalArgumentException.class);
+        UUID proof=evidence(opened.caseId(),f.buyer(),"RETURN_PROOF");
+        warranties.decide(opened.caseId(),admin,WarrantyDecision.RETURN_AND_REFUND,0,proof.toString());
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM return_case WHERE warranty_case_id=? AND status='CONFIRMED'",Integer.class,opened.caseId().toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT quarantined_quantity FROM listing WHERE id=?",Integer.class,f.listing().toString())).isEqualTo(1);
+    }
+
+    @Test
+    void refundOnlyUsesUnitPriceTimesQuantityAndCreatesObligation() {
+        Fixture f=fixture(1000,30); UUID admin=user();
+        WarrantyService.Result opened=warranties.openWarrantyCase(f.order(),1,"FUNCTIONAL_DEFECT","refund-only-"+f.order(),f.buyer());
+        UUID proof=evidence(opened.caseId(),f.buyer());
+        warranties.decide(opened.caseId(),admin,WarrantyDecision.REFUND_ONLY,0,proof.toString());
+        assertThat(jdbc.queryForObject("SELECT obligation_amount_fen FROM seller_obligation WHERE warranty_case_id=?",Long.class,opened.caseId().toString())).isEqualTo(1000L);
+    }
+
+    @Test
+    void settlementReportsNetAfterWarrantyDeductionAndPublishesRefundIntent() throws Exception {
+        Fixture f=fixture(1000,30); UUID admin=user();
+        WarrantyService.Result opened=warranties.openWarrantyCase(f.order(),1,"FUNCTIONAL_DEFECT","settle-"+f.order(),f.buyer());
+        UUID proof=evidence(opened.caseId(),f.buyer()); warranties.decide(opened.caseId(),admin,WarrantyDecision.REPAIR_COMPENSATION,800,proof.toString());
+        jdbc.update("UPDATE trade_order SET status='AFTERSALE_WINDOW',t0=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 8 DAY) WHERE id=?",f.order().toString());
+        var settled=settlements.settle(f.order());
+        assertThat(settled.status()).isEqualTo("SETTLED"); assertThat(settled.netSettlementFen()).isEqualTo(200L);
+        String payload=jdbc.queryForObject("SELECT CAST(payload AS CHAR) FROM integration_outbox WHERE event_type='SETTLEMENT_CREATED' AND aggregate_id=?",String.class,f.order().toString());
+        var json=new ObjectMapper().readTree(payload); assertThat(json.path("netSettlementFen").asLong()).isEqualTo(200L);
+    }
+
     private Fixture fixture(long paid, int daysAgo) {
         UUID buyer = user(), seller = user(), listing = UUID.randomUUID(), order = UUID.randomUUID(), payment = UUID.randomUUID();
         jdbc.update("INSERT INTO listing(id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,'数码',?,0,'SOLD_OUT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", listing.toString(), seller.toString(), "键盘", "描述", paid);
         jdbc.update("INSERT INTO trade_order(id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,paid_amount_fen,warranty_days,warranty_scope_snapshot,status,version,t0,created_at,updated_at) VALUES (?,?,?,?,?,?,?,1,?,?,90,'SELLER_NON_HUMAN_FUNCTIONAL_FAILURE','SETTLED',0,DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL ? DAY),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", order.toString(), buyer.toString(), seller.toString(), listing.toString(), "键盘", "描述", paid, paid, paid, daysAgo);
         jdbc.update("INSERT INTO payment_order(id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,'SUCCEEDED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", payment.toString(), order.toString(), "simulated", "pay-" + payment, paid, paid, "sim-pay-" + payment);
-        return new Fixture(buyer, seller, order);
+        return new Fixture(buyer, seller, order, listing);
     }
     private UUID user() { UUID id=UUID.randomUUID(); jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",id.toString(),id+"@stu.example.edu.cn","hash"); return id; }
-    private UUID evidence(UUID caseId, UUID actor) { UUID id=UUID.randomUUID(); jdbc.update("INSERT INTO dispute_evidence(id,dispute_case_id,warranty_case_id,case_type,submitted_by,object_key,media_type,size_bytes,created_at) VALUES (?,NULL,?,'WARRANTY',?,?, 'application/pdf',4,CURRENT_TIMESTAMP(6))",id.toString(),caseId.toString(),actor.toString(),"fixture-proof-"+caseId); return id; }
-    private record Fixture(UUID buyer, UUID seller, UUID order) {}
+    private UUID evidence(UUID caseId, UUID actor) { return evidence(caseId,actor,null); }
+    private UUID evidence(UUID caseId, UUID actor, String purpose) { UUID id=UUID.randomUUID(); jdbc.update("INSERT INTO dispute_evidence(id,dispute_case_id,warranty_case_id,case_type,purpose,submitted_by,object_key,media_type,size_bytes,created_at) VALUES (?,NULL,?,'WARRANTY',?,?,?,'application/pdf',4,CURRENT_TIMESTAMP(6))",id.toString(),caseId.toString(),purpose,actor.toString(),"fixture-proof-"+caseId+"-"+id); return id; }
+    private record Fixture(UUID buyer, UUID seller, UUID order, UUID listing) {}
 }

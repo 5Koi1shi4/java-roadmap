@@ -53,6 +53,8 @@
 - 裁定与筹资 HTTP 命令改为强制 `Idempotency-Key`，缺失/格式错误返回 JSON 400/409；裁定支付成功记录按 `created_at DESC,id DESC` 确定并聚合退款额度。发布/提现命令使用限制行锁门禁，避免将 `canWithdraw` 布尔查询当授权。
 
 本轮本地证据：` .\\mvnw.cmd -q -DskipTests compile`、` .\\mvnw.cmd -q -DskipTests test-compile` 成功；Docker/Testcontainers 由控制端执行真实 MySQL、Rabbit 和 HTTP 集成验收。
+
+R3 控制端预审后的测试补强：新增 `WarrantyEventBusinessHandlerTest`（退款事件稳定幂等键）、`WarrantyControllerContractTest`（认证角色、JSON Content-Type 与 caseId/status）、DomainEvent 质保事件契约测试；扩展 `WarrantyObligationIT` 覆盖 RETURN_PROOF→return_case→库存隔离、REFUND_ONLY 义务、实际 settlement 抵扣后净额与事件；fixture 证据用途与每案 object key 唯一。测试新增后 `test-compile` 通过，定向单测待控制端低内存环境执行。
 - `test-compile` 已重新通过；真实 MySQL/HTTP Failsafe 仍由控制端重跑，本机 Docker named pipe 不可用，未将错误折算为 skipped。
 
 ## 自审与关注项
