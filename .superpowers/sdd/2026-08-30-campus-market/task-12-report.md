@@ -43,6 +43,7 @@
 - WarrantyObligationIT 的 WARRANTY 证据 fixture 改为每个案件唯一 `object_key`（仍是真实 `dispute_evidence` 行并可走读取 ACL），避免跨用例唯一键冲突。
 - 竞态获胜/失败 Future 的异常分类已收紧为唯一允许的业务截止异常；补充 `GET /api/warranty-cases/{caseId}`（及兼容路径）参与者/管理员 ACL 查询，返回显式 JSON `caseId/orderId/status/decision/compensationAmountFen`，便于真实 HTTP 测试先断言状态与 Content-Type 再解析。
 - R2 第三轮定位并修复未来结算抵扣路径的生产缺口：此前锁定义务查询未选出 `warranty_case_id`，足额抵扣触发退款 Outbox 时传入 null；现在从同一锁定行读取真实关联。IT 新增唯一 `WARRANTY_REFUND_REQUESTED` Outbox、案件/订单/金额 payload 强断言。
+- R2 第四轮仅修正 IT 断言：Outbox payload 改用 Jackson JSON 结构解析，精确断言 `caseId/orderId/obligationId/amountFen`，不再依赖 JSON 空格格式；生产序列化未改动。
 - `test-compile` 已重新通过；真实 MySQL/HTTP Failsafe 仍由控制端重跑，本机 Docker named pipe 不可用，未将错误折算为 skipped。
 
 ## 自审与关注项

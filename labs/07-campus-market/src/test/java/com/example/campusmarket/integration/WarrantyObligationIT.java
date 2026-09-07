@@ -7,6 +7,7 @@ import com.example.campusmarket.warranty.domain.WarrantyDecision;
 import com.example.campusmarket.dispute.infrastructure.JdbcEvidenceCaseAccess;
 import com.example.campusmarket.payment.application.SettlementService;
 import com.example.campusmarket.shared.Money;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -58,7 +59,7 @@ class WarrantyObligationIT extends Task11MySqlContainers {
     }
 
     @Test
-    void futureSettlementDeductionUsesCompositeIdempotencyAndAclIsParticipantOnly() {
+    void futureSettlementDeductionUsesCompositeIdempotencyAndAclIsParticipantOnly() throws Exception {
         Fixture f = fixture(1000, 30);
         UUID admin = user();
         WarrantyService.Result opened = warranties.openWarrantyCase(f.order(), 1, "FUNCTIONAL_DEFECT", "warranty-deduct-" + f.order(), f.buyer());
@@ -73,7 +74,11 @@ class WarrantyObligationIT extends Task11MySqlContainers {
         assertThat(jdbc.queryForObject("SELECT funded_amount_fen FROM seller_obligation WHERE id=?", Long.class, obligation.toString())).isEqualTo(800L);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='WARRANTY_REFUND_REQUESTED' AND aggregate_id=?", Integer.class, obligation.toString())).isEqualTo(1);
         String refundPayload=jdbc.queryForObject("SELECT CAST(payload AS CHAR) FROM integration_outbox WHERE event_type='WARRANTY_REFUND_REQUESTED' AND aggregate_id=?", String.class, obligation.toString());
-        assertThat(refundPayload).contains(opened.caseId().toString()).contains(f.order().toString()).contains("\"amountFen\":800");
+        var payload = new ObjectMapper().readTree(refundPayload);
+        assertThat(payload.path("caseId").asText()).isEqualTo(opened.caseId().toString());
+        assertThat(payload.path("orderId").asText()).isEqualTo(f.order().toString());
+        assertThat(payload.path("obligationId").asText()).isEqualTo(obligation.toString());
+        assertThat(payload.path("amountFen").asLong()).isEqualTo(800L);
         assertThat(evidenceAccess.canRead("WARRANTY", opened.caseId(), f.buyer())).isTrue();
         assertThat(evidenceAccess.canRead("WARRANTY", opened.caseId(), UUID.randomUUID())).isFalse();
     }
