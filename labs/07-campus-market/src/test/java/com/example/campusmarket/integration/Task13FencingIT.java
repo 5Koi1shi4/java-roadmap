@@ -81,7 +81,8 @@ class Task13FencingIT extends Task11MySqlContainers {
 
     @Test
     void expiredOutboxFailureDoesNotChangeSourceOrCreateManualCopy() {
-        UUID eventId = insertOutbox("DATE_SUB(CURRENT_TIMESTAMP(6), INTERVAL 1 SECOND)");
+        UUID eventId = insertOutbox("DATE_SUB(CURRENT_TIMESTAMP(6), INTERVAL 1 SECOND)",
+            "task13-old-owner", "task13-old-token");
 
         assertThat(outbox.fail(eventId, "task13-old-owner", "task13-old-token", "PERMANENT")).isZero();
         assertThat(jdbc.queryForObject("SELECT status FROM integration_outbox WHERE event_id=?", String.class, eventId.toString()))
@@ -92,7 +93,8 @@ class Task13FencingIT extends Task11MySqlContainers {
 
     @Test
     void liveOutboxFailureAtomicallyCreatesOneManualCopy() {
-        UUID eventId = insertOutbox("DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 1 MINUTE)");
+        UUID eventId = insertOutbox("DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 1 MINUTE)",
+            "task13-live-owner", "task13-live-token");
 
         assertThat(outbox.fail(eventId, "task13-live-owner", "task13-live-token", "EXHAUSTED")).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT status FROM integration_outbox WHERE event_id=?", String.class, eventId.toString()))
@@ -139,10 +141,10 @@ class Task13FencingIT extends Task11MySqlContainers {
         assertThat(meters.get("campus.market.admin.sla.timeout.total").tag("result", "TIMEOUT").counter().count()).isEqualTo(1.0);
     }
 
-    private UUID insertOutbox(String leaseExpression) {
+    private UUID insertOutbox(String leaseExpression, String owner, String token) {
         UUID eventId = UUID.randomUUID();
         jdbc.update("INSERT INTO integration_outbox(id,event_id,event_type,aggregate_id,aggregate_version,schema_version,payload,status,owner_id,claim_token,lease_until,attempt_count,available_at,created_at) VALUES (?,?, 'TASK13_FENCE', ?,1,1,CAST(? AS JSON),'PUBLISHING',?,?," + leaseExpression + ",1,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-            UUID.randomUUID().toString(), eventId.toString(), UUID.randomUUID().toString(), "{\"task\":\"task13\"}", "task13-old-owner", "task13-old-token");
+            UUID.randomUUID().toString(), eventId.toString(), UUID.randomUUID().toString(), "{\"task\":\"task13\"}", owner, token);
         return eventId;
     }
 
