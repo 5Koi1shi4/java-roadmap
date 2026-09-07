@@ -83,6 +83,6 @@ class WarrantyObligationIT extends Task11MySqlContainers {
         return new Fixture(buyer, seller, order);
     }
     private UUID user() { UUID id=UUID.randomUUID(); jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",id.toString(),id+"@stu.example.edu.cn","hash"); return id; }
-    private UUID evidence(UUID caseId, UUID actor) { UUID id=UUID.randomUUID(); jdbc.update("INSERT INTO dispute_evidence(id,dispute_case_id,warranty_case_id,case_type,submitted_by,object_key,media_type,size_bytes,created_at) VALUES (?,NULL,?,'WARRANTY',?,'fixture-proof','application/pdf',4,CURRENT_TIMESTAMP(6))",id.toString(),caseId.toString(),actor.toString()); return id; }
+    private UUID evidence(UUID caseId, UUID actor) { UUID id=UUID.randomUUID(); jdbc.update("INSERT INTO dispute_evidence(id,dispute_case_id,warranty_case_id,case_type,submitted_by,object_key,media_type,size_bytes,created_at) VALUES (?,NULL,?,'WARRANTY',?,?, 'application/pdf',4,CURRENT_TIMESTAMP(6))",id.toString(),caseId.toString(),actor.toString(),"fixture-proof-"+caseId); return id; }
     private record Fixture(UUID buyer, UUID seller, UUID order) {}
 }

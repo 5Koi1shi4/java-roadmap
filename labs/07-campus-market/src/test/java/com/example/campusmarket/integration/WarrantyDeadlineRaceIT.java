@@ -55,7 +55,13 @@ class WarrantyDeadlineRaceIT extends Task11MySqlContainers {
         try {
             Future<?> funding = pool.submit(() -> { await(barrier); obligations.fundObligation(obligation, f[1], com.example.campusmarket.shared.Money.ofFen(1000)); });
             Future<?> expiry = pool.submit(() -> { await(barrier); deadlines.runOnce(100); });
-            funding.get(20, TimeUnit.SECONDS); expiry.get(20, TimeUnit.SECONDS);
+            try { funding.get(20, TimeUnit.SECONDS); }
+            catch (ExecutionException e) {
+                // The deadline winner is a valid serialized business outcome;
+                // any other failure must still fail this integration test.
+                assertThat(e.getCause()).isInstanceOf(SellerObligationService.FundingExpiredException.class);
+            }
+            expiry.get(20, TimeUnit.SECONDS);
         } finally { pool.shutdownNow(); }
         String state = jdbc.queryForObject("SELECT status FROM seller_obligation WHERE id=?", String.class, obligation.toString());
         assertThat(state).isIn("FUNDED", "CANCELLED");

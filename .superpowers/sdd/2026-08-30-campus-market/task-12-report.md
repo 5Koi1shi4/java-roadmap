@@ -37,6 +37,12 @@
 
 本地证据：` .\\mvnw.cmd -q -DskipTests compile`、` .\\mvnw.cmd -q -Dtest=WarrantyPolicyTest test`、` .\\mvnw.cmd -q -DskipTests test-compile` 均成功；本机 Testcontainers 再次执行仍因 `AccessDeniedException \\.\\pipe\\docker_engine` 无 Docker 引擎而无法进入 MySQL（0 skipped，测试类 beforeAll error）。控制端应在 Docker 可用环境重跑两类 IT，并核对 4 cases/0 skipped 及 Outbox、退款、四种裁定边界。
 
+## R2 控制端反馈修复
+
+- 竞态 IT 现在只将 `FundingExpiredException` 作为截止赢家允许的业务结果，`Future.get` 的其它异常继续使测试失败；随后仍强断言最终状态只能是 `FUNDED` 或 `CANCELLED`，分别对应限制解除或保持两条限制。
+- WarrantyObligationIT 的 WARRANTY 证据 fixture 改为每个案件唯一 `object_key`（仍是真实 `dispute_evidence` 行并可走读取 ACL），避免跨用例唯一键冲突。
+- `test-compile` 已重新通过；真实 MySQL/HTTP Failsafe 仍由控制端重跑，本机 Docker named pipe 不可用，未将错误折算为 skipped。
+
 ## 自审与关注项
 
 已保持 Task11 订单→案件→支付锁顺序、settled 订单状态隔离、支付 provider 适配框架和退款额度硬上限。关注项：Docker 引擎不可用导致两类 IT 尚未在真实 MySQL 上完成 GREEN；应在 Docker 可用环境运行 `.\mvnw.cmd -Dit.test=WarrantyObligationIT,WarrantyDeadlineRaceIT verify` 并确认 4 cases、0 skipped。
