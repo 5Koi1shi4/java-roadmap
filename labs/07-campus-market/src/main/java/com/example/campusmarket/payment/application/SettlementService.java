@@ -50,14 +50,15 @@ public class SettlementService {
         jdbc.update("INSERT INTO settlement (id,order_id,paid_amount_fen,successful_refund_fen,net_settlement_fen,status,created_at,settled_at) VALUES (?,?,?,?,?,'SETTLED',?,?) ON DUPLICATE KEY UPDATE status='SETTLED',net_settlement_fen=VALUES(net_settlement_fen),settled_at=VALUES(settled_at)",
             settlementId.toString(), orderId.toString(), payment.paidAmountFen(), payment.successfulRefundFen(), net, Timestamp.from(now), Timestamp.from(now));
         applySellerObligations(orderId, settlementId, net, now);
+        long availableAfterObligations = jdbc.queryForObject("SELECT net_settlement_fen FROM settlement WHERE id=?", Long.class, settlementId.toString());
         jdbc.update("UPDATE trade_order SET status='SETTLED',version=version+1,updated_at=? WHERE id=? AND status='AFTERSALE_WINDOW'", Timestamp.from(now), orderId.toString());
         UUID eventId = UUID.nameUUIDFromBytes(("settlement-created:" + orderId).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         String payload = "{\"settlementId\":\"" + settlementId + "\",\"orderId\":\"" + orderId
-            + "\",\"netSettlementFen\":" + net + "}";
+            + "\",\"netSettlementFen\":" + availableAfterObligations + "}";
         jdbc.update("INSERT INTO integration_outbox (id,event_id,event_type,aggregate_id,aggregate_version,schema_version,occurred_at,payload,status,attempt_count,available_at,created_at) "
                 + "VALUES (?,?, 'SETTLEMENT_CREATED',?,?,1,CURRENT_TIMESTAMP(6),CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",
             eventId.toString(), eventId.toString(), orderId.toString(), 1L, payload);
-        return new SettlementResult(orderId, "SETTLED", net, null);
+        return new SettlementResult(orderId, "SETTLED", availableAfterObligations, null);
     }
 
     private boolean eligible(OrderFacts order, Instant now) {
@@ -113,6 +114,9 @@ public class SettlementService {
                 jdbc.update("UPDATE seller_obligation SET funded_amount_fen=?,status=?,restriction_status=?,version=version+1,updated_at=? WHERE id=? AND funded_amount_fen=?",
                     funded, funded == obligation.amount() ? "FUNDED" : "PARTIALLY_FUNDED", funded == obligation.amount() ? "NONE" : "RESTRICTED", Timestamp.from(now), obligation.id().toString(), obligation.funded());
                 if (funded == obligation.amount()) jdbc.update("UPDATE seller_account_restriction SET status='CLEARED',cleared_at=? WHERE source_obligation_id=? AND status='ACTIVE'", Timestamp.from(now), obligation.id().toString());
+                UUID auditId=UUID.nameUUIDFromBytes(("settlement-obligation:"+settlementId+":"+obligation.id()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                String auditDetails="{\"settlementId\":\""+settlementId+"\",\"amountFen\":"+due+"}";
+                jdbc.update("INSERT INTO audit_event(id,actor_id,action,resource_type,resource_id,result,details,occurred_at) VALUES (?,?, 'WARRANTY_OBLIGATION_DEDUCTED','SELLER_OBLIGATION',?,'SUCCESS',CAST(? AS JSON),?) ON DUPLICATE KEY UPDATE id=id",auditId.toString(),seller.toString(),obligation.id().toString(),auditDetails,Timestamp.from(now));
                 if (funded == obligation.amount()) {
                     UUID event=UUID.nameUUIDFromBytes(("warranty-refund:"+obligation.id()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
                     String payload="{\"orderId\":\""+orderId+"\",\"caseId\":\""+obligation.caseId()+"\",\"obligationId\":\""+obligation.id()+"\",\"amountFen\":"+obligation.amount()+"}";

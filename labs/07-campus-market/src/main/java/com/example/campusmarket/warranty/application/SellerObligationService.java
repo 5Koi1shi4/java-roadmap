@@ -65,7 +65,12 @@ public final class SellerObligationService {
             long remaining=row.amount()-row.funded(); if(remaining<=0) return 0L;
             long deduction=Math.min(Math.min(amount.fen(),remaining),settlement.net());
             int inserted=jdbc.update("INSERT INTO settlement_obligation_deduction(id,settlement_id,obligation_id,amount_fen,created_at) VALUES (?,?,?,?,CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",UUID.randomUUID().toString(),settlementId.toString(),obligationId.toString(),deduction);
-            if(inserted==1){ long next=row.funded()+deduction; jdbc.update("UPDATE seller_obligation SET funded_amount_fen=?,status=?,restriction_status=?,version=version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND funded_amount_fen=?",next,next==row.amount()?"FUNDED":"PARTIALLY_FUNDED",next==row.amount()?"NONE":"RESTRICTED",obligationId.toString(),row.funded()); jdbc.update("UPDATE settlement SET net_settlement_fen=net_settlement_fen-? WHERE id=? AND net_settlement_fen>=?",deduction,settlementId.toString(),deduction); audit(row.sellerId(), "WARRANTY_OBLIGATION_DEDUCTED", obligationId, row.version()+1, "{\"settlementId\":\""+settlementId+"\",\"amountFen\":"+deduction+"}"); if(next==row.amount()) { clearRestrictions(row.sellerId(),obligationId,dbNow()); refundOutbox(row.caseId(), obligationId, row.amount(), row.version()+1); } }
+            if(inserted!=1) return 0L;
+            long next=row.funded()+deduction;
+            if(jdbc.update("UPDATE seller_obligation SET funded_amount_fen=?,status=?,restriction_status=?,version=version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND funded_amount_fen=?",next,next==row.amount()?"FUNDED":"PARTIALLY_FUNDED",next==row.amount()?"NONE":"RESTRICTED",obligationId.toString(),row.funded())!=1) throw new ConcurrentFundingException();
+            if(jdbc.update("UPDATE settlement SET net_settlement_fen=net_settlement_fen-? WHERE id=? AND net_settlement_fen>=?",deduction,settlementId.toString(),deduction)!=1) throw new ConcurrentFundingException();
+            audit(row.sellerId(), "WARRANTY_OBLIGATION_DEDUCTED", obligationId, row.version()+1, "{\"settlementId\":\""+settlementId+"\",\"amountFen\":"+deduction+"}");
+            if(next==row.amount()) { clearRestrictions(row.sellerId(),obligationId,dbNow()); refundOutbox(row.caseId(), obligationId, row.amount(), row.version()+1); }
             return deduction;
         });
         if (deducted > 0) {

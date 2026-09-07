@@ -42,7 +42,7 @@ public class ListingService {
 
     @Transactional
     public Listing publish(UUID sellerId, UUID listingId) {
-        if (isRestricted(sellerId, "PUBLISH")) throw new RestrictionException();
+        if (activeRestrictionForUpdate(sellerId, "PUBLISH")) throw new RestrictionException();
         Listing listing = owned(sellerId, listingId);
         if (!listings.hasMedia(listingId)) throw new IllegalStateException("商品至少需要一张媒体");
         listing.publish();
@@ -76,11 +76,21 @@ public class ListingService {
 
     public boolean canPublish(UUID sellerId) { return !isRestricted(sellerId, "PUBLISH"); }
     public boolean canWithdraw(UUID sellerId) { return !isRestricted(sellerId, "WITHDRAW"); }
+    /** Withdrawal command gate; callers must use this command rather than treating canWithdraw as authorization. */
+    @Transactional
+    public void withdraw(UUID sellerId, long amountFen) {
+        if (sellerId == null || amountFen <= 0) throw new IllegalArgumentException("提现金额必须为正数");
+        if (activeRestrictionForUpdate(sellerId, "WITHDRAW")) throw new RestrictionException();
+    }
 
     private boolean isRestricted(UUID sellerId, String type) {
         if (jdbc == null || sellerId == null) return false;
         Integer n = jdbc.queryForObject("SELECT COUNT(*) FROM seller_account_restriction WHERE seller_id=? AND restriction_type=? AND status='ACTIVE'", Integer.class, sellerId.toString(), type);
         return n != null && n > 0;
+    }
+    private boolean activeRestrictionForUpdate(UUID sellerId, String type) {
+        if (jdbc == null || sellerId == null) return false;
+        return jdbc.query("SELECT source_obligation_id FROM seller_account_restriction WHERE seller_id=? AND restriction_type=? AND status='ACTIVE' FOR UPDATE", (org.springframework.jdbc.core.ResultSetExtractor<Boolean>) rs -> rs.next(), sellerId.toString(), type);
     }
 
     private Listing owned(UUID sellerId, UUID listingId) {

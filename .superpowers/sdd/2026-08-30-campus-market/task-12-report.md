@@ -44,6 +44,15 @@
 - 竞态获胜/失败 Future 的异常分类已收紧为唯一允许的业务截止异常；补充 `GET /api/warranty-cases/{caseId}`（及兼容路径）参与者/管理员 ACL 查询，返回显式 JSON `caseId/orderId/status/decision/compensationAmountFen`，便于真实 HTTP 测试先断言状态与 Content-Type 再解析。
 - R2 第三轮定位并修复未来结算抵扣路径的生产缺口：此前锁定义务查询未选出 `warranty_case_id`，足额抵扣触发退款 Outbox 时传入 null；现在从同一锁定行读取真实关联。IT 新增唯一 `WARRANTY_REFUND_REQUESTED` Outbox、案件/订单/金额 payload 强断言。
 - R2 第四轮仅修正 IT 断言：Outbox payload 改用 Jackson JSON 结构解析，精确断言 `caseId/orderId/obligationId/amountFen`，不再依赖 JSON 空格格式；生产序列化未改动。
+
+## R3 修复
+
+- 注册 `WARRANTY_DECIDED` 与 `WARRANTY_REFUND_REQUESTED` 到 DomainEvent/RabbitTopology，并增加可靠 Warranty EventBusinessHandler；创建案件也写入同事务审计与 `WARRANTY_CASE_CREATED` Outbox。
+- RETURN_AND_REFUND 现在只接受标记为 `RETURN_PROOF` 的参与者证据，创建/确认 warranty-backed `return_case` 并通过唯一库存业务键隔离退回商品；V27 增加来源互斥 CHECK、外键和证据用途约束。
+- 足额抵扣读取真实案件关联并写退款 Outbox，SettlementResult 与 `SETTLEMENT_CREATED` payload 使用抵扣后的可用净额；抵扣审计、筹资/限制审计补齐，重复复合键返回 0 且所有更新影响数校验。
+- 裁定与筹资 HTTP 命令改为强制 `Idempotency-Key`，缺失/格式错误返回 JSON 400/409；裁定支付成功记录按 `created_at DESC,id DESC` 确定并聚合退款额度。发布/提现命令使用限制行锁门禁，避免将 `canWithdraw` 布尔查询当授权。
+
+本轮本地证据：` .\\mvnw.cmd -q -DskipTests compile`、` .\\mvnw.cmd -q -DskipTests test-compile` 成功；Docker/Testcontainers 由控制端执行真实 MySQL、Rabbit 和 HTTP 集成验收。
 - `test-compile` 已重新通过；真实 MySQL/HTTP Failsafe 仍由控制端重跑，本机 Docker named pipe 不可用，未将错误折算为 skipped。
 
 ## 自审与关注项
