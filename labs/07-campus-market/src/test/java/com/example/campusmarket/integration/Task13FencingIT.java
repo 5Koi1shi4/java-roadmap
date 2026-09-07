@@ -2,6 +2,7 @@ package com.example.campusmarket.integration;
 
 import com.example.campusmarket.CampusMarketApplication;
 import com.example.campusmarket.messaging.OutboxRepository;
+import com.example.campusmarket.observability.CampusMetrics;
 import com.example.campusmarket.storage.StorageCleanupScheduler;
 import com.example.campusmarket.warranty.application.WarrantyDeadlineScheduler;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -15,6 +16,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
@@ -50,6 +52,12 @@ class Task13FencingIT extends Task11MySqlContainers {
         @Bean
         PasswordEncoder passwordEncoder() {
             return new BCryptPasswordEncoder();
+        }
+
+        @Bean
+        WarrantyDeadlineScheduler warrantyDeadlineScheduler(
+            JdbcTemplate jdbc, PlatformTransactionManager transactionManager, CampusMetrics metrics) {
+            return new WarrantyDeadlineScheduler(jdbc, transactionManager, metrics);
         }
     }
 
