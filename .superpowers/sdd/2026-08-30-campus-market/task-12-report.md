@@ -85,6 +85,14 @@ R5 本地证据：`./mvnw.cmd -q -f pom.xml -DskipTests compile`、`-DskipTests 
 
 追加本地证据：`-DskipTests test-compile`、`WarrantyPolicyTest,ListingTest,WarrantyControllerContractTest` 定向测试退出码 0；请控制端重跑第一批确认 malformed multipart 为 JSON 400。
 
+## 控制端最终 Docker 验收证据
+
+- 在 `c6640d7` 后运行 MySQL-only 第一批：`mvnw '-Dit.test=WarrantyObligationIT,WarrantyDeadlineRaceIT,WarrantyHttpAclIT,SellerWithdrawalConcurrencyIT' verify`，12 tests 中 11 通过；唯一失败为 malformed multipart 的旧 400 断言。
+- 在 `000a68c` 全局 multipart 映射修复后运行：`mvnw '-Dit.test=WarrantyHttpAclIT' verify`，Surefire 88/88，Failsafe 3/3，0 failures/errors/skipped，`BUILD SUCCESS`。
+- 真实消息链路运行：`mvnw '-Dit.test=WarrantyMessagingIT' verify`，Surefire 88/88，Failsafe 1/1，0 failures/errors/skipped，`BUILD SUCCESS`；使用真实 MySQL + Rabbit，运行时可用内存约 2.32GB，未触发低内存限制。
+
+上述证据闭合 HTTP/ACL/物理证据、提现并发幂等以及 Outbox→Rabbit confirm/binding→Inbox COMPLETED→退款幂等重放验收。
+
 已保持 Task11 订单→案件→支付锁顺序、settled 订单状态隔离、支付 provider 适配框架和退款额度硬上限。关注项：Docker 引擎不可用导致两类 IT 尚未在真实 MySQL 上完成 GREEN；应在 Docker 可用环境运行 `.\mvnw.cmd -Dit.test=WarrantyObligationIT,WarrantyDeadlineRaceIT verify` 并确认 4 cases、0 skipped。
 
 ## R4 例外轮复核与实现（基线 e9a9c93）
