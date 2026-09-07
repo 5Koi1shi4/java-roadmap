@@ -76,4 +76,36 @@ class WarrantyMessagingIT extends Task12RabbitMySqlContainers {
         Awaitility.await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
             verify(refunds, times(1)).requestRefund(any(), any(), any(), any(), any()));
     }
+
+    @Test
+    void malformedEnvelopeWithReliableMessageIdIsPersistedAsPermanentFailureBeforeAck() {
+        UUID eventId = UUID.randomUUID();
+        MessageProperties properties = new MessageProperties();
+        properties.setMessageId(eventId.toString());
+        Message malformed = new Message("{not-json".getBytes(StandardCharsets.UTF_8), properties);
+
+        rabbit.send(RabbitTopology.EVENT_EXCHANGE, "WARRANTY_REFUND_REQUESTED", malformed);
+
+        Awaitility.await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            assertThat(jdbc.queryForObject("SELECT status FROM consumed_event WHERE consumer_name=? AND event_id=?",
+                String.class, "campus-market-warranty", eventId.toString())).isEqualTo("FAILED");
+            assertThat(jdbc.queryForObject("SELECT failure_class FROM manual_failure WHERE source_type='INBOX' AND source_id=? AND consumer_name=?",
+                String.class, eventId.toString(), "campus-market-warranty")).isEqualTo("PERMANENT");
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM consumed_event WHERE consumer_name=? AND event_id=? AND status='PROCESSING'",
+                Integer.class, "campus-market-warranty", eventId.toString())).isZero();
+        });
+    }
+
+    @Test
+    void malformedEnvelopeWithoutReliableMessageIdIsDeadLettered() {
+        MessageProperties properties = new MessageProperties();
+        Message malformed = new Message("{not-json".getBytes(StandardCharsets.UTF_8), properties);
+
+        rabbit.send(RabbitTopology.EVENT_EXCHANGE, "WARRANTY_REFUND_REQUESTED", malformed);
+
+        Awaitility.await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+            assertThat(rabbit.receive(RabbitTopology.MANUAL_QUEUE, 100)).isNotNull());
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM consumed_event WHERE consumer_name=? AND status='PROCESSING'",
+            Integer.class, "campus-market-warranty")).isZero();
+    }
 }

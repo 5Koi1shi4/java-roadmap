@@ -163,7 +163,7 @@ public final class DisputeDeadlineScheduler {
             escalate(current.caseId());
             return;
         }
-        PaymentFacts payment = jdbc.query("SELECT id,paid_amount_fen,provider FROM payment_order WHERE order_id=? AND status='SUCCEEDED' FOR UPDATE",
+        PaymentFacts payment = jdbc.query("SELECT id,paid_amount_fen,provider FROM payment_order WHERE order_id=? AND status='SUCCEEDED' ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE",
             rs -> rs.next() ? new PaymentFacts(UUID.fromString(rs.getString(1)), rs.getLong(2), rs.getString(3)) : null, current.orderId().toString());
         boolean trusted = payment != null && resolutions.isHardDeadlineProofAuthorized(current.caseId(), current.orderId(), current.disputedQuantity(),
             current.proofType(), current.proofReference(), payment.provider());

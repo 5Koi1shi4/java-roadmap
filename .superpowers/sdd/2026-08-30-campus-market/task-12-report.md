@@ -60,6 +60,33 @@ R3 控制端预审后的测试补强：新增 `WarrantyEventBusinessHandlerTest`
 
 ## 自审与关注项
 
+## R6 承重缺陷修复（基线 ad71d75）
+
+### RED
+
+- 新增 `WarrantyEventConsumerTest` 两个协议测试：畸形 envelope 携带合法
+  `messageId` 必须先持久化 Inbox `FAILED`/`manual_failure.PERMANENT` 再 ACK；没有可靠
+  id 必须 NACK 到 DLX。基线运行 `./mvnw.cmd -Dtest=WarrantyEventConsumerTest test`
+  得到 2 failures：原实现对两条路径均直接 `basicAck`，且没有调用 Inbox。
+- 扩展真实 MySQL+Rabbit `WarrantyMessagingIT` 覆盖上述两条消息路径，并在真实
+  `DisputeDeadlineIT` 增加同订单两笔相同 `created_at`、不同 id/provider 的成功支付，
+  断言硬截止的 `return_case` 与 `refund_order` 都关联 id 更大的 canonical payment。
+  控制端复跑命令在本环境因 Docker named pipe `AccessDeniedException
+  \\.\pipe\docker_engine` 无法启动容器（0 skipped，2 class errors），未将环境错误折算为
+  测试通过。
+
+### GREEN
+
+- `WarrantyEventConsumer` 解码失败现在仅在 `messageId` 可解析为 UUID 且 Inbox claim 成功
+  后执行 token-fenced `markFailed` 并 ACK；无法取得可靠 id 走 `basicNack(requeue=false)`
+  到 warranty 队列 DLX；持久化异常继续 requeue，避免静默丢失或留下 PROCESSING。
+- `DisputeDeadlineScheduler.hardDeadline` 的支付查询加入统一
+  `ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE`，与 Refund/ Warranty/Settlement
+  canonical 事实一致。
+- `./mvnw.cmd -q '-Dtest=WarrantyEventConsumerTest,WarrantyEventBusinessHandlerTest,WarrantyOutboxDispatcherTest,DisputeDeadlineSchedulerTest' test`：通过，0 failures、0 errors、0 skipped。
+- Docker 可用控制端必须复跑 `./mvnw.cmd '-Dit.test=WarrantyMessagingIT,DisputeDeadlineIT' verify`，
+  重点确认新增消息异常 2 cases 与 canonical 支付截止 case 均实际 GREEN。
+
 ## R5 最终修复轮（c4a9c2e 基线）
 
 按 R4 规格/质量 OPEN 逐条复核并修复：
