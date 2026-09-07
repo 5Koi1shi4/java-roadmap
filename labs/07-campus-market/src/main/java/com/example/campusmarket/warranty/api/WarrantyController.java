@@ -1,0 +1,37 @@
+package com.example.campusmarket.warranty.api;
+
+import com.example.campusmarket.identity.application.AuthenticatedUser;
+import com.example.campusmarket.warranty.application.WarrantyService;
+import com.example.campusmarket.warranty.domain.WarrantyDecision;
+import org.springframework.context.annotation.Profile;
+import org.springframework.core.io.InputStreamResource;
+import org.springframework.http.*;
+import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.nio.charset.StandardCharsets;
+import java.util.UUID;
+
+@RestController
+@Profile("!test")
+public final class WarrantyController {
+    private static final MediaType JSON=MediaType.parseMediaType("application/json; charset=UTF-8");
+    private final WarrantyService warranties;
+    public WarrantyController(WarrantyService warranties){this.warranties=warranties;}
+    @PostMapping(path="/api/orders/{orderId}/warranty",consumes=MediaType.APPLICATION_JSON_VALUE,produces="application/json; charset=UTF-8")
+    public ResponseEntity<byte[]> open(@PathVariable UUID orderId,@RequestBody OpenRequest req,@RequestHeader("Idempotency-Key") String key,Authentication auth){try{WarrantyService.Result r=warranties.openWarrantyCase(orderId,req.quantity(),req.reason(),key,user(auth));return ResponseEntity.status(HttpStatus.CREATED).contentType(JSON).body(("{\"caseId\":\""+r.caseId()+"\",\"status\":\""+r.status()+"\"}").getBytes(StandardCharsets.UTF_8));}catch(WarrantyService.NotFoundException e){return error(HttpStatus.NOT_FOUND,"质保案件不存在");}catch(IllegalArgumentException|IllegalStateException e){return error(HttpStatus.CONFLICT,"质保申请无效");}}
+    @PostMapping(path="/api/warranty/{caseId}/decisions",consumes=MediaType.APPLICATION_JSON_VALUE,produces="application/json; charset=UTF-8")
+    public ResponseEntity<byte[]> decide(@PathVariable UUID caseId,@RequestBody DecisionRequest req,Authentication auth){try{if(!admin(auth))return error(HttpStatus.FORBIDDEN,"无权执行该角色操作");WarrantyService.Result r=warranties.decide(caseId,user(auth),req.decision(),req.compensationAmountFen(),req.evidenceId());return ResponseEntity.ok().contentType(JSON).body(("{\"caseId\":\""+r.caseId()+"\",\"status\":\""+r.status()+"\"}").getBytes(StandardCharsets.UTF_8));}catch(WarrantyService.NotFoundException e){return error(HttpStatus.NOT_FOUND,"质保案件不存在");}catch(IllegalArgumentException|IllegalStateException e){return error(HttpStatus.CONFLICT,"质保裁定无效");}}
+    @PostMapping(path="/api/warranty/{caseId}/responses",consumes=MediaType.APPLICATION_JSON_VALUE,produces="application/json; charset=UTF-8")
+    public ResponseEntity<byte[]> respond(@PathVariable UUID caseId,Authentication auth){try{var r=warranties.respond(caseId,user(auth));return ResponseEntity.ok().contentType(JSON).body(("{\"caseId\":\""+r.caseId()+"\",\"status\":\""+r.status()+"\"}").getBytes(StandardCharsets.UTF_8));}catch(WarrantyService.NotFoundException e){return error(HttpStatus.NOT_FOUND,"质保案件不存在");}catch(IllegalStateException e){return error(HttpStatus.CONFLICT,"质保状态冲突");}}
+    @PostMapping(path="/api/warranty/{caseId}/assignments",consumes=MediaType.APPLICATION_JSON_VALUE,produces="application/json; charset=UTF-8")
+    public ResponseEntity<byte[]> assign(@PathVariable UUID caseId,@RequestBody AssignmentRequest req,Authentication auth){try{if(!admin(auth)||req==null||!user(auth).equals(req.adminId()))return error(HttpStatus.FORBIDDEN,"无权执行该角色操作");var r=warranties.assign(caseId,user(auth));return ResponseEntity.ok().contentType(JSON).body(("{\"caseId\":\""+r.caseId()+"\",\"status\":\""+r.status()+"\"}").getBytes(StandardCharsets.UTF_8));}catch(WarrantyService.NotFoundException e){return error(HttpStatus.NOT_FOUND,"质保案件不存在");}}
+    @PostMapping(path="/api/warranty/{caseId}/evidence",consumes=MediaType.MULTIPART_FORM_DATA_VALUE,produces="application/json; charset=UTF-8")
+    public ResponseEntity<byte[]> evidence(@PathVariable UUID caseId,@RequestPart("file") MultipartFile file,Authentication auth)throws Exception{try{var e=warranties.attachEvidence(caseId,user(auth),file.getOriginalFilename(),file.getContentType(),file.getInputStream());return ResponseEntity.status(HttpStatus.CREATED).contentType(JSON).body(("{\"evidenceId\":\""+e.id()+"\"}").getBytes(StandardCharsets.UTF_8));}catch(com.example.campusmarket.dispute.application.EvidenceStorage.NotFoundException ex){return error(HttpStatus.NOT_FOUND,"证据不存在");}}
+    @GetMapping("/api/warranty/{caseId}/evidence/{evidenceId}/content") public ResponseEntity<?> content(@PathVariable UUID caseId,@PathVariable UUID evidenceId,Authentication auth){try{var e=warranties.openEvidence(caseId,evidenceId,user(auth));return ResponseEntity.ok().contentType(MediaType.parseMediaType(e.mediaType())).body(new InputStreamResource(e.content()));}catch(com.example.campusmarket.dispute.application.EvidenceStorage.NotFoundException ex){return error(HttpStatus.NOT_FOUND,"证据不存在");}}
+    private static UUID user(Authentication a){if(a==null||!(a.getPrincipal() instanceof AuthenticatedUser u))throw new IllegalArgumentException("身份无效");return u.userId();} private static boolean admin(Authentication a){return a!=null&&a.getAuthorities().stream().anyMatch(x->"ROLE_ADMIN".equals(x.getAuthority()));} private static ResponseEntity<byte[]> error(HttpStatus s,String m){return ResponseEntity.status(s).contentType(JSON).body(("{\"error\":\""+m+"\"}").getBytes(StandardCharsets.UTF_8));}
+    @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown=false) public record OpenRequest(int quantity,String reason){}
+    @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown=false) public record DecisionRequest(WarrantyDecision decision,long compensationAmountFen,String evidenceId){}
+    @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown=false) public record AssignmentRequest(UUID adminId){}
+}

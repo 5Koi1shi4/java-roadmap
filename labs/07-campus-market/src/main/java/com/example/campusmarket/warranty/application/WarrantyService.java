@@ -1,0 +1,128 @@
+package com.example.campusmarket.warranty.application;
+
+import com.example.campusmarket.dispute.application.EvidenceStorage;
+import com.example.campusmarket.payment.application.RefundService;
+import com.example.campusmarket.order.domain.OrderStatus;
+import com.example.campusmarket.order.domain.TradeOrder;
+import com.example.campusmarket.catalog.domain.WarrantyTerm;
+import com.example.campusmarket.shared.Money;
+import com.example.campusmarket.warranty.domain.WarrantyCase;
+import com.example.campusmarket.warranty.domain.WarrantyDecision;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.context.annotation.Profile;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import java.nio.charset.StandardCharsets;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Objects;
+import java.util.UUID;
+
+/** 卖家延长质保用例；案件在结算后独立流转，不回写订单终态。 */
+@Service
+@Profile("!test")
+public final class WarrantyService {
+    private final JdbcTemplate jdbc;
+    private final TransactionTemplate transactions;
+    private final ObjectMapper mapper;
+    private final RefundService refunds;
+    private final EvidenceStorage evidence;
+
+    public WarrantyService(JdbcTemplate jdbc, org.springframework.transaction.PlatformTransactionManager tx,
+                           ObjectMapper mapper, RefundService refunds, EvidenceStorage evidence) {
+        this.jdbc=Objects.requireNonNull(jdbc); this.transactions=new TransactionTemplate(Objects.requireNonNull(tx));
+        this.mapper=Objects.requireNonNull(mapper); this.refunds=Objects.requireNonNull(refunds); this.evidence=Objects.requireNonNull(evidence);
+    }
+
+    public Result openWarrantyCase(UUID orderId, int quantity, String reason, String idempotencyKey, UUID buyerId) {
+        return openWarrantyCase(orderId, quantity, reason, idempotencyKey, buyerId, null);
+    }
+    /** 领域/批处理调用的便捷入口；HTTP 调用必须传入已认证买家。 */
+    public Result openWarrantyCase(UUID orderId, int quantity, String reason, String idempotencyKey) {
+        UUID buyer = jdbc.queryForObject("SELECT buyer_id FROM trade_order WHERE id=?", (rs,n)->UUID.fromString(rs.getString(1)), orderId.toString());
+        return openWarrantyCase(orderId, quantity, reason, idempotencyKey, buyer, null);
+    }
+    public Result openWarrantyCase(UUID orderId, int quantity, String reason, String idempotencyKey, UUID buyerId, byte[] request) {
+        if (idempotencyKey==null||idempotencyKey.isBlank()) throw new IllegalArgumentException("幂等键不能为空");
+        return transactions.execute(s -> {
+            JdbcTemplate j=jdbc;
+            Existing existing=j.query("SELECT id,order_id,status FROM warranty_case WHERE order_id=? AND idempotency_key=?", rs -> rs.next() ? new Existing(UUID.fromString(rs.getString(1)),rs.getString(2),rs.getString(3)):null, orderId.toString(),idempotencyKey);
+            if (existing!=null) return new Result(existing.id(),existing.status());
+            OrderFacts row=j.query("SELECT id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,warranty_days,warranty_scope_snapshot,manufacturer_warranty_proof_snapshot,manufacturer_warranty_expires_at,status,created_at,t0 FROM trade_order WHERE id=? FOR UPDATE",
+                rs -> rs.next()?new OrderFacts(UUID.fromString(rs.getString(1)),UUID.fromString(rs.getString(2)),UUID.fromString(rs.getString(3)),UUID.fromString(rs.getString(4)),rs.getString(5),rs.getString(6),rs.getLong(7),rs.getInt(8),(Integer)rs.getObject(9),rs.getString(10),rs.getString(11),ts(rs.getTimestamp(12)),OrderStatus.valueOf(rs.getString(13)),ts(rs.getTimestamp(14)),ts(rs.getTimestamp(15))):null,orderId.toString());
+            if(row==null||buyerId==null||!buyerId.equals(row.buyerId())) throw new NotFoundException();
+            Instant now=dbNow();
+            TradeOrder order=TradeOrder.reconstitute(row.id(),row.buyerId(),row.sellerId(),new TradeOrder.ListingSnapshot(row.listingId(),row.sellerId(),row.title(),row.description(),"snapshot",Money.ofFen(row.unitPriceFen()),row.warrantyDays()==null?WarrantyTerm.none():WarrantyTerm.sellerWarrantyDays(row.warrantyDays()),row.scope()==null?"SELLER_NON_HUMAN_FUNCTIONAL_FAILURE":row.scope(),row.manufacturerProof(),row.manufacturerExpires()),row.quantity(),row.t0()==null?row.createdAt():row.t0(),row.status());
+            WarrantyCase file=WarrantyCase.open(order,quantity,parseReason(reason),now);
+            j.update("INSERT INTO warranty_case(id,order_id,idempotency_key,buyer_id,seller_id,warranty_days,warranty_scope_snapshot,manufacturer_warranty_proof_snapshot,manufacturer_warranty_expires_at,disputed_quantity,reason,status,seller_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,'OPEN',?,0,?,?,?)",
+                file.id().toString(),orderId.toString(),idempotencyKey,buyerId.toString(),row.sellerId().toString(),file.warrantyDays(),file.warrantyScopeSnapshot(),file.manufacturerWarrantyProofSnapshot(),ts(file.manufacturerWarrantyExpiresAt()),quantity,file.reason().name(),ts(file.sellerDeadline()),ts(now),ts(now),ts(now));
+            j.update("INSERT INTO warranty_deadline_claim(id,warranty_case_id,deadline_type,due_at,status,created_at,updated_at) VALUES (?,?, 'SELLER_RESPONSE',?,'NEW',?,?), (?,?, 'ADMIN_SLA',?,'NEW',?,?), (?,?, 'HARD_DEADLINE',?,'NEW',?,?)",
+                UUID.randomUUID().toString(),file.id().toString(),ts(file.sellerDeadline()),ts(now),ts(now), UUID.randomUUID().toString(),file.id().toString(),ts(file.sellerDeadline().plusSeconds(7*86400L)),ts(now),ts(now), UUID.randomUUID().toString(),file.id().toString(),ts(file.sellerDeadline().plusSeconds(14*86400L)),ts(now),ts(now));
+            return new Result(file.id(),file.status().name());
+        });
+    }
+
+    public Result decide(UUID caseId, UUID adminId, WarrantyDecision decision, long compensationFen, String evidenceId) {
+        final long requestedCompensationFen = compensationFen;
+        DecisionResult result=transactions.execute(s -> {
+            long approvedCompensationFen = requestedCompensationFen;
+            UUID hintedOrder=jdbc.queryForObject("SELECT order_id FROM warranty_case WHERE id=?",(rs,n)->UUID.fromString(rs.getString(1)),caseId.toString());
+            jdbc.query("SELECT id FROM trade_order WHERE id=? FOR UPDATE",rs->{if(!rs.next())throw new NotFoundException();return rs.getString(1);},hintedOrder.toString());
+            CaseRow row=jdbc.query("SELECT id,order_id,buyer_id,seller_id,disputed_quantity,status,assigned_admin_id,version FROM warranty_case WHERE id=? FOR UPDATE",rs->rs.next()?new CaseRow(UUID.fromString(rs.getString(1)),UUID.fromString(rs.getString(2)),UUID.fromString(rs.getString(3)),UUID.fromString(rs.getString(4)),rs.getInt(5),rs.getString(6),uuid(rs.getString(7)),rs.getLong(8)):null,caseId.toString());
+            if(row==null||row.assignedAdmin()!=null&&!row.assignedAdmin().equals(adminId)) throw new NotFoundException();
+            if(decision==null) throw new IllegalArgumentException("裁定不能为空");
+            if(decision==WarrantyDecision.REPAIR_COMPENSATION && (evidenceId==null||evidenceId.isBlank())) throw new IllegalArgumentException("维修补偿必须有证据");
+            if (decision == WarrantyDecision.REPAIR_COMPENSATION) {
+                PaymentFacts payment = jdbc.query("SELECT paid_amount_fen,successful_refund_fen,reserved_refund_fen FROM payment_order WHERE order_id=? AND status='SUCCEEDED' FOR UPDATE",
+                    rs -> rs.next() ? new PaymentFacts(rs.getLong(1), rs.getLong(2), rs.getLong(3)) : null, row.orderId().toString());
+                if (payment == null) throw new IllegalStateException("订单尚未支付成功");
+                approvedCompensationFen = WarrantyCase.approvedCompensation(Money.ofFen(requestedCompensationFen), evidenceId,
+                    Money.ofFen(payment.paid()), Money.ofFen(payment.successful()), Money.ofFen(payment.reserved())).fen();
+            }
+            jdbc.update("UPDATE warranty_case SET status=?,decision=?,compensation_amount_fen=?,assigned_admin_id=?,version=version+1,closed_at=CURRENT_TIMESTAMP(6),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('OPEN','SELLER_RESPONDED','UNDER_REVIEW','ESCALATED') AND version=?",
+                decision==WarrantyDecision.REJECT?"REJECTED":"RESOLVED",decision.name(),decision==WarrantyDecision.REPAIR_COMPENSATION?approvedCompensationFen:0L,adminId.toString(),caseId.toString(),row.version());
+            if(decision==WarrantyDecision.REPAIR_COMPENSATION) {
+                if(approvedCompensationFen<=0) throw new IllegalArgumentException("补偿金额必须为正数");
+                UUID obligation=UUID.nameUUIDFromBytes(("warranty-obligation:"+caseId).getBytes(StandardCharsets.UTF_8));
+                String key="warranty:"+caseId;
+                jdbc.update("INSERT INTO seller_obligation(id,warranty_case_id,seller_id,obligation_business_key,obligation_amount_fen,funding_deadline,future_settlement_deduction_key,restriction_status,status,version,created_at,updated_at) VALUES (?,?,?,?,?,DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 72 HOUR),NULL,'RESTRICTED','AWAITING_FUNDING',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",
+                    obligation.toString(),caseId.toString(),row.sellerId().toString(),key,approvedCompensationFen);
+                jdbc.update("INSERT INTO seller_account_restriction(seller_id,restriction_type,source_obligation_id,status,created_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE status='ACTIVE',cleared_at=NULL",
+                    row.sellerId().toString(),"PUBLISH",obligation.toString());
+                jdbc.update("INSERT INTO seller_account_restriction(seller_id,restriction_type,source_obligation_id,status,created_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE status='ACTIVE',cleared_at=NULL",
+                    row.sellerId().toString(),"WITHDRAW",obligation.toString());
+            }
+            return new DecisionResult(row.orderId(),decision,approvedCompensationFen);
+        });
+        return new Result(caseId,"RESOLVED");
+    }
+
+    public Result respond(UUID caseId, UUID sellerId) {
+        return transactions.execute(s -> {
+            UUID order = jdbc.queryForObject("SELECT order_id FROM warranty_case WHERE id=?", (rs,n)->UUID.fromString(rs.getString(1)), caseId.toString());
+            jdbc.query("SELECT id FROM trade_order WHERE id=? AND seller_id=? FOR UPDATE", rs->{if(!rs.next())throw new NotFoundException();return rs.getString(1);}, order.toString(), sellerId.toString());
+            if (jdbc.update("UPDATE warranty_case SET status='SELLER_RESPONDED',version=version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND seller_id=? AND status='OPEN'", caseId.toString(), sellerId.toString()) != 1) throw new IllegalStateException("质保状态冲突");
+            return new Result(caseId,"SELLER_RESPONDED");
+        });
+    }
+
+    public Result assign(UUID caseId, UUID adminId) {
+        return transactions.execute(s -> {
+            if (jdbc.update("UPDATE warranty_case SET assigned_admin_id=?,status=CASE WHEN status='OPEN' THEN 'UNDER_REVIEW' ELSE status END,admin_deadline=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 7 DAY),hard_deadline=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 14 DAY),version=version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('OPEN','SELLER_RESPONDED','UNDER_REVIEW')", adminId.toString(), caseId.toString()) != 1) throw new NotFoundException();
+            jdbc.update("UPDATE warranty_deadline_claim SET due_at=CASE deadline_type WHEN 'ADMIN_SLA' THEN DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 7 DAY) WHEN 'HARD_DEADLINE' THEN DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 14 DAY) ELSE due_at END,status=CASE WHEN deadline_type IN ('ADMIN_SLA','HARD_DEADLINE') THEN 'NEW' ELSE status END,updated_at=CURRENT_TIMESTAMP(6) WHERE warranty_case_id=? AND deadline_type IN ('ADMIN_SLA','HARD_DEADLINE')", caseId.toString());
+            return new Result(caseId,"UNDER_REVIEW");
+        });
+    }
+
+    public EvidenceStorage.EvidenceRecord attachEvidence(UUID caseId, UUID actorId, String filename, String type, java.io.InputStream input) { return evidence.attach("WARRANTY",caseId,actorId,filename,type,input); }
+    public EvidenceStorage.OpenedEvidence openEvidence(UUID caseId, UUID evidenceId, UUID actorId) { return evidence.open("WARRANTY",caseId,evidenceId,actorId); }
+    public CaseView find(UUID caseId) { return jdbc.query("SELECT id,order_id,buyer_id,seller_id,status,decision,compensation_amount_fen,seller_deadline,admin_deadline,hard_deadline FROM warranty_case WHERE id=?",rs->rs.next()?new CaseView(UUID.fromString(rs.getString(1)),UUID.fromString(rs.getString(2)),UUID.fromString(rs.getString(3)),UUID.fromString(rs.getString(4)),rs.getString(5),rs.getString(6),rs.getLong(7),ts(rs.getTimestamp(8)),ts(rs.getTimestamp(9)),ts(rs.getTimestamp(10))):null,caseId.toString()); }
+    private WarrantyCase.Reason parseReason(String value) { try{return WarrantyCase.Reason.valueOf(value.trim().toUpperCase(java.util.Locale.ROOT));}catch(Exception e){throw new IllegalArgumentException("质保理由无效",e);} }
+    private Instant dbNow(){return jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)",Timestamp.class).toInstant();} private static Timestamp ts(Instant i){return i==null?null:Timestamp.from(i);} private static Instant ts(Timestamp t){return t==null?null:t.toInstant();} private static UUID uuid(String s){return s==null?null:UUID.fromString(s);}
+    private record Existing(UUID id,String orderId,String status){} private record OrderFacts(UUID id,UUID buyerId,UUID sellerId,UUID listingId,String title,String description,long unitPriceFen,int quantity,Integer warrantyDays,String scope,String manufacturerProof,Instant manufacturerExpires,OrderStatus status,Instant createdAt,Instant t0){} private record CaseRow(UUID id,UUID orderId,UUID buyerId,UUID sellerId,int quantity,String status,UUID assignedAdmin,long version){} private record DecisionResult(UUID orderId,WarrantyDecision decision,long amount){} private record PaymentFacts(long paid,long successful,long reserved){}
+    public record Result(UUID caseId,String status){} public record CaseView(UUID id,UUID orderId,UUID buyerId,UUID sellerId,String status,String decision,long compensationAmountFen,Instant sellerDeadline,Instant adminDeadline,Instant hardDeadline){}
+    public static class NotFoundException extends RuntimeException{}
+}

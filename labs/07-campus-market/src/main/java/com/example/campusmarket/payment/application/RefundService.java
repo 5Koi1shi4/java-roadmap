@@ -159,7 +159,7 @@ public class RefundService {
             if (existing.amountFen() != amount.fen() || (existing.requestHash() != null && !MessageDigest.isEqual(existing.requestHash(), requestHash))) throw new IdempotencyConflictException();
                 return new RefundIntent(null, null, null, 0L, null, null, new RefundResult(existing.id(), existing.providerReference(), existing.status(), existing.responseUtf8()));
         }
-        if ("SETTLED".equals(order.status())) throw new IllegalStateException("订单已结算，不能创建普通退款");
+        if ("SETTLED".equals(order.status()) && !"WARRANTY".equals(sourceType)) throw new IllegalStateException("订单已结算，不能创建普通退款");
         if (!repository.reserveRefund(payment.id(), amount.fen())) {
             JdbcPaymentRepository.RefundRecord concurrent = repository.findRefundByKey(orderId, idempotencyKey);
             if (concurrent != null && concurrent.amountFen() == amount.fen()

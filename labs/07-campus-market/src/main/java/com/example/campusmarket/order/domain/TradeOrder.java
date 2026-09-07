@@ -23,6 +23,11 @@ public final class TradeOrder {
 
     private TradeOrder(UUID id, UUID buyerId, UUID sellerId, ListingSnapshot snapshot,
                        int quantity, Instant createdAt) {
+        this(id, buyerId, sellerId, snapshot, quantity, createdAt, OrderStatus.PENDING_PAYMENT);
+    }
+
+    private TradeOrder(UUID id, UUID buyerId, UUID sellerId, ListingSnapshot snapshot,
+                       int quantity, Instant createdAt, OrderStatus status) {
         this.id = Objects.requireNonNull(id, "订单ID不能为空");
         this.buyerId = Objects.requireNonNull(buyerId, "买家不能为空");
         this.sellerId = Objects.requireNonNull(sellerId, "卖家不能为空");
@@ -40,12 +45,18 @@ public final class TradeOrder {
         this.totalAmount = snapshot.unitPrice().multiply(quantity);
         this.createdAt = Objects.requireNonNull(createdAt, "创建时间不能为空");
         this.paymentDeadline = createdAt.plusSeconds(PAYMENT_DEADLINE_SECONDS);
-        this.status = OrderStatus.PENDING_PAYMENT;
+        this.status = Objects.requireNonNull(status, "订单状态不能为空");
     }
 
     public static TradeOrder create(UUID id, UUID buyerId, UUID sellerId, ListingSnapshot snapshot,
                                     int quantity, Instant createdAt) {
         return new TradeOrder(id, buyerId, sellerId, snapshot, quantity, createdAt);
+    }
+
+    /** 仅用于从事实源恢复已存在订单，避免质保领域为了测试/读取修改订单状态。 */
+    public static TradeOrder reconstitute(UUID id, UUID buyerId, UUID sellerId, ListingSnapshot snapshot,
+                                          int quantity, Instant createdAt, OrderStatus status) {
+        return new TradeOrder(id, buyerId, sellerId, snapshot, quantity, createdAt, status);
     }
 
     public UUID id() { return id; }

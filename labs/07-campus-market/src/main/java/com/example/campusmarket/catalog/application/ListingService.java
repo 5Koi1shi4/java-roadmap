@@ -7,6 +7,7 @@ import com.example.campusmarket.storage.ObjectUploadCoordinator;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.InputStream;
 import java.util.UUID;
@@ -16,12 +17,19 @@ public class ListingService {
     private final ListingRepository listings;
     private final ObjectUploadCoordinator uploads;
     private final SearchOutboxRepository searchOutbox;
+    private final JdbcTemplate jdbc;
 
     @Autowired
     public ListingService(ListingRepository listings, ObjectUploadCoordinator uploads, SearchOutboxRepository searchOutbox) {
+        this(listings, uploads, searchOutbox, null);
+    }
+
+    @Autowired
+    public ListingService(ListingRepository listings, ObjectUploadCoordinator uploads, SearchOutboxRepository searchOutbox, JdbcTemplate jdbc) {
         this.listings = listings;
         this.uploads = uploads;
         this.searchOutbox = java.util.Objects.requireNonNull(searchOutbox, "搜索 Outbox 不能为空");
+        this.jdbc = jdbc;
     }
 
     @Transactional
@@ -35,6 +43,7 @@ public class ListingService {
 
     @Transactional
     public Listing publish(UUID sellerId, UUID listingId) {
+        if (isRestricted(sellerId, "PUBLISH")) throw new RestrictionException();
         Listing listing = owned(sellerId, listingId);
         if (!listings.hasMedia(listingId)) throw new IllegalStateException("商品至少需要一张媒体");
         listing.publish();
@@ -66,6 +75,15 @@ public class ListingService {
         return new MediaContent(media.mediaType(), media.sizeBytes(), media.objectKey());
     }
 
+    public boolean canPublish(UUID sellerId) { return !isRestricted(sellerId, "PUBLISH"); }
+    public boolean canWithdraw(UUID sellerId) { return !isRestricted(sellerId, "WITHDRAW"); }
+
+    private boolean isRestricted(UUID sellerId, String type) {
+        if (jdbc == null || sellerId == null) return false;
+        Integer n = jdbc.queryForObject("SELECT COUNT(*) FROM seller_account_restriction WHERE seller_id=? AND restriction_type=? AND status='ACTIVE'", Integer.class, sellerId.toString(), type);
+        return n != null && n > 0;
+    }
+
     private Listing owned(UUID sellerId, UUID listingId) {
         Listing listing = listings.findById(listingId).orElseThrow(NotFoundException::new);
         if (!listing.sellerId().equals(sellerId)) throw new NotFoundException();
@@ -74,4 +92,5 @@ public class ListingService {
 
     public record MediaContent(String mediaType, long sizeBytes, String objectKey) { }
     public static class NotFoundException extends RuntimeException { }
+    public static class RestrictionException extends RuntimeException { }
 }

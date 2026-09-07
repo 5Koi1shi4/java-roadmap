@@ -146,7 +146,7 @@ public class JdbcDisputeRepository {
     }
 
     public EvidenceRow evidence(UUID evidenceId) {
-        return jdbc.query("SELECT e.id,e.dispute_case_id,e.object_key,e.media_type,e.size_bytes,c.order_id,o.buyer_id,o.seller_id,c.assigned_admin_id FROM dispute_evidence e JOIN dispute_case c ON c.id=e.dispute_case_id JOIN trade_order o ON o.id=c.order_id WHERE e.id=?",
+        return jdbc.query("SELECT e.id,COALESCE(e.dispute_case_id,e.warranty_case_id),e.object_key,e.media_type,e.size_bytes,COALESCE(d.order_id,w.order_id),COALESCE(o.buyer_id,w.buyer_id),COALESCE(o.seller_id,w.seller_id),COALESCE(d.assigned_admin_id,w.assigned_admin_id) FROM dispute_evidence e LEFT JOIN dispute_case d ON d.id=e.dispute_case_id LEFT JOIN warranty_case w ON w.id=e.warranty_case_id LEFT JOIN trade_order o ON o.id=d.order_id WHERE e.id=?",
             rs -> rs.next() ? new EvidenceRow(UUID.fromString(rs.getString("id")), UUID.fromString(rs.getString("dispute_case_id")),
                 rs.getString("object_key"), rs.getString("media_type"), rs.getLong("size_bytes"), UUID.fromString(rs.getString("order_id")),
                 UUID.fromString(rs.getString("buyer_id")), UUID.fromString(rs.getString("seller_id")), uuid(rs.getString("assigned_admin_id"))) : null,
@@ -163,9 +163,16 @@ public class JdbcDisputeRepository {
         jdbc.update("INSERT INTO dispute_evidence (id,dispute_case_id,warranty_case_id,case_type,submitted_by,object_key,media_type,size_bytes,created_at) VALUES (?,? ,NULL,'DISPUTE',?,?,?, ?,?)",
             evidenceId.toString(), caseId.toString(), actorId.toString(), key, type, size, Timestamp.from(now));
     }
+    public void insertWarrantyEvidence(UUID evidenceId, UUID caseId, UUID actorId, String key, String type, long size, Instant now) {
+        jdbc.update("INSERT INTO dispute_evidence (id,dispute_case_id,warranty_case_id,case_type,submitted_by,object_key,media_type,size_bytes,created_at) VALUES (?,NULL,?,'WARRANTY',?,?,?, ?,?)",
+            evidenceId.toString(), caseId.toString(), actorId.toString(), key, type, size, Timestamp.from(now));
+    }
 
     public void createSession(UUID sessionId, UUID actorId, String key, String claimToken) {
         jdbc.update("INSERT INTO object_upload_session (id,submitted_by,purpose,object_key,status,claim_token,owner_id,expires_at,created_at,updated_at) VALUES (?,?,'DISPUTE_EVIDENCE',?,'OPEN',?,?,DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 1 HOUR),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", sessionId.toString(), actorId.toString(), key, claimToken, actorId.toString());
+    }
+    public void createWarrantySession(UUID sessionId, UUID actorId, String key, String claimToken) {
+        jdbc.update("INSERT INTO object_upload_session (id,submitted_by,purpose,object_key,status,claim_token,owner_id,expires_at,created_at,updated_at) VALUES (?,?,'WARRANTY_EVIDENCE',?,'OPEN',?,?,DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 1 HOUR),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", sessionId.toString(), actorId.toString(), key, claimToken, actorId.toString());
     }
     public int completeSession(UUID id, UUID ownerId, String claimToken) { return jdbc.update("UPDATE object_upload_session SET status='COMPLETED',owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='OPEN' AND owner_id=? AND claim_token=? AND expires_at > CURRENT_TIMESTAMP(6)", id.toString(), ownerId.toString(), claimToken); }
     public int abortSession(UUID id, UUID ownerId, String claimToken) { return jdbc.update("UPDATE object_upload_session SET status='ABORTED',owner_id=NULL,claim_token=NULL,lease_until=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='OPEN' AND owner_id=? AND claim_token=?", id.toString(), ownerId.toString(), claimToken); }

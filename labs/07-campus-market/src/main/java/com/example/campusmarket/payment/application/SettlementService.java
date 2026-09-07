@@ -49,6 +49,7 @@ public class SettlementService {
         UUID settlementId = UUID.nameUUIDFromBytes(("settlement:" + orderId).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         jdbc.update("INSERT INTO settlement (id,order_id,paid_amount_fen,successful_refund_fen,net_settlement_fen,status,created_at,settled_at) VALUES (?,?,?,?,?,'SETTLED',?,?) ON DUPLICATE KEY UPDATE status='SETTLED',net_settlement_fen=VALUES(net_settlement_fen),settled_at=VALUES(settled_at)",
             settlementId.toString(), orderId.toString(), payment.paidAmountFen(), payment.successfulRefundFen(), net, Timestamp.from(now), Timestamp.from(now));
+        applySellerObligations(orderId, settlementId, net, now);
         jdbc.update("UPDATE trade_order SET status='SETTLED',version=version+1,updated_at=? WHERE id=? AND status='AFTERSALE_WINDOW'", Timestamp.from(now), orderId.toString());
         UUID eventId = UUID.nameUUIDFromBytes(("settlement-created:" + orderId).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         String payload = "{\"settlementId\":\"" + settlementId + "\",\"orderId\":\"" + orderId
@@ -96,7 +97,30 @@ public class SettlementService {
     }
     private Instant databaseNow() { return jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class).toInstant(); }
 
+    /** 未来结算按最早到期义务抵扣；唯一业务键防止同一结算重复扣款。 */
+    private void applySellerObligations(UUID orderId, UUID settlementId, long net, Instant now) {
+        UUID seller = jdbc.queryForObject("SELECT seller_id FROM trade_order WHERE id=?", (rs, n) -> UUID.fromString(rs.getString(1)), orderId.toString());
+        long remaining = net;
+        var obligations = jdbc.query("SELECT id,obligation_amount_fen,funded_amount_fen FROM seller_obligation WHERE seller_id=? AND status IN ('AWAITING_FUNDING','PARTIALLY_FUNDED') AND funding_deadline>=? ORDER BY funding_deadline,id FOR UPDATE",
+            (rs, n) -> new Obligation(UUID.fromString(rs.getString(1)), rs.getLong(2), rs.getLong(3)), seller.toString(), Timestamp.from(now));
+        for (Obligation obligation : obligations) {
+            if (remaining <= 0) break;
+            long due = Math.min(remaining, obligation.amount() - obligation.funded());
+            if (due <= 0) continue;
+            if (jdbc.update("INSERT INTO settlement_obligation_deduction(id,settlement_id,obligation_id,amount_fen,created_at) VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE id=id",
+                UUID.randomUUID().toString(), settlementId.toString(), obligation.id().toString(), due, Timestamp.from(now)) == 1) {
+                long funded = obligation.funded() + due;
+                jdbc.update("UPDATE seller_obligation SET funded_amount_fen=?,status=?,restriction_status=?,version=version+1,updated_at=? WHERE id=? AND funded_amount_fen=?",
+                    funded, funded == obligation.amount() ? "FUNDED" : "PARTIALLY_FUNDED", funded == obligation.amount() ? "NONE" : "RESTRICTED", Timestamp.from(now), obligation.id().toString(), obligation.funded());
+                if (funded == obligation.amount()) jdbc.update("UPDATE seller_account_restriction SET status='CLEARED',cleared_at=? WHERE source_obligation_id=? AND status='ACTIVE'", Timestamp.from(now), obligation.id().toString());
+                remaining -= due;
+            }
+        }
+        if (remaining != net) jdbc.update("UPDATE settlement SET net_settlement_fen=? WHERE id=?", remaining, settlementId.toString());
+    }
+
     public record SettlementResult(UUID orderId, String status, long netSettlementFen, String blockedReason) {}
     private record OrderFacts(UUID id, String status, Instant t0) {}
     private record PaymentFacts(long paidAmountFen, long successfulRefundFen, long reservedRefundFen) {}
+    private record Obligation(UUID id, long amount, long funded) {}
 }

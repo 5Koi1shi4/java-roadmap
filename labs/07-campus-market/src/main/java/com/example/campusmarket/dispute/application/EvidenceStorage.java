@@ -42,11 +42,15 @@ public final class EvidenceStorage {
     }
 
     public EvidenceRecord attach(UUID caseId, UUID actorId, String filename, String declaredType, InputStream input) {
-        if (!access.canAttach("DISPUTE", caseId, actorId)) throw new NotFoundException();
+        return attach("DISPUTE", caseId, actorId, filename, declaredType, input);
+    }
+
+    public EvidenceRecord attach(String caseType, UUID caseId, UUID actorId, String filename, String declaredType, InputStream input) {
+        if (!access.canAttach(caseType, caseId, actorId)) throw new NotFoundException();
         UUID session = UUID.randomUUID();
         String key = "dispute-evidence/" + randomToken();
         String claimToken = randomToken();
-        transactions.executeWithoutResult(s -> repository.createSession(session, actorId, key, claimToken));
+        transactions.executeWithoutResult(s -> { if ("WARRANTY".equals(caseType)) repository.createWarrantySession(session, actorId, key, claimToken); else repository.createSession(session, actorId, key, claimToken); });
         Path temp = null;
         try {
             temp = readBounded(input).path();
@@ -56,9 +60,10 @@ public final class EvidenceStorage {
             try (InputStream content = Files.newInputStream(temp)) { storage.put(key, content, size, detected); }
             UUID evidenceId = UUID.randomUUID();
             EvidenceRecord result = transactions.execute(s -> {
-                if (!access.canAttach("DISPUTE", caseId, actorId)) throw new NotFoundException();
+                if (!access.canAttach(caseType, caseId, actorId)) throw new NotFoundException();
                 InstantHolder now = new InstantHolder(repository.databaseNow());
-                repository.insertEvidence(evidenceId, caseId, actorId, key, detected, size, now.value);
+                if ("WARRANTY".equals(caseType)) repository.insertWarrantyEvidence(evidenceId, caseId, actorId, key, detected, size, now.value);
+                else repository.insertEvidence(evidenceId, caseId, actorId, key, detected, size, now.value);
                 if (repository.completeSession(session, actorId, claimToken) != 1)
                     throw new IllegalStateException("上传会话已过期或已被接管");
                 return new EvidenceRecord(evidenceId, caseId, detected, size);
@@ -74,9 +79,12 @@ public final class EvidenceStorage {
     }
 
     public OpenedEvidence open(UUID caseId, UUID evidenceId, UUID actorId) {
-        if (!access.canRead("DISPUTE", caseId, actorId)) throw new NotFoundException();
+        return open("DISPUTE", caseId, evidenceId, actorId);
+    }
+    public OpenedEvidence open(String caseType, UUID caseId, UUID evidenceId, UUID actorId) {
+        if (!access.canRead(caseType, caseId, actorId)) throw new NotFoundException();
         JdbcDisputeRepository.EvidenceRow evidence = repository.evidence(evidenceId);
-        if (evidence == null || !caseId.equals(evidence.caseId()) || !access.canRead("DISPUTE", caseId, actorId)) throw new NotFoundException();
+        if (evidence == null || !caseId.equals(evidence.caseId()) || !access.canRead(caseType, caseId, actorId)) throw new NotFoundException();
         try { return new OpenedEvidence(storage.open(evidence.objectKey()), evidence.mediaType()); }
         catch (MinioPrivateObjectStorage.StorageUnavailableException ex) { throw new StorageUnavailableException(); }
         catch (MinioPrivateObjectStorage.ObjectNotFoundException ex) { throw new NotFoundException(); }
