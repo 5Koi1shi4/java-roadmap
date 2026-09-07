@@ -4,6 +4,7 @@ import com.example.campusmarket.identity.domain.CampusEmail;
 import com.example.campusmarket.identity.infrastructure.RedisVerificationCodeStore;
 import com.example.campusmarket.observability.CampusMetrics;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -27,13 +28,20 @@ public class EmailVerificationService {
 
     public EmailVerificationService(JdbcTemplate jdbc, RedisVerificationCodeStore store,
                                     VerificationMailSender mailSender,
+                                    @Value("${campus.market.identity.allowed-domains}") Set<String> allowedDomains) {
+        this(jdbc, store, mailSender, allowedDomains, null);
+    }
+
+    @Autowired
+    public EmailVerificationService(JdbcTemplate jdbc, RedisVerificationCodeStore store,
+                                    VerificationMailSender mailSender,
                                     @Value("${campus.market.identity.allowed-domains}") Set<String> allowedDomains,
                                     CampusMetrics metrics) {
         this.jdbc = jdbc;
         this.store = Objects.requireNonNull(store, "验证码存储不能为空");
         this.mailSender = Objects.requireNonNull(mailSender, "验证码邮件发送器不能为空");
         this.allowedDomains = Objects.requireNonNull(allowedDomains, "允许的邮箱域不能为空");
-        this.metrics = Objects.requireNonNull(metrics, "指标门面不能为空");
+        this.metrics = metrics;
     }
 
     public String issue(String rawEmail, String client) {
@@ -57,13 +65,13 @@ public class EmailVerificationService {
                 issued.hmac().getBytes(java.nio.charset.StandardCharsets.UTF_8),
                 Timestamp.from(now.plus(TTL)), Timestamp.from(now));
             mailSender.send(email, issued.code());
-            metrics.recordVerification("SENT");
+            if (metrics != null) metrics.recordVerification("SENT");
             return issued.code();
         } catch (RedisVerificationCodeStore.TooManyVerificationRequestsException limited) {
-            metrics.recordVerification("RATE_LIMITED");
+            if (metrics != null) metrics.recordVerification("RATE_LIMITED");
             throw limited;
         } catch (RuntimeException failure) {
-            metrics.recordVerification("FAILURE");
+            if (metrics != null) metrics.recordVerification("FAILURE");
             throw failure;
         }
     }
@@ -80,7 +88,7 @@ public class EmailVerificationService {
         try {
             return verifyInternal(rawEmail, code, remoteIp, deviceId, purpose);
         } catch (RuntimeException failure) {
-            metrics.recordVerification("FAILURE");
+            if (metrics != null) metrics.recordVerification("FAILURE");
             throw failure;
         }
     }
@@ -89,11 +97,10 @@ public class EmailVerificationService {
         CampusEmail email = CampusEmail.parse(rawEmail, allowedDomains);
         String normalizedPurpose = normalizePurpose(purpose);
         if (!store.reserveFailureAttempt(email.value(), normalizedPurpose, remoteIp, deviceId)) {
-            metrics.recordVerification("RATE_LIMITED");
+            if (metrics != null) metrics.recordVerification("RATE_LIMITED");
             jdbc.update("UPDATE email_verification SET status = 'LOCKED' "
                     + "WHERE email = ? AND purpose = ? AND status = 'PENDING' "
                     + "ORDER BY created_at DESC LIMIT 1", email.value(), normalizedPurpose);
-            metrics.recordVerification("FAILURE");
             return false;
         }
         boolean consumed = store.consume(email.value(), normalizedPurpose, code);
@@ -103,14 +110,14 @@ public class EmailVerificationService {
                     + "attempt_count = attempt_count + 1 "
                     + "WHERE email = ? AND purpose = ? AND status = 'PENDING' "
                     + "ORDER BY created_at DESC LIMIT 1", email.value(), normalizedPurpose);
-            metrics.recordVerification("FAILURE");
+            if (metrics != null) metrics.recordVerification("FAILURE");
             return false;
         }
         int updated = jdbc.update("UPDATE email_verification SET status = 'VERIFIED', consumed_at = ? "
                 + "WHERE email = ? AND purpose = ? AND status = 'PENDING' "
                 + "ORDER BY created_at DESC LIMIT 1", Timestamp.from(Instant.now()), email.value(), normalizedPurpose);
-        if (updated == 1) metrics.recordVerification("VERIFIED");
-        else metrics.recordVerification("FAILURE");
+        if (updated == 1) { if (metrics != null) metrics.recordVerification("VERIFIED"); }
+        else if (metrics != null) metrics.recordVerification("FAILURE");
         return updated == 1;
     }
 

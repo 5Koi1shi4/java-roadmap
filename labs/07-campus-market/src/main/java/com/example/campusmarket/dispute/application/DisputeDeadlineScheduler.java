@@ -1,6 +1,7 @@
 package com.example.campusmarket.dispute.application;
 
 import com.example.campusmarket.dispute.domain.ReturnProofType;
+import com.example.campusmarket.observability.CampusMetrics;
 import com.example.campusmarket.dispute.infrastructure.JdbcDisputeRepository;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Profile;
@@ -29,13 +30,21 @@ public final class DisputeDeadlineScheduler {
     private final ReturnResolutionService resolutions;
     private final JdbcDisputeRepository disputeRepository;
     private final String owner = "dispute-deadline-" + UUID.randomUUID();
+    private final CampusMetrics metrics;
 
     public DisputeDeadlineScheduler(JdbcTemplate jdbc, org.springframework.transaction.PlatformTransactionManager transactionManager,
                                     ReturnResolutionService resolutions, JdbcDisputeRepository disputeRepository) {
+        this(jdbc, transactionManager, resolutions, disputeRepository, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public DisputeDeadlineScheduler(JdbcTemplate jdbc, org.springframework.transaction.PlatformTransactionManager transactionManager,
+                                    ReturnResolutionService resolutions, JdbcDisputeRepository disputeRepository, CampusMetrics metrics) {
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.transactions = new TransactionTemplate(Objects.requireNonNull(transactionManager, "事务管理器不能为空"));
         this.resolutions = Objects.requireNonNull(resolutions, "退回解析服务不能为空");
         this.disputeRepository = Objects.requireNonNull(disputeRepository, "争议仓储不能为空");
+        this.metrics = metrics;
     }
 
     @Scheduled(initialDelayString = "${campus.market.dispute.deadline.initial-delay-ms:0}", fixedDelayString = "${campus.market.dispute.deadline.fixed-delay-ms:1000}")
@@ -109,7 +118,7 @@ public final class DisputeDeadlineScheduler {
         if ("OPEN".equals(row.status())) {
             int changed = jdbc.update("UPDATE dispute_case SET status='UNDER_REVIEW',admin_deadline=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 7 DAY),hard_deadline=DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 14 DAY),version=version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='OPEN'",
                 row.caseId().toString());
-            if (changed == 1) armAdminClaims(row.caseId());
+            if (changed == 1) { if (metrics != null) metrics.recordSellerResponseTimeout(); armAdminClaims(row.caseId()); }
         }
         return true;
     }
@@ -131,7 +140,7 @@ public final class DisputeDeadlineScheduler {
             return;
         }
         int changed = jdbc.update("UPDATE dispute_case SET admin_sla_alerted_at=COALESCE(admin_sla_alerted_at,CURRENT_TIMESTAMP(6)),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('OPEN','SELLER_RESPONDED','UNDER_REVIEW','ESCALATED') AND admin_sla_alerted_at IS NULL", row.caseId().toString());
-        if (changed == 1) insertEvent("DISPUTE_SLA_ALERT", row.orderId(), row.caseId(), "adminDeadline");
+        if (changed == 1) { if (metrics != null) metrics.recordAdminSlaTimeout(); insertEvent("DISPUTE_SLA_ALERT", row.orderId(), row.caseId(), "adminDeadline"); }
     }
 
     private void hardDeadline(CaseFacts row, Instant now, ClaimHandle handle, Claim claim) {
@@ -178,7 +187,8 @@ public final class DisputeDeadlineScheduler {
     }
 
     private void escalate(UUID caseId) {
-        jdbc.update("UPDATE dispute_case SET status='ESCALATED',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('OPEN','SELLER_RESPONDED','UNDER_REVIEW')", caseId.toString());
+        int changed = jdbc.update("UPDATE dispute_case SET status='ESCALATED',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status IN ('OPEN','SELLER_RESPONDED','UNDER_REVIEW')", caseId.toString());
+        if (changed == 1 && metrics != null) metrics.recordHardDeadlineEscalation();
     }
 
     private void defer(ClaimHandle handle, Claim claim, Instant dueAt) {

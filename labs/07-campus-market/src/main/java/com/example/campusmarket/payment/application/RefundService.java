@@ -2,6 +2,7 @@ package com.example.campusmarket.payment.application;
 
 import com.example.campusmarket.payment.infrastructure.JdbcPaymentRepository;
 import com.example.campusmarket.observability.CampusMetrics;
+import com.example.campusmarket.observability.AfterCommitMetrics;
 import com.example.campusmarket.shared.Money;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.context.annotation.Profile;
@@ -275,12 +276,12 @@ public class RefundService {
         JdbcPaymentRepository.RefundRecord refund = repository.findRefundByProviderReference(callback.provider(), callback.providerReference());
         if (refund == null) {
             if (!repository.failCallback(callback.provider(), callback.providerEventId())) throw new IllegalStateException("退款回调失败 CAS 失败，等待重试");
-            recordMetric("UNKNOWN");
+            AfterCommitMetrics.record(() -> recordMetric("UNKNOWN"));
             return;
         }
         if (callback.amountFen() != refund.amountFen()) {
             if (!repository.failCallback(callback.provider(), callback.providerEventId())) throw new IllegalStateException("退款回调失败 CAS 失败，等待重试");
-            recordMetric("FAILURE");
+            AfterCommitMetrics.record(() -> recordMetric("FAILURE"));
             return;
         }
         if ("SUCCEEDED".equals(callback.status())) {
@@ -298,7 +299,11 @@ public class RefundService {
         }
         if (!repository.completeCallback(callback.provider(), callback.providerEventId()))
             throw new IllegalStateException("退款回调完成 CAS 失败，等待重试");
-        recordMetric("SUCCEEDED".equals(callback.status()) ? "SUCCEEDED" : "FAILED");
+        String result = switch (callback.status()) {
+            case "SUCCEEDED", "FAILED", "PENDING", "UNKNOWN" -> callback.status();
+            default -> "UNKNOWN";
+        };
+        AfterCommitMetrics.record(() -> recordMetric(result));
     }
 
     private void recordMetric(String result) { if (metrics != null) metrics.recordRefund(result); }

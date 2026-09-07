@@ -84,18 +84,19 @@ public class OutboxDispatcher {
                 properties.setDeliveryMode(MessageDeliveryMode.PERSISTENT);
                 eventPublisher.publish(message.eventType(),
                     new Message(codec.encode(event), properties));
-                completed += repository.complete(message.eventId(), message.ownerId(), message.claimToken());
-                recordOutbox("PUBLISHED");
+                int changed = repository.complete(message.eventId(), message.ownerId(), message.claimToken());
+                completed += changed;
+                if (changed == 1) recordOutbox("PUBLISHED");
             } catch (RuntimeException failure) {
                 if (failure instanceof IllegalArgumentException) {
-                    repository.fail(message.eventId(), message.ownerId(), message.claimToken(), "PERMANENT");
-                    recordOutbox("FAILED");
+                    if (repository.fail(message.eventId(), message.ownerId(), message.claimToken(), "PERMANENT") == 1)
+                        recordOutbox("FAILED");
                 } else if (message.attemptCount() >= 3) {
-                    repository.fail(message.eventId(), message.ownerId(), message.claimToken(), "EXHAUSTED");
-                    recordOutbox("FAILED");
+                    if (repository.fail(message.eventId(), message.ownerId(), message.claimToken(), "EXHAUSTED") == 1)
+                        recordOutbox("FAILED");
                 } else {
-                    repository.releaseForRetry(message.eventId(), message.ownerId(), message.claimToken(), Duration.ofSeconds(1));
-                    recordRetry("RETRY");
+                    if (repository.releaseForRetry(message.eventId(), message.ownerId(), message.claimToken(), Duration.ofSeconds(1)) == 1)
+                        recordRetry("RETRY");
                 }
             }
         }

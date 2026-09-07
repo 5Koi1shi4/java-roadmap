@@ -41,19 +41,13 @@ public class StorageCleanupScheduler {
             long started = System.nanoTime();
             try {
                 storage.delete(task.objectKey());
-                complete(task);
-                recordStorage("SUCCESS", started);
-                completed++;
+                if (complete(task)) { recordStorage("SUCCESS", started); completed++; }
             } catch (MinioPrivateObjectStorage.ObjectNotFoundException e) {
-                complete(task);
-                recordStorage("SUCCESS", started);
-                completed++;
+                if (complete(task)) { recordStorage("SUCCESS", started); completed++; }
             } catch (MinioPrivateObjectStorage.StorageUnavailableException e) {
-                release(task, "TRANSIENT");
-                recordStorage("TIMEOUT", started);
+                if (release(task, "TRANSIENT")) recordStorage("TIMEOUT", started);
             } catch (RuntimeException e) {
-                release(task, "UNKNOWN");
-                recordStorage("FAILURE", started);
+                if (release(task, "UNKNOWN")) recordStorage("FAILURE", started);
             }
         }
         return completed;
@@ -108,14 +102,16 @@ public class StorageCleanupScheduler {
         return List.of();
     }
 
-    protected void complete(Task task) {
-        transactions.executeWithoutResult(status -> jdbc.update("UPDATE storage_cleanup_task SET status='COMPLETED', lease_until=NULL, updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='PROCESSING' AND owner_id=? AND claim_token=?",
+    protected boolean complete(Task task) {
+        Integer changed = transactions.execute(status -> jdbc.update("UPDATE storage_cleanup_task SET status='COMPLETED', lease_until=NULL, updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='PROCESSING' AND owner_id=? AND claim_token=?",
             task.id(), task.owner(), task.token()));
+        return changed != null && changed == 1;
     }
 
-    protected void release(Task task, String failureClass) {
-        transactions.executeWithoutResult(status -> jdbc.update("UPDATE storage_cleanup_task SET status='PENDING', failure_class=?, lease_until=NULL, run_after=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND), updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='PROCESSING' AND owner_id=? AND claim_token=?",
+    protected boolean release(Task task, String failureClass) {
+        Integer changed = transactions.execute(status -> jdbc.update("UPDATE storage_cleanup_task SET status='PENDING', failure_class=?, lease_until=NULL, run_after=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND), updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='PROCESSING' AND owner_id=? AND claim_token=?",
             failureClass, task.id(), task.owner(), task.token()));
+        return changed != null && changed == 1;
     }
 
     private record Candidate(String id, String objectKey) { }

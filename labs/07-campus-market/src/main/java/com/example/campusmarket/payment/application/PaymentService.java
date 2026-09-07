@@ -2,9 +2,11 @@ package com.example.campusmarket.payment.application;
 
 import com.example.campusmarket.payment.infrastructure.JdbcPaymentRepository;
 import com.example.campusmarket.observability.CampusMetrics;
+import com.example.campusmarket.observability.AfterCommitMetrics;
 import com.example.campusmarket.shared.Money;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -29,13 +31,20 @@ public class PaymentService {
 
     public PaymentService(JdbcPaymentRepository repository, PaymentGateway gateway,
                           @Value("${campus.market.payment.provider:simulated}") String provider,
+                          PlatformTransactionManager transactionManager, ObjectMapper mapper) {
+        this(repository, gateway, provider, transactionManager, mapper, null);
+    }
+
+    @Autowired
+    public PaymentService(JdbcPaymentRepository repository, PaymentGateway gateway,
+                          @Value("${campus.market.payment.provider:simulated}") String provider,
                           PlatformTransactionManager transactionManager, ObjectMapper mapper, CampusMetrics metrics) {
         this.repository = Objects.requireNonNull(repository, "支付仓储不能为空");
         this.gateway = Objects.requireNonNull(gateway, "支付网关不能为空");
         this.provider = Objects.requireNonNull(provider, "支付提供方不能为空");
         this.transactions = new TransactionTemplate(Objects.requireNonNull(transactionManager, "事务管理器不能为空"));
         this.mapper = Objects.requireNonNull(mapper, "JSON序列化器不能为空");
-        this.metrics = Objects.requireNonNull(metrics, "指标门面不能为空");
+        this.metrics = metrics;
     }
 
     public PaymentResult createPayment(UUID orderId, String idempotencyKey) {
@@ -159,7 +168,7 @@ public class PaymentService {
     @Transactional
     public CallbackResult handleCallback(PaymentGateway.VerifiedCallback callback, byte[] rawBody) {
         if (!repository.recordCallback(callback, rawBody)) {
-            metrics.recordPaymentCallback("DUPLICATE");
+            if (metrics != null) metrics.recordPaymentCallback("DUPLICATE");
             return new CallbackResult(true, false);
         }
         boolean matched = false;
@@ -197,7 +206,13 @@ public class PaymentService {
             }
         }
         repository.completeCallback(callback.provider(), callback.providerEventId());
-        metrics.recordPaymentCallback(matched ? "SUCCEEDED" : "UNKNOWN");
+        String result = switch (callback.status()) {
+            case "SUCCEEDED" -> matched ? "SUCCEEDED" : "UNKNOWN";
+            case "FAILED" -> "FAILED";
+            case "PENDING" -> "PENDING";
+            default -> "UNKNOWN";
+        };
+        if (metrics != null) AfterCommitMetrics.record(() -> metrics.recordPaymentCallback(result));
         return new CallbackResult(true, true);
     }
 

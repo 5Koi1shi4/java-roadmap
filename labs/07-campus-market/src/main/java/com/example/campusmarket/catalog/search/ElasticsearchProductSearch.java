@@ -106,11 +106,11 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
 
     @Override
     public SearchPage search(SearchRequest request) {
-        initializeIfNeeded();
-        Objects.requireNonNull(request, "搜索请求不能为空");
         long started = System.nanoTime();
         String pit = null;
         try {
+            initializeIfNeeded();
+            Objects.requireNonNull(request, "搜索请求不能为空");
             Query query = query(request);
             ProductSearchPort.SearchCursor cursor = request.searchAfter() == null ? null : ProductSearchPort.decodeCursor(request.searchAfter());
             String fingerprint = fingerprint(request);

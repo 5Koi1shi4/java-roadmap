@@ -53,12 +53,13 @@ public class SearchOutboxDispatcher {
                 DomainEvent event = new DomainEvent(UUID.fromString(claim.id()), claim.eventType(), claim.listingId().toString(),
                     claim.aggregateVersion(), claim.createdAt(), 1, decode(claim.payload()));
                 projector.project(event);
-                completed += complete(claim);
-                if (metrics != null) metrics.recordOutbox("PUBLISHED");
+                int changed = complete(claim);
+                completed += changed;
+                if (changed == 1 && metrics != null) metrics.recordOutbox("PUBLISHED");
             } catch (RuntimeException failure) {
                 if (failure instanceof SearchGateRepository.SearchGateClosedException) defer(claim);
-                else if (claim.attemptCount() >= 3) { fail(claim); if (metrics != null) metrics.recordOutbox("FAILED"); }
-                else { releaseForRetry(claim); if (metrics != null) metrics.recordRetry("OUTBOX", "RETRY"); }
+                else if (claim.attemptCount() >= 3) { if (fail(claim) == 1 && metrics != null) metrics.recordOutbox("FAILED"); }
+                else { if (releaseForRetry(claim) == 1 && metrics != null) metrics.recordRetry("OUTBOX", "RETRY"); }
             }
         }
         return completed;

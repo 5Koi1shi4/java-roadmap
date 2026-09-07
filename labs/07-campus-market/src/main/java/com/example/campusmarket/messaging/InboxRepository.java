@@ -80,7 +80,7 @@ public class InboxRepository {
         String status = jdbc.queryForObject("SELECT status FROM consumed_event WHERE consumer_name=? AND event_id=?",
             String.class, consumerName, eventId.toString());
         return "COMPLETED".equals(status) || "FAILED".equals(status)
-            ? Optional.of(new Claim(consumerName, eventId, null, null, "COMPLETED".equals(status), "FAILED".equals(status)))
+            ? Optional.of(new Claim(consumerName, eventId, null, null, "COMPLETED".equals(status), "FAILED".equals(status), exhausted == 1))
             : Optional.empty();
     }
 
@@ -169,6 +169,7 @@ public class InboxRepository {
         if (claimed.isEmpty()) return DeliveryResult.NOT_CLAIMED;
         Claim claim = claimed.get();
         if (claim.alreadyCompleted()) return DeliveryResult.COMPLETED;
+        if (claim.leaseTakeover()) return DeliveryResult.LEASE_TAKEOVER;
         if (claim.failed()) return DeliveryResult.FAILED;
         if (transactionTemplate == null) {
             throw new IllegalStateException("process 需要事务管理器");
@@ -204,7 +205,7 @@ public class InboxRepository {
     }
 
     public enum DeliveryResult {
-        COMPLETED, FAILED, NOT_CLAIMED, PERMANENT_FAILED, STALE
+        COMPLETED, FAILED, NOT_CLAIMED, PERMANENT_FAILED, LEASE_TAKEOVER, STALE
     }
 
     private static long durationMicros(Duration duration) {
@@ -225,6 +226,10 @@ public class InboxRepository {
     }
 
     public record Claim(String consumerName, UUID eventId, String ownerId, String claimToken,
-                        boolean alreadyCompleted, boolean failed) {
+                        boolean alreadyCompleted, boolean failed, boolean leaseTakeover) {
+        public Claim(String consumerName, UUID eventId, String ownerId, String claimToken,
+                     boolean alreadyCompleted, boolean failed) {
+            this(consumerName, eventId, ownerId, claimToken, alreadyCompleted, failed, false);
+        }
     }
 }

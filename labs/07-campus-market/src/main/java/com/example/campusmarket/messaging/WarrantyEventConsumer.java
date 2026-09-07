@@ -1,6 +1,7 @@
 package com.example.campusmarket.messaging;
 
 import com.example.campusmarket.shared.DomainEvent;
+import com.example.campusmarket.observability.CampusMetrics;
 import com.rabbitmq.client.Channel;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
@@ -17,12 +18,19 @@ public final class WarrantyEventConsumer {
     private final EventEnvelopeCodec codec;
     private final InboxRepository inbox;
     private final EventBusinessHandler handler;
+    private final CampusMetrics metrics;
 
     public WarrantyEventConsumer(EventEnvelopeCodec codec, InboxRepository inbox,
                                  EventBusinessHandler handler) {
+        this(codec, inbox, handler, null);
+    }
+
+    public WarrantyEventConsumer(EventEnvelopeCodec codec, InboxRepository inbox,
+                                 EventBusinessHandler handler, CampusMetrics metrics) {
         this.codec = codec;
         this.inbox = inbox;
         this.handler = handler;
+        this.metrics = metrics;
     }
 
     @RabbitListener(queues = RabbitTopology.WARRANTY_QUEUE, ackMode = "MANUAL")
@@ -34,9 +42,14 @@ public final class WarrantyEventConsumer {
                 Duration.ofMinutes(1), claim -> handler.handle(event));
             if (result == InboxRepository.DeliveryResult.COMPLETED
                 || result == InboxRepository.DeliveryResult.PERMANENT_FAILED
-                || result == InboxRepository.DeliveryResult.FAILED) {
+                || result == InboxRepository.DeliveryResult.FAILED
+                || result == InboxRepository.DeliveryResult.LEASE_TAKEOVER) {
+                if (result == InboxRepository.DeliveryResult.COMPLETED) recordInbox("COMPLETED");
+                else recordInbox("FAILED");
+                if (result == InboxRepository.DeliveryResult.LEASE_TAKEOVER && metrics != null) metrics.recordLeaseTakeover("INBOX");
                 channel.basicAck(tag, false);
             } else {
+                if (metrics != null) metrics.recordRetry("INBOX", "RETRY");
                 channel.basicNack(tag, false, true);
             }
         } catch (EventBusinessHandler.UnsupportedEventException unsupported) {
@@ -46,6 +59,7 @@ public final class WarrantyEventConsumer {
         } catch (IllegalArgumentException malformedEnvelope) {
             handleMalformedEnvelope(message, channel, tag);
         } catch (RuntimeException retryable) {
+            if (metrics != null) metrics.recordRetry("INBOX", "RETRY");
             channel.basicNack(tag, false, true);
         }
     }
@@ -68,10 +82,12 @@ public final class WarrantyEventConsumer {
             Optional<InboxRepository.Claim> claimed = inbox.claim(CONSUMER, eventId, Duration.ofMinutes(1));
             boolean durableFailure = claimed.map(claim -> claim.alreadyCompleted() || claim.failed()
                 || inbox.markFailed(CONSUMER, eventId, claim.ownerId(), claim.claimToken()) == 1).orElse(false);
-            if (durableFailure) channel.basicAck(tag, false);
-            else channel.basicNack(tag, false, true);
+            if (durableFailure) { recordInbox("FAILED"); channel.basicAck(tag, false); }
+            else { if (metrics != null) metrics.recordRetry("INBOX", "RETRY"); channel.basicNack(tag, false, true); }
         } catch (RuntimeException persistenceFailure) {
             channel.basicNack(tag, false, true);
         }
     }
+
+    private void recordInbox(String status) { if (metrics != null) metrics.recordInbox(status); }
 }

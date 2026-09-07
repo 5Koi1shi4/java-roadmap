@@ -1,6 +1,7 @@
 package com.example.campusmarket.messaging;
 
 import com.example.campusmarket.shared.DomainEvent;
+import com.example.campusmarket.observability.CampusMetrics;
 import com.rabbitmq.client.Channel;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
@@ -15,12 +16,19 @@ public class ReliableEventConsumer {
     private final EventEnvelopeCodec codec;
     private final InboxRepository inbox;
     private final EventBusinessHandler businessHandler;
+    private final CampusMetrics metrics;
 
     public ReliableEventConsumer(EventEnvelopeCodec codec, InboxRepository inbox,
                                  EventBusinessHandler businessHandler) {
+        this(codec, inbox, businessHandler, null);
+    }
+
+    public ReliableEventConsumer(EventEnvelopeCodec codec, InboxRepository inbox,
+                                 EventBusinessHandler businessHandler, CampusMetrics metrics) {
         this.codec = codec;
         this.inbox = inbox;
         this.businessHandler = businessHandler;
+        this.metrics = metrics;
     }
 
     @RabbitListener(queues = RabbitTopology.EVENT_QUEUE, ackMode = "MANUAL")
@@ -39,11 +47,14 @@ public class ReliableEventConsumer {
                             && inbox.markFailed(CONSUMER, eventId, claim.ownerId(), claim.claimToken()) == 1))
                     .orElse(false);
                 if (durableFailure) {
+                    recordInbox("FAILED");
                     channel.basicAck(tag, false);
                 } else {
+                    recordRetry();
                     channel.basicNack(tag, false, true);
                 }
             } catch (RuntimeException noUsableId) {
+                recordInbox("FAILED");
                 channel.basicNack(tag, false, false);
             }
             return;
@@ -51,12 +62,16 @@ public class ReliableEventConsumer {
         try {
             InboxRepository.DeliveryResult result = inbox.processForDelivery(CONSUMER, event.eventId(), Duration.ofMinutes(1),
                 claim -> businessHandler.handle(event));
-            if (result == InboxRepository.DeliveryResult.COMPLETED) channel.basicAck(tag, false);
+            if (result == InboxRepository.DeliveryResult.COMPLETED) { recordInbox("COMPLETED"); channel.basicAck(tag, false); }
             else if (result == InboxRepository.DeliveryResult.PERMANENT_FAILED) {
+                recordInbox("FAILED");
                 channel.basicAck(tag, false);
-            } else if (result == InboxRepository.DeliveryResult.FAILED) {
+            } else if (result == InboxRepository.DeliveryResult.FAILED
+                || result == InboxRepository.DeliveryResult.LEASE_TAKEOVER) {
+                recordInbox("FAILED");
+                if (result == InboxRepository.DeliveryResult.LEASE_TAKEOVER && metrics != null) metrics.recordLeaseTakeover("INBOX");
                 channel.basicAck(tag, false);
-            } else channel.basicNack(tag, false, true);
+            } else { recordRetry(); channel.basicNack(tag, false, true); }
         } catch (EventBusinessHandler.UnsupportedEventException unsupported) {
             // A queue bound to another event family must reject it; ACK would
             // mark the Inbox completed without executing business logic.
@@ -64,8 +79,12 @@ public class ReliableEventConsumer {
         } catch (IllegalArgumentException permanent) {
             channel.basicAck(tag, false);
         } catch (RuntimeException retryable) {
+            recordRetry();
             channel.basicNack(tag, false, true);
         }
     }
+
+    private void recordInbox(String status) { if (metrics != null) metrics.recordInbox(status); }
+    private void recordRetry() { if (metrics != null) metrics.recordRetry("INBOX", "RETRY"); }
 
 }

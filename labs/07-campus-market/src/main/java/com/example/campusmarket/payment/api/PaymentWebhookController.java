@@ -31,13 +31,18 @@ public class PaymentWebhookController {
     private final ObjectMapper mapper;
     private final CampusMetrics metrics;
 
+    public PaymentWebhookController(PaymentGateway gateway, PaymentService payments, RefundService refunds, ObjectMapper mapper) {
+        this(gateway, payments, refunds, mapper, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
     public PaymentWebhookController(PaymentGateway gateway, PaymentService payments, RefundService refunds, ObjectMapper mapper,
                                     CampusMetrics metrics) {
         this.gateway = Objects.requireNonNull(gateway, "支付网关不能为空");
         this.payments = Objects.requireNonNull(payments, "支付服务不能为空");
         this.refunds = Objects.requireNonNull(refunds, "退款服务不能为空");
         this.mapper = Objects.requireNonNull(mapper, "JSON序列化器不能为空");
-        this.metrics = Objects.requireNonNull(metrics, "指标门面不能为空");
+        this.metrics = metrics;
     }
 
     @PostMapping(path = "/api/payment-webhooks/{provider}", consumes = MediaType.APPLICATION_JSON_VALUE)
@@ -46,6 +51,7 @@ public class PaymentWebhookController {
         try {
             PaymentGateway.VerifiedCallback callback = gateway.verifyAndParse(rawBody, headers);
             if (!provider.equals(callback.provider())) throw new SimulatedPaymentGateway.InvalidCallbackException("提供方不匹配");
+            if (metrics != null) metrics.recordPaymentCallback("RECEIVED");
             if (callback.type() == PaymentGateway.VerifiedCallback.CallbackType.PAYMENT) {
                 payments.handleCallback(callback, rawBody);
             } else {
@@ -53,10 +59,10 @@ public class PaymentWebhookController {
             }
             return json(200, "{\"status\":\"ok\"}");
         } catch (SimulatedPaymentGateway.InvalidCallbackException e) {
-            metrics.recordPaymentCallback("FAILURE");
+            if (metrics != null) metrics.recordPaymentCallback("FAILURE");
             return ApiErrors.bytes(org.springframework.http.HttpStatus.BAD_REQUEST, "回调验签失败");
         } catch (IllegalArgumentException e) {
-            metrics.recordPaymentCallback("FAILURE");
+            if (metrics != null) metrics.recordPaymentCallback("FAILURE");
             return ApiErrors.bytes(org.springframework.http.HttpStatus.BAD_REQUEST, "回调格式无效");
         }
     }

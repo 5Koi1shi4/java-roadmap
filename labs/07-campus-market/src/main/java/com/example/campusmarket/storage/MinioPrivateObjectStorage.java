@@ -1,6 +1,7 @@
 package com.example.campusmarket.storage;
 
 import com.example.campusmarket.catalog.application.MediaStorage;
+import com.example.campusmarket.observability.CampusMetrics;
 
 import io.minio.BucketExistsArgs;
 import io.minio.GetObjectArgs;
@@ -11,6 +12,7 @@ import io.minio.RemoveObjectArgs;
 import io.minio.errors.ErrorResponseException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import java.io.InputStream;
 import java.time.Duration;
@@ -20,6 +22,7 @@ public class MinioPrivateObjectStorage implements PrivateObjectStorage, MediaSto
     private final MinioClient client;
     private final String bucket;
     private volatile boolean bucketReady;
+    private final CampusMetrics metrics;
 
     private static final Duration MAX_CONNECT_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration MAX_READ_TIMEOUT = Duration.ofSeconds(30);
@@ -35,6 +38,20 @@ public class MinioPrivateObjectStorage implements PrivateObjectStorage, MediaSto
         @Value("${campus.market.storage.read-timeout:10s}") Duration readTimeout,
         @Value("${campus.market.storage.write-timeout:10s}") Duration writeTimeout,
         @Value("${campus.market.storage.call-timeout:15s}") Duration callTimeout) {
+        this(endpoint, accessKey, secretKey, bucket, connectTimeout, readTimeout, writeTimeout, callTimeout, null);
+    }
+
+    @Autowired
+    public MinioPrivateObjectStorage(
+        @Value("${campus.market.storage.endpoint:http://localhost:9000}") String endpoint,
+        @Value("${campus.market.storage.access-key:minioadmin}") String accessKey,
+        @Value("${campus.market.storage.secret-key:minioadmin-local}") String secretKey,
+        @Value("${campus.market.storage.bucket:campus-market}") String bucket,
+        @Value("${campus.market.storage.connect-timeout:3s}") Duration connectTimeout,
+        @Value("${campus.market.storage.read-timeout:10s}") Duration readTimeout,
+        @Value("${campus.market.storage.write-timeout:10s}") Duration writeTimeout,
+        @Value("${campus.market.storage.call-timeout:15s}") Duration callTimeout,
+        CampusMetrics metrics) {
         okhttp3.OkHttpClient httpClient = new okhttp3.OkHttpClient.Builder()
             .connectTimeout(bounded(connectTimeout, MAX_CONNECT_TIMEOUT))
             .readTimeout(bounded(readTimeout, MAX_READ_TIMEOUT))
@@ -44,6 +61,7 @@ public class MinioPrivateObjectStorage implements PrivateObjectStorage, MediaSto
         this.client = MinioClient.builder().endpoint(endpoint).credentials(accessKey, secretKey)
             .httpClient(httpClient).build();
         this.bucket = bucket;
+        this.metrics = metrics;
     }
 
     private static Duration bounded(Duration configured, Duration maximum) {
@@ -58,25 +76,33 @@ public class MinioPrivateObjectStorage implements PrivateObjectStorage, MediaSto
 
     @Override
     public void put(String objectKey, InputStream content, long sizeBytes, String contentType) {
+        long started = System.nanoTime();
         try {
             ensureBucket();
             client.putObject(PutObjectArgs.builder().bucket(bucket).object(objectKey)
                 .stream(content, sizeBytes, -1).contentType(contentType).build());
+            record("SUCCESS", "UPLOAD", started);
         } catch (Exception e) {
+            record("FAILURE", "UPLOAD", started);
             throw new StorageUnavailableException("对象存储不可用", e);
         }
     }
 
     @Override
     public InputStream open(String objectKey) {
+        long started = System.nanoTime();
         try {
-            return client.getObject(GetObjectArgs.builder().bucket(bucket).object(objectKey).build());
+            InputStream result = client.getObject(GetObjectArgs.builder().bucket(bucket).object(objectKey).build());
+            record("SUCCESS", "READ", started);
+            return result;
         } catch (ErrorResponseException e) {
+            record("FAILURE", "READ", started);
             if ("NoSuchKey".equals(e.errorResponse().code()) || "NoSuchObject".equals(e.errorResponse().code())) {
                 throw new ObjectNotFoundException("媒体不存在");
             }
             throw new StorageUnavailableException("对象存储不可用", e);
         } catch (Exception e) {
+            record("FAILURE", "READ", started);
             throw new StorageUnavailableException("对象存储不可用", e);
         }
     }
@@ -93,6 +119,12 @@ public class MinioPrivateObjectStorage implements PrivateObjectStorage, MediaSto
         } catch (Exception e) {
             throw new StorageUnavailableException("对象存储不可用", e);
         }
+    }
+
+    private void record(String result, String operation, long started) {
+        if (metrics == null) return;
+        metrics.recordStorage(result);
+        metrics.recordOperationDuration(operation, Duration.ofNanos(System.nanoTime() - started));
     }
 
     private void ensureBucket() throws Exception {

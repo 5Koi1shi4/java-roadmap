@@ -5,6 +5,7 @@ import com.example.campusmarket.catalog.domain.WarrantyTerm;
 import com.example.campusmarket.catalog.search.SearchOutboxRepository;
 import com.example.campusmarket.storage.ObjectUploadCoordinator;
 import com.example.campusmarket.observability.CampusMetrics;
+import com.example.campusmarket.observability.AfterCommitMetrics;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -53,7 +54,7 @@ public class ListingService {
             listing.publish();
             Listing saved = listings.save(listing);
             searchOutbox.enqueue(saved, "LISTING_PUBLISHED");
-            if (metrics != null) metrics.recordListingPublished("SUCCESS");
+            if (metrics != null) AfterCommitMetrics.record(() -> metrics.recordListingPublished("SUCCESS"));
             return saved;
         } catch (RestrictionException rejected) {
             if (metrics != null) metrics.recordListingPublished("REJECTED");
