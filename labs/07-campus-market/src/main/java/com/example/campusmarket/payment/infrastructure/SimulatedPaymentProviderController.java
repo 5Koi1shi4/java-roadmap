@@ -1,5 +1,6 @@
 package com.example.campusmarket.payment.infrastructure;
 
+import com.example.campusmarket.api.ApiErrors;
 import com.example.campusmarket.payment.application.PaymentGateway;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
@@ -213,18 +214,15 @@ public class SimulatedPaymentProviderController {
 
     @ExceptionHandler(IdempotencyConflictException.class)
     ResponseEntity<byte[]> idempotencyConflict() {
-        return ResponseEntity.status(HttpStatus.CONFLICT).contentType(MediaType.parseMediaType("application/json; charset=UTF-8"))
-            .body("{\"error\":\"幂等键请求不一致\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        return ApiErrors.bytes(HttpStatus.CONFLICT, "幂等键请求不一致");
     }
     @ExceptionHandler(IllegalArgumentException.class)
     ResponseEntity<byte[]> invalidProviderRequest() {
-        return ResponseEntity.badRequest().contentType(MediaType.parseMediaType("application/json; charset=UTF-8"))
-            .body("{\"error\":\"请求参数无效\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        return ApiErrors.bytes(HttpStatus.BAD_REQUEST, "请求参数无效");
     }
     @ExceptionHandler(HttpMessageNotReadableException.class)
     ResponseEntity<byte[]> unreadableProviderRequest() {
-        return ResponseEntity.badRequest().contentType(MediaType.parseMediaType("application/json; charset=UTF-8"))
-            .body("{\"error\":\"请求参数无效\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        return ApiErrors.bytes(HttpStatus.BAD_REQUEST, "请求参数无效");
     }
     public static class IdempotencyConflictException extends RuntimeException { }
 

@@ -4,6 +4,8 @@ import com.example.campusmarket.identity.application.AuthService;
 import com.example.campusmarket.identity.application.EmailVerificationService;
 import com.example.campusmarket.identity.infrastructure.RedisVerificationCodeStore;
 import com.example.campusmarket.identity.infrastructure.DeviceCookieSigner;
+import com.example.campusmarket.api.ApiError;
+import com.example.campusmarket.api.ApiErrors;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.context.annotation.Profile;
 import org.springframework.dao.DataAccessException;
@@ -64,32 +66,32 @@ public class AuthController {
     }
 
     @ExceptionHandler(AuthService.InvalidVerificationCodeException.class)
-    ResponseEntity<ErrorResponse> invalidCode(AuthService.InvalidVerificationCodeException ex) {
+    ResponseEntity<ApiError> invalidCode(AuthService.InvalidVerificationCodeException ex) {
         return error(HttpStatus.UNAUTHORIZED, "验证码无效或已过期");
     }
 
     @ExceptionHandler(AuthService.InvalidCredentialsException.class)
-    ResponseEntity<ErrorResponse> invalidCredentials(AuthService.InvalidCredentialsException ex) {
+    ResponseEntity<ApiError> invalidCredentials(AuthService.InvalidCredentialsException ex) {
         return error(HttpStatus.UNAUTHORIZED, "邮箱或密码错误");
     }
 
     @ExceptionHandler(AuthService.DuplicateEmailException.class)
-    ResponseEntity<ErrorResponse> duplicate(AuthService.DuplicateEmailException ex) {
+    ResponseEntity<ApiError> duplicate(AuthService.DuplicateEmailException ex) {
         return error(HttpStatus.CONFLICT, "邮箱已注册");
     }
 
     @ExceptionHandler(RedisVerificationCodeStore.TooManyVerificationRequestsException.class)
-    ResponseEntity<ErrorResponse> rateLimited(RuntimeException ex) {
+    ResponseEntity<ApiError> rateLimited(RuntimeException ex) {
         return error(HttpStatus.TOO_MANY_REQUESTS, "验证码请求过于频繁");
     }
 
     @ExceptionHandler(DataAccessException.class)
-    ResponseEntity<ErrorResponse> externalDependency(DataAccessException ex) {
+    ResponseEntity<ApiError> externalDependency(DataAccessException ex) {
         return error(HttpStatus.SERVICE_UNAVAILABLE, "身份服务暂时不可用");
     }
 
     @ExceptionHandler(IllegalArgumentException.class)
-    ResponseEntity<ErrorResponse> invalidRequest(IllegalArgumentException ex) {
+    ResponseEntity<ApiError> invalidRequest(IllegalArgumentException ex) {
         return error(HttpStatus.BAD_REQUEST, "请求参数无效");
     }
 
@@ -126,8 +128,8 @@ public class AuthController {
         return ResponseEntity.status(status).header(HttpHeaders.CONTENT_TYPE, "application/json; charset=UTF-8").body(body);
     }
 
-    private ResponseEntity<ErrorResponse> error(HttpStatus status, String message) {
-        return json(status, new ErrorResponse(message));
+    private ResponseEntity<ApiError> error(HttpStatus status, String message) {
+        return ApiErrors.entity(status, message);
     }
 
     private static String firstNonBlank(String... values) {
@@ -153,6 +155,4 @@ public class AuthController {
                                 String userId, Set<String> roles) {
     }
 
-    public record ErrorResponse(String error) {
-    }
 }

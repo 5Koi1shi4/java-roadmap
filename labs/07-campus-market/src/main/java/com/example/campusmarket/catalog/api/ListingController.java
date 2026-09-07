@@ -3,6 +3,8 @@ package com.example.campusmarket.catalog.api;
 import com.example.campusmarket.catalog.application.ListingRepository;
 import com.example.campusmarket.catalog.application.ListingService;
 import com.example.campusmarket.catalog.domain.Listing;
+import com.example.campusmarket.api.ApiError;
+import com.example.campusmarket.api.ApiErrors;
 import com.example.campusmarket.identity.application.AuthenticatedUser;
 import com.example.campusmarket.storage.MinioPrivateObjectStorage;
 import com.example.campusmarket.storage.PrivateObjectStorage;
@@ -77,13 +79,13 @@ public class ListingController {
     }
 
     @ExceptionHandler(ListingService.NotFoundException.class)
-    ResponseEntity<ErrorResponse> notFound() { return ResponseEntity.status(404).body(new ErrorResponse("资源不存在")); }
+    ResponseEntity<ApiError> notFound() { return ApiErrors.entity(HttpStatus.NOT_FOUND, "资源不存在"); }
 
     @ExceptionHandler(MinioPrivateObjectStorage.StorageUnavailableException.class)
-    ResponseEntity<ErrorResponse> unavailable() { return ResponseEntity.status(503).body(new ErrorResponse("对象存储暂时不可用")); }
+    ResponseEntity<ApiError> unavailable() { return ApiErrors.entity(HttpStatus.SERVICE_UNAVAILABLE, "对象存储暂时不可用"); }
 
     @ExceptionHandler({IllegalArgumentException.class, IllegalStateException.class})
-    ResponseEntity<ErrorResponse> badRequest(RuntimeException e) { return ResponseEntity.badRequest().body(new ErrorResponse("请求参数无效")); }
+    ResponseEntity<ApiError> badRequest(RuntimeException e) { return ApiErrors.entity(HttpStatus.BAD_REQUEST, "请求参数无效"); }
 
     public record CreateRequest(String title, String description, String category, long unitPriceFen,
                                 int availableQuantity, Integer sellerWarrantyDays) { }
@@ -93,5 +95,4 @@ public class ListingController {
     public record MediaResponse(String id, String mediaType, long sizeBytes) {
         static MediaResponse from(ListingRepository.MediaRecord m) { return new MediaResponse(m.id().toString(), m.mediaType(), m.sizeBytes()); }
     }
-    public record ErrorResponse(String error) { }
 }

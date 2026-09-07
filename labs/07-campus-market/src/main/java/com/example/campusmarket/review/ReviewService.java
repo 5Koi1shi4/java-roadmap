@@ -46,7 +46,10 @@ public final class ReviewService {
     public Result create(UUID orderId, UUID reviewerId, int rating, String reviewText) {
         validate(orderId, reviewerId, rating, reviewText);
         try {
-            return transactions.execute(status -> createInTransaction(orderId, reviewerId, rating, reviewText));
+            Result result = transactions.execute(status -> createInTransaction(orderId, reviewerId, rating, reviewText));
+            // The counter is an observation of a committed transaction, never of an attempted write.
+            metrics.recordReview("SUCCESS");
+            return result;
         } catch (DuplicateKeyException ex) {
             throw new ConflictException();
         }
@@ -81,7 +84,6 @@ public final class ReviewService {
             reviewId.toString(), orderId.toString(), reviewerId.toString(), revieweeId.toString(), rating, reviewText, Timestamp.from(now));
         audits.record(SafeAuditEvent.success(reviewerId, "REVIEW_CREATED", "TRADE_ORDER", orderId,
             Map.of("rating", rating)));
-        metrics.recordReview("SUCCESS");
         return new Result(reviewId, orderId, reviewerId, revieweeId, rating, reviewText, now);
     }
 

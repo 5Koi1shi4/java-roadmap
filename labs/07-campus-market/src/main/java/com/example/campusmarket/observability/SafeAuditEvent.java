@@ -28,6 +28,8 @@ public record SafeAuditEvent(
         "signature", "signaturevalue", "objectkey", "object_key", "presignedurl",
         "presigned_url", "email", "password", "secret", "stack", "stacktrace",
         "exception", "authorization", "cookie", "path", "hash", "contenthash");
+    private static final Set<String> FORBIDDEN_TERMS = Set.of(
+        "邮箱", "令牌", "验证码", "签名", "对象键", "预签名", "密码", "密钥", "堆栈", "异常", "路径", "哈希");
     private static final Pattern EMAIL = Pattern.compile("(?i)\\b[^\\s@]+@[^\\s@]+\\.[^\\s@]+\\b");
     private static final Pattern SIGNED_URL = Pattern.compile("(?i)(x-amz-signature|signature=|presign|presigned)");
     private static final Pattern TOKEN = Pattern.compile("(?i)bearer\\s+[A-Za-z0-9._~-]+|\\beyJ[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\b");
@@ -41,14 +43,14 @@ public record SafeAuditEvent(
         } catch (RuntimeException ex) {
             throw new IllegalArgumentException("correlationId 必须为 UUID", ex);
         }
-        action = requireText(action, "action");
-        resourceType = requireText(resourceType, "resourceType");
+        action = safeLabel(action, "action");
+        resourceType = safeLabel(resourceType, "resourceType");
         result = requireText(result, "result");
         if (!Set.of("SUCCESS", "FAILURE").contains(result)) {
             throw new IllegalArgumentException("审计结果无效");
         }
         if ("FAILURE".equals(result)) {
-            failureClass = requireText(failureClass, "failureClass");
+            failureClass = safeLabel(failureClass, "failureClass");
             if (!Set.of("VALIDATION", "AUTHENTICATION", "AUTHORIZATION", "CONFLICT", "DEPENDENCY", "INTERNAL").contains(failureClass)) {
                 throw new IllegalArgumentException("审计失败分类无效");
             }
@@ -92,8 +94,8 @@ public record SafeAuditEvent(
         if (source == null) return Map.of();
         for (Map.Entry<String, Object> entry : source.entrySet()) {
             String key = requireText(entry.getKey(), "审计字段");
-            String normalized = key.toLowerCase(Locale.ROOT).replace("-", "").replace(".", "");
-            if (FORBIDDEN_KEYS.contains(normalized) || FORBIDDEN_KEYS.stream().anyMatch(normalized::contains)) {
+            String normalized = normalize(key);
+            if (isSensitive(key)) {
                 throw new IllegalArgumentException("审计字段包含敏感信息: " + key);
             }
             Object value = entry.getValue();
@@ -103,9 +105,7 @@ public record SafeAuditEvent(
             }
             if (value instanceof CharSequence text) {
                 String string = text.toString();
-                if (EMAIL.matcher(string).find() || SIGNED_URL.matcher(string).find()
-                    || OBJECT_KEY.matcher(string).find() || STACK.matcher(string).find()
-                    || TOKEN.matcher(string).find()) {
+                if (isSensitive(string)) {
                     throw new IllegalArgumentException("审计字段包含敏感信息: " + key);
                 }
                 safe.put(key, string);
@@ -119,5 +119,32 @@ public record SafeAuditEvent(
     private static String requireText(String value, String field) {
         if (value == null || value.isBlank()) throw new IllegalArgumentException(field + "不能为空");
         return value;
+    }
+
+    private static String safeLabel(String value, String field) {
+        String label = requireText(value, field);
+        String normalized = normalize(label);
+        if (isSensitive(label)) {
+            throw new IllegalArgumentException("审计字段包含敏感信息: " + field);
+        }
+        return label;
+    }
+
+    private static String normalize(String value) {
+        return value.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "");
+    }
+
+    private static boolean isSensitive(String value) {
+        String normalized = normalize(value);
+        return FORBIDDEN_KEYS.stream().anyMatch(normalized::contains)
+            || FORBIDDEN_TERMS.stream().anyMatch(value::contains)
+            || EMAIL.matcher(value).find() || SIGNED_URL.matcher(value).find()
+            || OBJECT_KEY.matcher(value).find() || STACK.matcher(value).find()
+            || TOKEN.matcher(value).find() || looksLikeBareObjectKey(value);
+    }
+
+    private static boolean looksLikeBareObjectKey(String value) {
+        return value.matches("[A-Za-z0-9_-]{24,}") && value.matches(".*[A-Za-z].*")
+            && value.matches(".*\\d.*");
     }
 }

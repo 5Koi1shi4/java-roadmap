@@ -1,6 +1,8 @@
 package com.example.campusmarket.dispute.application;
 
 import com.example.campusmarket.order.application.IdempotentCommandService;
+import com.example.campusmarket.api.ApiErrors;
+import org.springframework.http.HttpStatus;
 import com.example.campusmarket.order.application.OrderLifecycleService;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
@@ -39,7 +41,7 @@ public final class HandoffService {
     }
 
     private static byte[] success(String status) { return ("{\"status\":\"" + status + "\"}").getBytes(StandardCharsets.UTF_8); }
-    private static byte[] conflict(String message) { return ("{\"error\":\"" + message + "\"}").getBytes(StandardCharsets.UTF_8); }
+    private static byte[] conflict(String message) { return ApiErrors.body(HttpStatus.CONFLICT, message); }
 
     private static Result parse(byte[] response) {
         String body = new String(response, StandardCharsets.UTF_8);

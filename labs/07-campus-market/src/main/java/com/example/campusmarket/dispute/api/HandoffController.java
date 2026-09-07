@@ -1,6 +1,7 @@
 package com.example.campusmarket.dispute.api;
 
 import com.example.campusmarket.dispute.application.HandoffService;
+import com.example.campusmarket.api.ApiErrors;
 import com.example.campusmarket.identity.application.AuthenticatedUser;
 import com.example.campusmarket.order.application.IdempotentCommandService;
 import com.example.campusmarket.order.application.OrderLifecycleService;
@@ -19,7 +20,6 @@ import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.dao.DataAccessException;
 
-import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -92,8 +92,7 @@ public final class HandoffController {
     }
 
     private static ResponseEntity<byte[]> error(HttpStatus status, String message) {
-        return ResponseEntity.status(status).contentType(JSON_UTF8)
-            .body(("{\"error\":\"" + message + "\"}").getBytes(StandardCharsets.UTF_8));
+        return ApiErrors.bytes(status, message);
     }
 
     public record HandoffRequest(String note) {}

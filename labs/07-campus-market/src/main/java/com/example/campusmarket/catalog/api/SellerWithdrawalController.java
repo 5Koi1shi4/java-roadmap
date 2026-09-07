@@ -1,5 +1,6 @@
 package com.example.campusmarket.catalog.api;
 
+import com.example.campusmarket.api.ApiErrors;
 import com.example.campusmarket.catalog.application.ListingService;
 import com.example.campusmarket.identity.application.AuthenticatedUser;
 import org.springframework.context.annotation.Profile;
@@ -29,7 +30,7 @@ public final class SellerWithdrawalController {
           catch (IllegalStateException ex) { return error(503,"提现账户暂时不可用"); }
     }
     private static UUID user(Authentication auth){if(auth==null||!(auth.getPrincipal() instanceof AuthenticatedUser u))throw new IllegalArgumentException("身份无效");return u.userId();}
-    private static ResponseEntity<byte[]> error(int status,String text){return ResponseEntity.status(status).contentType(JSON).body(("{\"error\":\""+text+"\"}").getBytes(StandardCharsets.UTF_8));}
+    private static ResponseEntity<byte[]> error(int status,String text){return ApiErrors.bytes(org.springframework.http.HttpStatus.valueOf(status), text);}
     @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown=false) public record Request(long amountFen) { }
     @ExceptionHandler({org.springframework.web.bind.MissingRequestHeaderException.class,org.springframework.http.converter.HttpMessageNotReadableException.class})
     ResponseEntity<byte[]> protocolError(Exception ignored){return error(400,"请求参数无效");}

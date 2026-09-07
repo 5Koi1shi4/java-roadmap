@@ -40,4 +40,37 @@ class SafeAuditEventTest {
             .doesNotContainKey("leak");
         assertThat(event.correlationId()).isNotNull();
     }
+
+    @Test
+    void appliesSensitiveChecksToLabelsAndNormalizedDetailKeys() {
+        assertThatThrownBy(() -> SafeAuditEvent.success(
+            UUID.randomUUID(), "email dispatch", "ORDER", UUID.randomUUID(), Map.of()))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> SafeAuditEvent.success(
+            UUID.randomUUID(), "REVIEW_CREATED", "object key", UUID.randomUUID(), Map.of()))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> SafeAuditEvent.failure(
+            UUID.randomUUID(), "REVIEW_REJECTED", "ORDER", UUID.randomUUID(), "Bearer token", Map.of()))
+            .isInstanceOf(IllegalArgumentException.class);
+
+        for (String key : new String[]{"object key", "object_key", "object.key", "object-key"}) {
+            assertThatThrownBy(() -> SafeAuditEvent.success(
+                UUID.randomUUID(), "REVIEW_CREATED", "ORDER", UUID.randomUUID(), Map.of(key, "safe")))
+                .isInstanceOf(IllegalArgumentException.class);
+        }
+        assertThatThrownBy(() -> SafeAuditEvent.success(
+            UUID.randomUUID(), "REVIEW_CREATED", "ORDER", UUID.randomUUID(),
+            Map.of("storage", "tmp/0123456789abcdef0123456789abcdef")))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> SafeAuditEvent.success(
+            UUID.randomUUID(), "审计邮箱", "ORDER", UUID.randomUUID(), Map.of()))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> SafeAuditEvent.success(
+            UUID.randomUUID(), "REVIEW_CREATED", "订单对象键", UUID.randomUUID(), Map.of()))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> SafeAuditEvent.success(
+            UUID.randomUUID(), "REVIEW_CREATED", "ORDER", UUID.randomUUID(),
+            Map.of("说明", "Bearer abc.def.ghi")))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
 }

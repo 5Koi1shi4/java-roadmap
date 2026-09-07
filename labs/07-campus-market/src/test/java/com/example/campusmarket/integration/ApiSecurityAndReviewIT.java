@@ -17,6 +17,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.test.annotation.DirtiesContext;
 
 import java.util.Set;
 import java.util.UUID;
@@ -27,8 +28,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 @ActiveProfiles("local")
 @TestPropertySource(properties = {
     "campus.market.search.dispatcher.enabled=false", "campus.market.dispute.deadline.enabled=false",
-    "campus.market.dispute.return-reconciliation.enabled=false", "campus.market.warranty.deadline.enabled=false"
+    "campus.market.dispute.return-reconciliation.enabled=false", "campus.market.warranty.deadline.enabled=false",
+    "campus.market.order.deadline.enabled=false"
 })
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class ApiSecurityAndReviewIT extends Task11MySqlContainers {
     @Autowired JdbcTemplate jdbc;
     @Autowired JwtService jwt;

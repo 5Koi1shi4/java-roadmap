@@ -1,5 +1,6 @@
 package com.example.campusmarket.warranty.api;
 
+import com.example.campusmarket.api.ApiErrors;
 import com.example.campusmarket.identity.application.AuthenticatedUser;
 import com.example.campusmarket.shared.Money;
 import com.example.campusmarket.warranty.application.SellerObligationService;
@@ -19,5 +20,5 @@ public final class SellerObligationController {
     @GetMapping({"/api/seller/obligations","/api/seller-obligations"}) public ResponseEntity<byte[]> list(Authentication auth){StringBuilder body=new StringBuilder("[");boolean first=true;for(var row:obligations.findForSeller(user(auth))){if(!first)body.append(',');first=false;body.append("{\"obligationId\":\"").append(row.obligationId()).append("\",\"warrantyCaseId\":\"").append(row.warrantyCaseId()).append("\",\"amountFen\":").append(row.obligationAmountFen()).append(",\"fundedAmountFen\":").append(row.fundedAmountFen()).append(",\"status\":\"").append(row.status()).append("\"}");}body.append(']');return ResponseEntity.ok().contentType(MediaType.parseMediaType("application/json; charset=UTF-8")).body(body.toString().getBytes(StandardCharsets.UTF_8));}
     @ExceptionHandler({org.springframework.web.bind.MissingRequestHeaderException.class,org.springframework.http.converter.HttpMessageNotReadableException.class})
     ResponseEntity<byte[]> protocolError(Exception ignored){return error(400,"请求参数无效");}
-    private static UUID user(Authentication a){if(a==null||!(a.getPrincipal() instanceof AuthenticatedUser u))throw new IllegalArgumentException("身份无效");return u.userId();} private static ResponseEntity<byte[]> error(int status,String message){return ResponseEntity.status(status).contentType(MediaType.parseMediaType("application/json; charset=UTF-8")).body(("{\"error\":\""+message+"\"}").getBytes(StandardCharsets.UTF_8));} @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown=false) public record FundRequest(long amountFen){}
+    private static UUID user(Authentication a){if(a==null||!(a.getPrincipal() instanceof AuthenticatedUser u))throw new IllegalArgumentException("身份无效");return u.userId();} private static ResponseEntity<byte[]> error(int status,String message){return ApiErrors.bytes(org.springframework.http.HttpStatus.valueOf(status),message);} @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown=false) public record FundRequest(long amountFen){}
 }

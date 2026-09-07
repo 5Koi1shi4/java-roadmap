@@ -1,6 +1,7 @@
 package com.example.campusmarket.order.api;
 
 import com.example.campusmarket.identity.application.AuthenticatedUser;
+import com.example.campusmarket.api.ApiErrors;
 import com.example.campusmarket.order.application.CreateOrderCommand;
 import com.example.campusmarket.order.application.CreateOrderService;
 import com.example.campusmarket.order.application.IdempotentCommandService;
@@ -64,7 +65,7 @@ public class OrderController {
     }
 
     private static void writeError(HttpServletResponse response, HttpStatus status, String message) throws IOException {
-        write(response, status.value(), ("{\"error\":\"" + message + "\"}").getBytes(StandardCharsets.UTF_8));
+        write(response, status.value(), ApiErrors.body(status, message));
     }
 
     private static void write(HttpServletResponse response, int status, byte[] body) throws IOException {

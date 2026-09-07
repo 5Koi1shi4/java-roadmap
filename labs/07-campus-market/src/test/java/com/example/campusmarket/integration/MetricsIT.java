@@ -28,6 +28,9 @@ class MetricsIT {
         metrics.recordOrderState("SETTLED");
         metrics.recordWarrantyState("OPEN");
         metrics.recordObligationState("AWAITING_FUNDING");
+        metrics.recordObligationState("PARTIALLY_FUNDED");
+        metrics.recordPaymentCallback("RECEIVED");
+        metrics.recordVerification("VERIFIED");
         metrics.recordOperationDuration("READ", Duration.ofMillis(1));
         metrics.setRestrictedSellers(2);
 
@@ -36,6 +39,8 @@ class MetricsIT {
         assertThat(registry.getMeters()).allSatisfy(meter -> assertThat(meter.getId().getTags())
             .noneMatch(tag -> forbidden.contains(tag.getKey())));
         assertThat(registry.find("campus.market.review.total").counter().count()).isEqualTo(1);
+        assertThat(registry.get("campus.market.seller.obligation.state").tag("state", "PARTIALLY_FUNDED").counter().count()).isEqualTo(1);
+        assertThat(registry.get("campus.market.payment.callback.total").tag("result", "RECEIVED").counter().count()).isEqualTo(1);
     }
 
     @TestConfiguration(proxyBeanMethods = false)

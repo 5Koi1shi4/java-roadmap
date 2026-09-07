@@ -124,7 +124,7 @@ public class SettlementService {
                 }
                 UUID auditId=UUID.nameUUIDFromBytes(("settlement-obligation:"+settlementId+":"+obligation.id()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
                 String auditDetails="{\"settlementId\":\""+settlementId+"\",\"amountFen\":"+due+"}";
-                jdbc.update("INSERT INTO audit_event(id,actor_id,action,resource_type,resource_id,result,details,occurred_at) VALUES (?,?, 'WARRANTY_OBLIGATION_DEDUCTED','SELLER_OBLIGATION',?,'SUCCESS',CAST(? AS JSON),?) ON DUPLICATE KEY UPDATE id=id",auditId.toString(),seller.toString(),obligation.id().toString(),auditDetails,Timestamp.from(now));
+                jdbc.update("INSERT INTO audit_event(id,actor_id,action,resource_type,resource_id,result,details,occurred_at) VALUES (?,?, 'WARRANTY_OBLIGATION_DEDUCTED','SELLER_OBLIGATION',?,'SUCCESS',CAST(? AS JSON),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",auditId.toString(),seller.toString(),obligation.id().toString(),auditDetails);
                 if (funded == obligation.amount()) {
                     UUID event=UUID.nameUUIDFromBytes(("warranty-refund:"+obligation.id()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
                     String payload="{\"orderId\":\""+orderId+"\",\"caseId\":\""+obligation.caseId()+"\",\"obligationId\":\""+obligation.id()+"\",\"amountFen\":"+obligation.amount()+"}";
@@ -138,7 +138,7 @@ public class SettlementService {
 
     private void recordTransition(UUID seller,String action,UUID obligation,long version,String payload,Instant now){
         UUID event=UUID.nameUUIDFromBytes((action+":"+obligation+":"+version+":"+payload).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        jdbc.update("INSERT INTO audit_event(id,actor_id,action,resource_type,resource_id,result,details,occurred_at) VALUES (?,?,?,'SELLER_OBLIGATION',?,'SUCCESS',CAST(? AS JSON),?) ON DUPLICATE KEY UPDATE id=id",event.toString(),seller.toString(),action,obligation.toString(),payload,Timestamp.from(now));
+        jdbc.update("INSERT INTO audit_event(id,actor_id,action,resource_type,resource_id,result,details,occurred_at) VALUES (?,?,?,'SELLER_OBLIGATION',?,'SUCCESS',CAST(? AS JSON),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",event.toString(),seller.toString(),action,obligation.toString(),payload);
         jdbc.update("INSERT INTO integration_outbox(id,event_id,event_type,aggregate_id,aggregate_version,schema_version,occurred_at,payload,status,attempt_count,available_at,created_at) VALUES (?,?,?, ?,?,1,CURRENT_TIMESTAMP(6),CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",event.toString(),event.toString(),action,obligation.toString(),version,payload);
     }
 

@@ -1,6 +1,7 @@
 package com.example.campusmarket.dispute.api;
 
 import com.example.campusmarket.dispute.application.DisputeService;
+import com.example.campusmarket.api.ApiErrors;
 import com.example.campusmarket.dispute.application.EvidenceStorage;
 import com.example.campusmarket.dispute.domain.DisputeDecision;
 import com.example.campusmarket.identity.application.AuthenticatedUser;
@@ -86,7 +87,7 @@ public final class DisputeController {
     private static void requireKey(String key) { if (key == null || key.isBlank() || key.length() > 191 || key.chars().anyMatch(Character::isISOControl)) throw new IllegalArgumentException("幂等参数无效"); }
     private static byte[] requestBytes(Object request) { return request.toString().getBytes(StandardCharsets.UTF_8); }
     private static ResponseEntity<byte[]> body(DisputeService.Result result, HttpStatus status) { return ResponseEntity.status(status).contentType(JSON).body(result.responseUtf8()); }
-    private static ResponseEntity<byte[]> error(HttpStatus status, String message) { return ResponseEntity.status(status).contentType(JSON).body(("{\"error\":\"" + message + "\"}").getBytes(StandardCharsets.UTF_8)); }
+    private static ResponseEntity<byte[]> error(HttpStatus status, String message) { return ApiErrors.bytes(status, message); }
 
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<byte[]> malformedRequest() { return error(HttpStatus.BAD_REQUEST, "请求格式无效"); }

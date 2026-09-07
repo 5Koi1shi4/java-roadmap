@@ -1,6 +1,7 @@
 package com.example.campusmarket.payment.api;
 
 import com.example.campusmarket.payment.application.PaymentGateway;
+import com.example.campusmarket.api.ApiErrors;
 import com.example.campusmarket.payment.application.PaymentService;
 import com.example.campusmarket.payment.application.RefundService;
 import com.example.campusmarket.payment.infrastructure.SimulatedPaymentGateway;
@@ -48,9 +49,9 @@ public class PaymentWebhookController {
             }
             return json(200, "{\"status\":\"ok\"}");
         } catch (SimulatedPaymentGateway.InvalidCallbackException e) {
-            return json(400, "{\"error\":\"回调验签失败\"}");
+            return ApiErrors.bytes(org.springframework.http.HttpStatus.BAD_REQUEST, "回调验签失败");
         } catch (IllegalArgumentException e) {
-            return json(400, "{\"error\":\"回调格式无效\"}");
+            return ApiErrors.bytes(org.springframework.http.HttpStatus.BAD_REQUEST, "回调格式无效");
         }
     }
 
@@ -59,20 +60,20 @@ public class PaymentWebhookController {
                                                 @RequestBody(required = false) byte[] rawRequest,
                                                 @RequestHeader("Idempotency-Key") String key) {
         try {
-            if (rawRequest == null || rawRequest.length == 0 || key == null || key.isBlank()) return json(400, "{\"error\":\"请求参数无效\"}");
+            if (rawRequest == null || rawRequest.length == 0 || key == null || key.isBlank()) return ApiErrors.bytes(org.springframework.http.HttpStatus.BAD_REQUEST, "请求参数无效");
             PaymentService.PaymentResult result = payments.createPayment(orderId, key, rawRequest);
             int status = "UNKNOWN".equals(result.status()) ? 503 : 201;
             return result.responseUtf8() == null ? json(status, "{\"paymentId\":\"" + result.paymentId() + "\",\"providerReference\":\""
                 + result.providerReference() + "\",\"status\":\"" + result.status() + "\"}") : bytes(status, result.responseUtf8());
-        } catch (IllegalArgumentException e) { return json(400, "{\"error\":\"支付请求无效\"}"); }
-        catch (PaymentService.IdempotencyConflictException e) { return json(409, "{\"error\":\"幂等冲突\"}"); }
-        catch (IllegalStateException e) { return json(409, "{\"error\":\"订单不可支付\"}"); }
+        } catch (IllegalArgumentException e) { return ApiErrors.bytes(org.springframework.http.HttpStatus.BAD_REQUEST, "支付请求无效"); }
+        catch (PaymentService.IdempotencyConflictException e) { return ApiErrors.bytes(org.springframework.http.HttpStatus.CONFLICT, "幂等冲突"); }
+        catch (IllegalStateException e) { return ApiErrors.bytes(org.springframework.http.HttpStatus.CONFLICT, "订单不可支付"); }
     }
 
     @GetMapping(path = "/api/payments/{paymentId}")
     public ResponseEntity<byte[]> queryPayment(@PathVariable java.util.UUID paymentId) {
         JdbcPaymentQuery result = query(paymentId);
-        if (result == null) return json(404, "{\"error\":\"支付不存在\"}");
+        if (result == null) return ApiErrors.bytes(org.springframework.http.HttpStatus.NOT_FOUND, "支付不存在");
         return result.raw() == null ? json(200, "{\"paymentId\":\"" + result.id() + "\",\"providerReference\":\""
             + result.reference() + "\",\"status\":\"" + result.status() + "\"}") : bytes(200, result.raw());
     }
@@ -88,13 +89,13 @@ public class PaymentWebhookController {
         @RequestBody(required = false) byte[] rawBody,
                                                @RequestHeader("Idempotency-Key") String key) {
         if (rawBody == null || rawBody.length == 0 || key == null || key.isBlank()) {
-            return json(400, "{\"error\":\"退款请求无效\"}");
+            return ApiErrors.bytes(org.springframework.http.HttpStatus.BAD_REQUEST, "退款请求无效");
         }
         RefundRequest request;
         try { request = mapper.readValue(rawBody, RefundRequest.class); }
-        catch (Exception invalidJson) { return json(400, "{\"error\":\"退款请求无效\"}"); }
+        catch (Exception invalidJson) { return ApiErrors.bytes(org.springframework.http.HttpStatus.BAD_REQUEST, "退款请求无效"); }
         if (request == null || request.amountFen() <= 0 || (orderId == null && request.orderId() == null))
-            return json(400, "{\"error\":\"退款请求无效\"}");
+            return ApiErrors.bytes(org.springframework.http.HttpStatus.BAD_REQUEST, "退款请求无效");
         java.util.UUID actualOrder = orderId == null ? request.orderId() : orderId;
         try {
             var result = refunds.requestRefund(actualOrder, key, Money.ofFen(request.amountFen()), rawBody);
@@ -102,26 +103,26 @@ public class PaymentWebhookController {
             return result.responseUtf8() == null ? json(status, "{\"refundId\":\"" + result.refundId() + "\",\"providerReference\":\""
                 + result.providerReference() + "\",\"status\":\"" + result.status() + "\"}") : bytes(status, result.responseUtf8());
         } catch (RefundService.RefundLimitExceededException | RefundService.IdempotencyConflictException e) {
-            return json(409, "{\"error\":\"退款额度或幂等冲突\"}");
-        } catch (IllegalArgumentException e) { return json(400, "{\"error\":\"退款请求无效\"}"); }
-        catch (IllegalStateException e) { return json(409, "{\"error\":\"订单不可退款\"}"); }
+            return ApiErrors.bytes(org.springframework.http.HttpStatus.CONFLICT, "退款额度或幂等冲突");
+        } catch (IllegalArgumentException e) { return ApiErrors.bytes(org.springframework.http.HttpStatus.BAD_REQUEST, "退款请求无效"); }
+        catch (IllegalStateException e) { return ApiErrors.bytes(org.springframework.http.HttpStatus.CONFLICT, "订单不可退款"); }
     }
 
     @GetMapping(path = "/api/refunds/{refundId}")
     public ResponseEntity<byte[]> queryRefund(@PathVariable java.util.UUID refundId) {
         var result = refunds.queryRefund(refundId);
-        if (result == null) return json(404, "{\"error\":\"退款不存在\"}");
+        if (result == null) return ApiErrors.bytes(org.springframework.http.HttpStatus.NOT_FOUND, "退款不存在");
         return result.responseUtf8() == null ? json(200, "{\"refundId\":\"" + result.refundId() + "\",\"providerReference\":\""
             + result.providerReference() + "\",\"status\":\"" + result.status() + "\"}") : bytes(200, result.responseUtf8());
     }
 
     @ExceptionHandler(DataAccessException.class)
     ResponseEntity<byte[]> databaseFailure(DataAccessException ignored) {
-        return json(503, "{\"error\":\"支付依赖暂不可用\"}");
+        return ApiErrors.bytes(org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE, "支付依赖暂不可用");
     }
     @ExceptionHandler({MissingRequestHeaderException.class, HttpMessageNotReadableException.class})
     ResponseEntity<byte[]> protocolFailure(Exception ignored) {
-        return json(400, "{\"error\":\"请求参数无效\"}");
+        return ApiErrors.bytes(org.springframework.http.HttpStatus.BAD_REQUEST, "请求参数无效");
     }
     public record RefundRequest(java.util.UUID orderId, long amountFen) {}
 

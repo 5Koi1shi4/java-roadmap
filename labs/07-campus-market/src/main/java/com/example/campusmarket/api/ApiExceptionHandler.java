@@ -45,6 +45,11 @@ public final class ApiExceptionHandler {
         return error(HttpStatus.SERVICE_UNAVAILABLE, "DEPENDENCY_UNAVAILABLE", "依赖服务暂时不可用");
     }
 
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<ApiError> internalFailure(Exception ignored) {
+        return error(HttpStatus.INTERNAL_SERVER_ERROR, "INTERNAL_ERROR", "服务暂时不可用");
+    }
+
     private ResponseEntity<ApiError> error(HttpStatus status, String code, String message) {
         return ResponseEntity.status(status).contentType(JSON)
             .body(new ApiError(code, message, SecurityConfiguration.correlationId()));
