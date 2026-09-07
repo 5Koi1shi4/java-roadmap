@@ -79,6 +79,12 @@ R5 本地证据：`./mvnw.cmd -q -f pom.xml -DskipTests compile`、`-DskipTests 
 
 追加本地证据：`-DskipTests test-compile` 与 Warranty/Listing 定向单测均退出码 0；Docker 端应重跑第一批 IT，确认 multipart 201/200、malformed 400 及提现同 key 限制后重放。
 
+## R5 控制端第二次失败修复追加
+
+控制端确认合法 multipart 已通过，但无 boundary 请求仍为 500。根因是 multipart 解析发生在 Controller 方法/局部 `@ExceptionHandler` 之前；新增全局 `ApiProtocolExceptionHandler`（`@RestControllerAdvice`）捕获 `MultipartException`，统一返回 UTF-8 `application/json` 400 错误体。保留合法物理对象存储写入/读取与 malformed 400 断言。
+
+追加本地证据：`-DskipTests test-compile`、`WarrantyPolicyTest,ListingTest,WarrantyControllerContractTest` 定向测试退出码 0；请控制端重跑第一批确认 malformed multipart 为 JSON 400。
+
 已保持 Task11 订单→案件→支付锁顺序、settled 订单状态隔离、支付 provider 适配框架和退款额度硬上限。关注项：Docker 引擎不可用导致两类 IT 尚未在真实 MySQL 上完成 GREEN；应在 Docker 可用环境运行 `.\mvnw.cmd -Dit.test=WarrantyObligationIT,WarrantyDeadlineRaceIT verify` 并确认 4 cases、0 skipped。
 
 ## R4 例外轮复核与实现（基线 e9a9c93）
