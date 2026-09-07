@@ -1,23 +1,23 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
 import com.example.campusmarket.observability.CampusMetrics;
-import io.micrometer.core.instrument.Meter;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.test.context.ActiveProfiles;
-import org.springframework.test.context.TestPropertySource;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.test.context.ContextConfiguration;
+import org.springframework.test.context.junit.jupiter.SpringExtension;
+import org.junit.jupiter.api.extension.ExtendWith;
 
 import java.time.Duration;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@SpringBootTest(classes = CampusMarketApplication.class)
-@ActiveProfiles("test")
-@TestPropertySource(properties = "spring.task.scheduling.enabled=false")
+@ExtendWith(SpringExtension.class)
+@ContextConfiguration(classes = MetricsIT.MetricsTestConfiguration.class)
 class MetricsIT {
     @Autowired CampusMetrics metrics;
     @Autowired MeterRegistry registry;
@@ -36,5 +36,18 @@ class MetricsIT {
         assertThat(registry.getMeters()).allSatisfy(meter -> assertThat(meter.getId().getTags())
             .noneMatch(tag -> forbidden.contains(tag.getKey())));
         assertThat(registry.find("campus.market.review.total").counter().count()).isEqualTo(1);
+    }
+
+    @TestConfiguration(proxyBeanMethods = false)
+    static class MetricsTestConfiguration {
+        @Bean
+        MeterRegistry meterRegistry() {
+            return new SimpleMeterRegistry();
+        }
+
+        @Bean
+        CampusMetrics campusMetrics(MeterRegistry registry) {
+            return new CampusMetrics(registry);
+        }
     }
 }

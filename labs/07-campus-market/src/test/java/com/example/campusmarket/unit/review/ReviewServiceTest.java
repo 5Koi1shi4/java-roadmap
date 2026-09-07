@@ -8,8 +8,10 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 
 import java.util.UUID;
+import java.util.Arrays;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
 class ReviewServiceTest {
@@ -30,5 +32,12 @@ class ReviewServiceTest {
             .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> service.create(UUID.randomUUID(), UUID.randomUUID(), 5, "字".repeat(2001)))
             .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void exposesOneExplicitSpringConstructor() {
+        assertThat(Arrays.stream(ReviewService.class.getDeclaredConstructors())
+            .filter(constructor -> constructor.isAnnotationPresent(org.springframework.beans.factory.annotation.Autowired.class))
+            .count()).isEqualTo(1);
     }
 }

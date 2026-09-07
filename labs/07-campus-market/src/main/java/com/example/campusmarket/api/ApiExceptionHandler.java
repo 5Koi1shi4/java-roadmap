@@ -50,6 +50,4 @@ public final class ApiExceptionHandler {
             .body(new ApiError(code, message, SecurityConfiguration.correlationId()));
     }
 
-    /** 与协议文档保持同一入口，便于 Web 层调用方按 handler 读取固定错误模型。 */
-    public record ApiError(String code, String message, String correlationId) { }
 }

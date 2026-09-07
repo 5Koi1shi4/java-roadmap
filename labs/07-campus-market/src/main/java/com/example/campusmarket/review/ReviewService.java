@@ -4,6 +4,7 @@ import com.example.campusmarket.observability.AuditRecorder;
 import com.example.campusmarket.observability.SafeAuditEvent;
 import com.example.campusmarket.observability.CampusMetrics;
 import org.springframework.context.annotation.Profile;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -25,6 +26,7 @@ public final class ReviewService {
     private final AuditRecorder audits;
     private final CampusMetrics metrics;
 
+    @Autowired
     public ReviewService(JdbcTemplate jdbc, PlatformTransactionManager transactionManager,
                          AuditRecorder audits, CampusMetrics metrics) {
         this.jdbc = Objects.requireNonNull(jdbc, "评价数据库不能为空");
