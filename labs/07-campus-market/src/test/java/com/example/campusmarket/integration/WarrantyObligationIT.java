@@ -71,6 +71,9 @@ class WarrantyObligationIT extends Task11MySqlContainers {
         assertThat(obligations.deductFutureSettlement(settlement, obligation, Money.ofFen(800))).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM settlement_obligation_deduction WHERE settlement_id=? AND obligation_id=?", Integer.class, settlement.toString(), obligation.toString())).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT funded_amount_fen FROM seller_obligation WHERE id=?", Long.class, obligation.toString())).isEqualTo(800L);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='WARRANTY_REFUND_REQUESTED' AND aggregate_id=?", Integer.class, obligation.toString())).isEqualTo(1);
+        String refundPayload=jdbc.queryForObject("SELECT CAST(payload AS CHAR) FROM integration_outbox WHERE event_type='WARRANTY_REFUND_REQUESTED' AND aggregate_id=?", String.class, obligation.toString());
+        assertThat(refundPayload).contains(opened.caseId().toString()).contains(f.order().toString()).contains("\"amountFen\":800");
         assertThat(evidenceAccess.canRead("WARRANTY", opened.caseId(), f.buyer())).isTrue();
         assertThat(evidenceAccess.canRead("WARRANTY", opened.caseId(), UUID.randomUUID())).isFalse();
     }

@@ -60,7 +60,7 @@ public final class SellerObligationService {
             SettlementFacts settlement=jdbc.query("SELECT s.status,s.net_settlement_fen,o.seller_id,t.seller_id FROM settlement s JOIN trade_order t ON t.id=s.order_id JOIN seller_obligation o ON o.id=? WHERE s.id=? FOR UPDATE",rs->rs.next()?new SettlementFacts(rs.getString(1),rs.getLong(2),UUID.fromString(rs.getString(3)),UUID.fromString(rs.getString(4))):null,obligationId.toString(),settlementId.toString());
             if (settlement==null || !"SETTLED".equals(settlement.status()) || !settlement.seller().equals(settlement.orderSeller())) throw new IllegalStateException("结算归属或状态无效");
             if (settlement.net() <= 0) return 0L;
-            Obligation row=jdbc.query("SELECT id,seller_id,obligation_amount_fen,funded_amount_fen,status,version FROM seller_obligation WHERE id=? FOR UPDATE",rs->rs.next()?new Obligation(UUID.fromString(rs.getString(1)),null,UUID.fromString(rs.getString(2)),rs.getLong(3),rs.getLong(4),rs.getString(5),null,rs.getLong(6)):null,obligationId.toString());
+            Obligation row=jdbc.query("SELECT id,warranty_case_id,seller_id,obligation_amount_fen,funded_amount_fen,status,version FROM seller_obligation WHERE id=? FOR UPDATE",rs->rs.next()?new Obligation(UUID.fromString(rs.getString(1)),UUID.fromString(rs.getString(2)),UUID.fromString(rs.getString(3)),rs.getLong(4),rs.getLong(5),rs.getString(6),null,rs.getLong(7)):null,obligationId.toString());
             if(row==null) throw new NotFoundException();
             long remaining=row.amount()-row.funded(); if(remaining<=0) return 0L;
             long deduction=Math.min(Math.min(amount.fen(),remaining),settlement.net());
