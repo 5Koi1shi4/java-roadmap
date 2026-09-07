@@ -48,7 +48,7 @@ public final class PaymentReconciliationScheduler {
         for (var id : repository.duePaymentReconciliations(batchSize)) {
             String token = UUID.randomUUID().toString();
             if (repository.claimPaymentReconciliation(id, "payment-reconciler", token)) {
-                try { payments.reconcilePayment(id, "payment-reconciler", token); if (metrics != null) metrics.recordRetry("PAYMENT", "SUCCESS"); } catch (RuntimeException failure) {
+                try { payments.reconcilePayment(id, "payment-reconciler", token); } catch (RuntimeException failure) {
                     if (metrics != null) metrics.recordRetry("PAYMENT", "RETRY");
                     LOG.warn("支付对账失败，保留 UNKNOWN 供下次重试 paymentId={} failureClass={}", id, failure.getClass().getSimpleName());
                 }
@@ -58,7 +58,7 @@ public final class PaymentReconciliationScheduler {
         for (var id : repository.dueRefundReconciliations(batchSize)) {
             String token = UUID.randomUUID().toString();
             if (repository.claimRefundReconciliation(id, "refund-reconciler", token)) {
-                try { refunds.reconcileRefund(id, "refund-reconciler", token); if (metrics != null) metrics.recordRetry("REFUND", "SUCCESS"); } catch (RuntimeException failure) {
+                try { refunds.reconcileRefund(id, "refund-reconciler", token); } catch (RuntimeException failure) {
                     if (metrics != null) metrics.recordRetry("REFUND", "RETRY");
                     LOG.warn("退款对账失败，保留状态供下次重试 refundId={} failureClass={}", id, failure.getClass().getSimpleName());
                 }

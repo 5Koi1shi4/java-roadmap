@@ -18,4 +18,17 @@ class CampusMetricsRetryTest {
         assertThat(registry.get("campus.market.retry.total.INBOX").tag("result", "RETRY").counter().count()).isEqualTo(1.0);
         assertThat(registry.get("campus.market.retry.total.INBOX").tag("result", "UNKNOWN").counter().count()).isEqualTo(1.0);
     }
+
+    @Test
+    void hardDeadlineEscalationRemainsDistinctFromUnknown() {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        CampusMetrics metrics = new CampusMetrics(registry);
+
+        metrics.recordHardDeadlineEscalation();
+
+        assertThat(registry.get("campus.market.admin.hard_deadline.total")
+            .tag("result", "ESCALATED").counter().count()).isEqualTo(1.0);
+        assertThat(registry.find("campus.market.admin.hard_deadline.total")
+            .tag("result", "UNKNOWN").counter()).isNull();
+    }
 }

@@ -103,13 +103,13 @@ public class StorageCleanupScheduler {
     }
 
     protected boolean complete(Task task) {
-        Integer changed = transactions.execute(status -> jdbc.update("UPDATE storage_cleanup_task SET status='COMPLETED', lease_until=NULL, updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='PROCESSING' AND owner_id=? AND claim_token=?",
+        Integer changed = transactions.execute(status -> jdbc.update("UPDATE storage_cleanup_task SET status='COMPLETED', lease_until=NULL, updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='PROCESSING' AND owner_id=? AND claim_token=? AND lease_until > CURRENT_TIMESTAMP(6)",
             task.id(), task.owner(), task.token()));
         return changed != null && changed == 1;
     }
 
     protected boolean release(Task task, String failureClass) {
-        Integer changed = transactions.execute(status -> jdbc.update("UPDATE storage_cleanup_task SET status='PENDING', failure_class=?, lease_until=NULL, run_after=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND), updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='PROCESSING' AND owner_id=? AND claim_token=?",
+        Integer changed = transactions.execute(status -> jdbc.update("UPDATE storage_cleanup_task SET status='PENDING', failure_class=?, lease_until=NULL, run_after=DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 30 SECOND), updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='PROCESSING' AND owner_id=? AND claim_token=? AND lease_until > CURRENT_TIMESTAMP(6)",
             failureClass, task.id(), task.owner(), task.token()));
         return changed != null && changed == 1;
     }

@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 @Component
 public final class CampusMetrics {
-    private static final Set<String> RESULTS = Set.of("SUCCESS", "FAILURE", "REJECTED", "TIMEOUT", "DUPLICATE", "UNKNOWN", "RETRY",
+    private static final Set<String> RESULTS = Set.of("SUCCESS", "FAILURE", "REJECTED", "TIMEOUT", "DUPLICATE", "UNKNOWN", "RETRY", "ESCALATED",
         "SENT", "VERIFIED", "RATE_LIMITED", "RECEIVED", "CREATED", "PENDING", "SUCCEEDED", "FAILED", "CANCELLED");
     private static final Set<String> ORDER_STATES = Set.of("PENDING_PAYMENT", "AWAITING_HANDOFF", "AWAITING_RECEIPT",
         "AFTERSALE_WINDOW", "DISPUTED", "REFUNDING_CANCEL", "CANCELLED", "REFUNDED", "SETTLED");

@@ -3,7 +3,7 @@ package com.example.campusmarket.observability;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
-/** Executes a business-success metric only after the surrounding transaction commits. */
+/** 仅在外围事务提交成功后记录业务成功指标。 */
 public final class AfterCommitMetrics {
     private AfterCommitMetrics() { }
 

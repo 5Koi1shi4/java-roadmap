@@ -14,8 +14,12 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Autowired;
 
+import java.io.FilterInputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.time.Duration;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Component
 public class MinioPrivateObjectStorage implements PrivateObjectStorage, MediaStorage {
@@ -64,6 +68,13 @@ public class MinioPrivateObjectStorage implements PrivateObjectStorage, MediaSto
         this.metrics = metrics;
     }
 
+    /** 供存储适配器单元测试注入 MinIO 客户端；生产构造器仍负责超时约束。 */
+    MinioPrivateObjectStorage(MinioClient client, String bucket, CampusMetrics metrics) {
+        this.client = Objects.requireNonNull(client, "MinIO 客户端不能为空");
+        this.bucket = Objects.requireNonNull(bucket, "存储桶不能为空");
+        this.metrics = metrics;
+    }
+
     private static Duration bounded(Duration configured, Duration maximum) {
         if (configured == null || configured.isZero() || configured.isNegative()) {
             throw new IllegalArgumentException("对象存储超时必须为正数");
@@ -93,8 +104,7 @@ public class MinioPrivateObjectStorage implements PrivateObjectStorage, MediaSto
         long started = System.nanoTime();
         try {
             InputStream result = client.getObject(GetObjectArgs.builder().bucket(bucket).object(objectKey).build());
-            record("SUCCESS", "READ", started);
-            return result;
+            return new ObservedReadStream(result, started);
         } catch (ErrorResponseException e) {
             record("FAILURE", "READ", started);
             if ("NoSuchKey".equals(e.errorResponse().code()) || "NoSuchObject".equals(e.errorResponse().code())) {
@@ -104,6 +114,55 @@ public class MinioPrivateObjectStorage implements PrivateObjectStorage, MediaSto
         } catch (Exception e) {
             record("FAILURE", "READ", started);
             throw new StorageUnavailableException("对象存储不可用", e);
+        }
+    }
+
+    private final class ObservedReadStream extends FilterInputStream {
+        private final long started;
+        private final AtomicBoolean measured = new AtomicBoolean();
+
+        private ObservedReadStream(InputStream delegate, long started) {
+            super(Objects.requireNonNull(delegate, "MinIO 返回流不能为空"));
+            this.started = started;
+        }
+
+        @Override
+        public int read() throws IOException {
+            try {
+                int value = in.read();
+                if (value < 0) measure("SUCCESS");
+                return value;
+            } catch (IOException | RuntimeException failure) {
+                measure("FAILURE");
+                throw failure;
+            }
+        }
+
+        @Override
+        public int read(byte[] bytes, int offset, int length) throws IOException {
+            try {
+                int value = in.read(bytes, offset, length);
+                if (value < 0) measure("SUCCESS");
+                return value;
+            } catch (IOException | RuntimeException failure) {
+                measure("FAILURE");
+                throw failure;
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            try {
+                in.close();
+                measure("SUCCESS");
+            } catch (IOException | RuntimeException failure) {
+                measure("FAILURE");
+                throw failure;
+            }
+        }
+
+        private void measure(String result) {
+            if (measured.compareAndSet(false, true)) record(result, "READ", started);
         }
     }
 

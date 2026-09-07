@@ -82,6 +82,7 @@ public class OutboxRepository {
             SET status='PUBLISHED', published_at=CURRENT_TIMESTAMP(6),
                 owner_id=NULL, claim_token=NULL, lease_until=NULL
             WHERE event_id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=?
+              AND lease_until > CURRENT_TIMESTAMP(6)
             """, eventId.toString(), owner, claimToken);
     }
 
@@ -95,7 +96,8 @@ public class OutboxRepository {
             UPDATE integration_outbox
             SET status='NEW', owner_id=NULL, claim_token=NULL, lease_until=NULL,
                 available_at=TIMESTAMPADD(MICROSECOND, ?, CURRENT_TIMESTAMP(6))
-            WHERE event_id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=? AND attempt_count < 3
+            WHERE event_id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=?
+              AND lease_until > CURRENT_TIMESTAMP(6) AND attempt_count < 3
             """, micros, eventId.toString(), owner, claimToken);
     }
 
@@ -112,12 +114,14 @@ public class OutboxRepository {
             SELECT ?, 'OUTBOX', event_id, '', ?, payload, 'NEW', CURRENT_TIMESTAMP(6)
             FROM integration_outbox
             WHERE event_id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=?
+              AND lease_until > CURRENT_TIMESTAMP(6)
             ON DUPLICATE KEY UPDATE id=manual_failure.id
             """, UUID.randomUUID().toString(), failureClass, eventId.toString(), owner, claimToken);
         return jdbc.update("""
             UPDATE integration_outbox
             SET status='FAILED', failure_class=?, owner_id=NULL, claim_token=NULL, lease_until=NULL
             WHERE event_id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=?
+              AND lease_until > CURRENT_TIMESTAMP(6)
             """, failureClass, eventId.toString(), owner, claimToken);
     }
 
