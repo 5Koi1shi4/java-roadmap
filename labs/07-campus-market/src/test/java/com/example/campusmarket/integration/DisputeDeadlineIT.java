@@ -22,6 +22,7 @@ import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -120,6 +121,7 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
         UUID dispute = opened.disputeId();
         jdbc.update("UPDATE dispute_case SET seller_deadline=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE id=?", dispute.toString());
         jdbc.update("UPDATE dispute_deadline_claim SET due_at=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE dispute_case_id=? AND deadline_type='SELLER_RESPONSE'", dispute.toString());
+        List<ClaimSnapshot> beforeAdminClaims = claimSnapshots(dispute);
         CountDownLatch caseLocked = new CountDownLatch(1);
         CountDownLatch allowResponse = new CountDownLatch(1);
         var pool = Executors.newFixedThreadPool(2);
@@ -140,7 +142,7 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
             pool.shutdownNow();
         }
         assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, dispute.toString())).isEqualTo("SELLER_RESPONDED");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM dispute_deadline_claim WHERE dispute_case_id=? AND deadline_type IN ('ADMIN_SLA','HARD_DEADLINE')", Integer.class, dispute.toString())).isZero();
+        assertThat(claimSnapshots(dispute)).containsExactlyElementsOf(beforeAdminClaims);
     }
 
     @Test
@@ -318,6 +320,13 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
         locked.countDown();
     }
 
+    private List<ClaimSnapshot> claimSnapshots(UUID dispute) {
+        return jdbc.query("SELECT id,deadline_type,due_at,status,attempt_count,owner_id,claim_token,lease_until,completed_at "
+                + "FROM dispute_deadline_claim WHERE dispute_case_id=? AND deadline_type IN ('ADMIN_SLA','HARD_DEADLINE') ORDER BY deadline_type",
+            (rs, n) -> new ClaimSnapshot(rs.getString(1), rs.getString(2), rs.getTimestamp(3), rs.getString(4), rs.getInt(5),
+                rs.getString(6), rs.getString(7), rs.getTimestamp(8), rs.getTimestamp(9)), dispute.toString());
+    }
+
     private void awaitOrderLockWait(UUID order) {
         org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(10)).untilAsserted(() ->
             assertThat(lockObserver.queryForObject("""
@@ -372,6 +381,9 @@ class DisputeDeadlineIT extends Task11MySqlContainers {
             throw new AssertionError("并发测试线程被中断", interrupted);
         }
     }
+
+    private record ClaimSnapshot(String id, String deadlineType, java.sql.Timestamp dueAt, String status, int attemptCount,
+                                 String ownerId, String claimToken, java.sql.Timestamp leaseUntil, java.sql.Timestamp completedAt) {}
 
     private void insertOrder(UUID buyer, UUID seller, UUID listing, UUID order, String status) {
         jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,?,100,0,'SOLD_OUT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", listing.toString(), seller.toString(), "教材", "描述", "教材");
