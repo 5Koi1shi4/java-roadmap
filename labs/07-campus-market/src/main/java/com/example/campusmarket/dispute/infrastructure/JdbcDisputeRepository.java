@@ -164,8 +164,11 @@ public class JdbcDisputeRepository {
             evidenceId.toString(), caseId.toString(), actorId.toString(), key, type, size, Timestamp.from(now));
     }
     public void insertWarrantyEvidence(UUID evidenceId, UUID caseId, UUID actorId, String key, String type, long size, Instant now) {
-        jdbc.update("INSERT INTO dispute_evidence (id,dispute_case_id,warranty_case_id,case_type,submitted_by,object_key,media_type,size_bytes,created_at) VALUES (?,NULL,?,'WARRANTY',?,?,?, ?,?)",
-            evidenceId.toString(), caseId.toString(), actorId.toString(), key, type, size, Timestamp.from(now));
+        insertWarrantyEvidence(evidenceId, caseId, actorId, key, type, size, null, now);
+    }
+    public void insertWarrantyEvidence(UUID evidenceId, UUID caseId, UUID actorId, String key, String type, long size, String purpose, Instant now) {
+        jdbc.update("INSERT INTO dispute_evidence (id,dispute_case_id,warranty_case_id,case_type,purpose,verification_status,submitted_by,object_key,media_type,size_bytes,created_at) VALUES (?,NULL,?,'WARRANTY',?, 'VERIFIED',?,?,?, ?,?)",
+            evidenceId.toString(), caseId.toString(), purpose, actorId.toString(), key, type, size, Timestamp.from(now));
     }
 
     public void createSession(UUID sessionId, UUID actorId, String key, String claimToken) {

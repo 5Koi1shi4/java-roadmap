@@ -79,8 +79,20 @@ public class ListingService {
     /** Withdrawal command gate; callers must use this command rather than treating canWithdraw as authorization. */
     @Transactional
     public void withdraw(UUID sellerId, long amountFen) {
-        if (sellerId == null || amountFen <= 0) throw new IllegalArgumentException("提现金额必须为正数");
+        withdraw(sellerId, amountFen, "withdraw-" + UUID.randomUUID());
+    }
+    @Transactional
+    public UUID withdraw(UUID sellerId, long amountFen, String idempotencyKey) {
+        if (sellerId == null || amountFen <= 0 || idempotencyKey == null || idempotencyKey.isBlank()) throw new IllegalArgumentException("提现请求无效");
         if (activeRestrictionForUpdate(sellerId, "WITHDRAW")) throw new RestrictionException();
+        if (jdbc == null) throw new IllegalStateException("提现账户存储不可用");
+        Withdrawal existing=jdbc.query("SELECT id,amount_fen FROM seller_withdrawal WHERE seller_id=? AND idempotency_key=? FOR UPDATE",rs->rs.next()?new Withdrawal(UUID.fromString(rs.getString(1)),rs.getLong(2)):null,sellerId.toString(),idempotencyKey);
+        if(existing!=null){if(existing.amount()!=amountFen) throw new IllegalArgumentException("提现幂等冲突");return existing.id();}
+        Long available=jdbc.queryForObject("SELECT GREATEST(0,COALESCE((SELECT SUM(s.net_settlement_fen) FROM settlement s JOIN trade_order o ON o.id=s.order_id WHERE o.seller_id=? AND s.status='SETTLED'),0)-COALESCE((SELECT SUM(amount_fen) FROM seller_withdrawal WHERE seller_id=? AND status IN ('REQUESTED','COMPLETED')),0))",Long.class,sellerId.toString(),sellerId.toString());
+        if(available==null||amountFen>available) throw new InsufficientBalanceException();
+        UUID id=UUID.randomUUID();
+        jdbc.update("INSERT INTO seller_withdrawal(id,seller_id,idempotency_key,amount_fen,status,created_at,updated_at) VALUES (?,?,?,?,'REQUESTED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",id.toString(),sellerId.toString(),idempotencyKey,amountFen);
+        return id;
     }
 
     private boolean isRestricted(UUID sellerId, String type) {
@@ -102,4 +114,6 @@ public class ListingService {
     public record MediaContent(String mediaType, long sizeBytes, String objectKey) { }
     public static class NotFoundException extends RuntimeException { }
     public static class RestrictionException extends RuntimeException { }
+    public static class InsufficientBalanceException extends RuntimeException { }
+    private record Withdrawal(UUID id,long amount) { }
 }

@@ -57,6 +57,10 @@ public class ReliableEventConsumer {
             } else if (result == InboxRepository.DeliveryResult.FAILED) {
                 channel.basicAck(tag, false);
             } else channel.basicNack(tag, false, true);
+        } catch (EventBusinessHandler.UnsupportedEventException unsupported) {
+            // A queue bound to another event family must reject it; ACK would
+            // mark the Inbox completed without executing business logic.
+            channel.basicNack(tag, false, false);
         } catch (IllegalArgumentException permanent) {
             channel.basicAck(tag, false);
         } catch (RuntimeException retryable) {

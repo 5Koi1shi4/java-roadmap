@@ -42,10 +42,15 @@ public final class EvidenceStorage {
     }
 
     public EvidenceRecord attach(UUID caseId, UUID actorId, String filename, String declaredType, InputStream input) {
-        return attach("DISPUTE", caseId, actorId, filename, declaredType, input);
+        return attach("DISPUTE", caseId, actorId, filename, declaredType, null, input);
     }
 
     public EvidenceRecord attach(String caseType, UUID caseId, UUID actorId, String filename, String declaredType, InputStream input) {
+        return attach(caseType, caseId, actorId, filename, declaredType, null, input);
+    }
+
+    public EvidenceRecord attach(String caseType, UUID caseId, UUID actorId, String filename, String declaredType,
+                                 String purpose, InputStream input) {
         if (!access.canAttach(caseType, caseId, actorId)) throw new NotFoundException();
         UUID session = UUID.randomUUID();
         String key = "dispute-evidence/" + randomToken();
@@ -62,7 +67,7 @@ public final class EvidenceStorage {
             EvidenceRecord result = transactions.execute(s -> {
                 if (!access.canAttach(caseType, caseId, actorId)) throw new NotFoundException();
                 InstantHolder now = new InstantHolder(repository.databaseNow());
-                if ("WARRANTY".equals(caseType)) repository.insertWarrantyEvidence(evidenceId, caseId, actorId, key, detected, size, now.value);
+                if ("WARRANTY".equals(caseType)) repository.insertWarrantyEvidence(evidenceId, caseId, actorId, key, detected, size, purpose, now.value);
                 else repository.insertEvidence(evidenceId, caseId, actorId, key, detected, size, now.value);
                 if (repository.completeSession(session, actorId, claimToken) != 1)
                     throw new IllegalStateException("上传会话已过期或已被接管");

@@ -13,6 +13,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class WarrantyEventBusinessHandlerTest {
     @Test
@@ -24,5 +25,14 @@ class WarrantyEventBusinessHandlerTest {
             Instant.now(), 1, Map.of("orderId", order.toString(), "caseId", caseId.toString(),
             "obligationId", obligation.toString(), "amountFen", 800)));
         verify(refunds).requestRefund(eq(order), eq("warranty-refund-" + obligation), eq(com.example.campusmarket.shared.Money.ofFen(800)), eq("WARRANTY"), eq(caseId));
+    }
+
+    @Test
+    void nonWarrantyEventIsRejectedSoReliableConsumerCannotAckItAsCompleted() {
+        WarrantyEventBusinessHandler handler = new WarrantyEventBusinessHandler(mock(RefundService.class));
+        DomainEvent event = new DomainEvent(UUID.randomUUID(), "ORDER_CREATED", "order", 1,
+            Instant.now(), 1, Map.of("orderId", "order"));
+        assertThatThrownBy(() -> handler.handle(event))
+            .isInstanceOf(WarrantyEventBusinessHandler.UnsupportedEventException.class);
     }
 }

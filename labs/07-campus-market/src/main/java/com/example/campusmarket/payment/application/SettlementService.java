@@ -42,7 +42,10 @@ public class SettlementService {
         if ("SETTLED".equals(order.status())) return existing(orderId);
         Instant now = databaseNow();
         if (!eligible(order, now)) return new SettlementResult(orderId, "BLOCKED", 0L, blockReason(order, now));
-        PaymentFacts payment = jdbc.query("SELECT COALESCE(MAX(paid_amount_fen),0),COALESCE(MAX(successful_refund_fen),0),COALESCE(MAX(reserved_refund_fen),0) FROM payment_order WHERE order_id=? AND status='SUCCEEDED'",
+        // Keep settlement's payment fact identical to refund and warranty:
+        // one canonical newest successful attempt, including only that row's
+        // refund counters.
+        PaymentFacts payment = jdbc.query("SELECT paid_amount_fen,successful_refund_fen,reserved_refund_fen FROM payment_order WHERE order_id=? AND status='SUCCEEDED' ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE",
             rs -> rs.next() ? new PaymentFacts(rs.getLong(1), rs.getLong(2), rs.getLong(3)) : new PaymentFacts(0, 0, 0), orderId.toString());
         long net = payment.paidAmountFen() - payment.successfulRefundFen();
         if (net < 0) return new SettlementResult(orderId, "BLOCKED", 0L, "REFUND_EXCEEDS_PAID");
@@ -111,9 +114,14 @@ public class SettlementService {
             if (jdbc.update("INSERT INTO settlement_obligation_deduction(id,settlement_id,obligation_id,amount_fen,created_at) VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE id=id",
                 UUID.randomUUID().toString(), settlementId.toString(), obligation.id().toString(), due, Timestamp.from(now)) == 1) {
                 long funded = obligation.funded() + due;
-                jdbc.update("UPDATE seller_obligation SET funded_amount_fen=?,status=?,restriction_status=?,version=version+1,updated_at=? WHERE id=? AND funded_amount_fen=?",
-                    funded, funded == obligation.amount() ? "FUNDED" : "PARTIALLY_FUNDED", funded == obligation.amount() ? "NONE" : "RESTRICTED", Timestamp.from(now), obligation.id().toString(), obligation.funded());
-                if (funded == obligation.amount()) jdbc.update("UPDATE seller_account_restriction SET status='CLEARED',cleared_at=? WHERE source_obligation_id=? AND status='ACTIVE'", Timestamp.from(now), obligation.id().toString());
+                if (jdbc.update("UPDATE seller_obligation SET funded_amount_fen=?,status=?,restriction_status=?,version=version+1,updated_at=? WHERE id=? AND funded_amount_fen=?",
+                    funded, funded == obligation.amount() ? "FUNDED" : "PARTIALLY_FUNDED", funded == obligation.amount() ? "NONE" : "RESTRICTED", Timestamp.from(now), obligation.id().toString(), obligation.funded()) != 1)
+                    throw new IllegalStateException("义务抵扣状态冲突");
+                if (funded == obligation.amount()) {
+                    var types=jdbc.query("SELECT restriction_type FROM seller_account_restriction WHERE source_obligation_id=? AND status='ACTIVE' FOR UPDATE",(rs,n)->rs.getString(1),obligation.id().toString());
+                    jdbc.update("UPDATE seller_account_restriction SET status='CLEARED',cleared_at=? WHERE source_obligation_id=? AND status='ACTIVE'", Timestamp.from(now), obligation.id().toString());
+                    for(String type:types) recordTransition(seller,"SELLER_RESTRICTION_CLEARED",obligation.id(),obligation.version()+1,"{\"restrictionType\":\""+type+"\"}");
+                }
                 UUID auditId=UUID.nameUUIDFromBytes(("settlement-obligation:"+settlementId+":"+obligation.id()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
                 String auditDetails="{\"settlementId\":\""+settlementId+"\",\"amountFen\":"+due+"}";
                 jdbc.update("INSERT INTO audit_event(id,actor_id,action,resource_type,resource_id,result,details,occurred_at) VALUES (?,?, 'WARRANTY_OBLIGATION_DEDUCTED','SELLER_OBLIGATION',?,'SUCCESS',CAST(? AS JSON),?) ON DUPLICATE KEY UPDATE id=id",auditId.toString(),seller.toString(),obligation.id().toString(),auditDetails,Timestamp.from(now));
@@ -126,6 +134,12 @@ public class SettlementService {
             }
         }
         if (remaining != net) jdbc.update("UPDATE settlement SET net_settlement_fen=? WHERE id=?", remaining, settlementId.toString());
+    }
+
+    private void recordTransition(UUID seller,String action,UUID obligation,long version,String payload){
+        UUID event=UUID.nameUUIDFromBytes((action+":"+obligation+":"+version+":"+payload).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO audit_event(id,actor_id,action,resource_type,resource_id,result,details,occurred_at) VALUES (?,?,?,'SELLER_OBLIGATION',?,'SUCCESS',CAST(? AS JSON),?) ON DUPLICATE KEY UPDATE id=id",event.toString(),seller.toString(),action,obligation.toString(),payload,Timestamp.from(Instant.now()));
+        jdbc.update("INSERT INTO integration_outbox(id,event_id,event_type,aggregate_id,aggregate_version,schema_version,occurred_at,payload,status,attempt_count,available_at,created_at) VALUES (?,?,?, ?,?,1,CURRENT_TIMESTAMP(6),CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",event.toString(),event.toString(),action,obligation.toString(),version,payload);
     }
 
     public record SettlementResult(UUID orderId, String status, long netSettlementFen, String blockedReason) {}

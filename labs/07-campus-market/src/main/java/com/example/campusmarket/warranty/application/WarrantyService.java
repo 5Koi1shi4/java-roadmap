@@ -98,10 +98,14 @@ public final class WarrantyService {
             if (decision != WarrantyDecision.REJECT) {
                 UUID evidenceUuid;
                 try { evidenceUuid=UUID.fromString(evidenceId); } catch (RuntimeException ex) { throw new IllegalArgumentException("证据不存在",ex); }
-                Integer evidenceCount=jdbc.queryForObject("SELECT COUNT(*) FROM dispute_evidence e JOIN warranty_case w ON w.id=e.warranty_case_id WHERE e.id=? AND e.warranty_case_id=? AND e.case_type='WARRANTY' AND (e.submitted_by=w.buyer_id OR e.submitted_by=w.seller_id) AND (? <> 'RETURN_AND_REFUND' OR e.purpose='RETURN_PROOF') AND (? <> 'REPAIR_COMPENSATION' OR e.purpose IS NULL OR e.purpose='REPAIR_QUOTE')",Integer.class,evidenceUuid.toString(),caseId.toString(),decision.name(),decision.name());
+                Integer evidenceCount=jdbc.queryForObject("SELECT COUNT(*) FROM dispute_evidence e JOIN warranty_case w ON w.id=e.warranty_case_id WHERE e.id=? AND e.warranty_case_id=? AND e.case_type='WARRANTY' AND (e.submitted_by=w.buyer_id OR e.submitted_by=w.seller_id) AND e.verification_status='VERIFIED' AND (? <> 'RETURN_AND_REFUND' OR e.purpose='RETURN_PROOF') AND (? <> 'REPAIR_COMPENSATION' OR e.purpose IN ('REPAIR_QUOTE','INVOICE'))",Integer.class,evidenceUuid.toString(),caseId.toString(),decision.name(),decision.name());
                 if(evidenceCount==null||evidenceCount!=1) throw new IllegalArgumentException("证据不存在");
-                PaymentFacts payment = jdbc.query("SELECT paid_amount_fen,successful_refund_fen,reserved_refund_fen FROM payment_order WHERE order_id=? AND status='SUCCEEDED' ORDER BY created_at DESC,id DESC FOR UPDATE",
-                    rs -> { if (!rs.next()) return null; long paid=rs.getLong(1), successful=0, reserved=0; do { successful=Math.addExact(successful,rs.getLong(2)); reserved=Math.addExact(reserved,rs.getLong(3)); } while (rs.next()); return new PaymentFacts(paid,successful,reserved); }, row.orderId().toString());
+                // Payment/refund services use one canonical successful attempt:
+                // the newest payment fact (created_at,id tie-break). Do not
+                // combine the newest paid amount with refunds from older
+                // attempts, which can manufacture a false exhausted balance.
+                PaymentFacts payment = jdbc.query("SELECT paid_amount_fen,successful_refund_fen,reserved_refund_fen FROM payment_order WHERE order_id=? AND status='SUCCEEDED' ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE",
+                    rs -> rs.next() ? new PaymentFacts(rs.getLong(1),rs.getLong(2),rs.getLong(3)) : null, row.orderId().toString());
                 if (payment == null) throw new IllegalStateException("订单尚未支付成功");
                 if (decision == WarrantyDecision.REPAIR_COMPENSATION) {
                     approvedCompensationFen = WarrantyCase.approvedCompensation(Money.ofFen(requestedCompensationFen), evidenceId,
@@ -127,6 +131,10 @@ public final class WarrantyService {
                     row.sellerId().toString(),"PUBLISH",obligation.toString());
                 jdbc.update("INSERT INTO seller_account_restriction(seller_id,restriction_type,source_obligation_id,status,created_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE status='ACTIVE',cleared_at=NULL",
                     row.sellerId().toString(),"WITHDRAW",obligation.toString());
+                recordObligationTransition(obligation, row.sellerId(), "SELLER_OBLIGATION_CREATED", row.version()+1,
+                    "{\"amountFen\":"+approvedCompensationFen+",\"caseId\":\""+caseId+"\"}");
+                recordObligationTransition(obligation, row.sellerId(), "SELLER_RESTRICTION_ACTIVATED", row.version()+1,
+                    "{\"restrictionTypes\":[\"PUBLISH\",\"WITHDRAW\"]}");
                 if (decision == WarrantyDecision.RETURN_AND_REFUND) {
                     UUID listingId=jdbc.queryForObject("SELECT listing_id FROM trade_order WHERE id=?",(rs,n)->UUID.fromString(rs.getString(1)),row.orderId().toString());
                     if (!inventory.quarantine(listingId, row.quantity(), "warranty-return-quarantine-"+caseId)) throw new IllegalStateException("退回商品隔离失败");
@@ -156,14 +164,13 @@ public final class WarrantyService {
         });
     }
 
-    public EvidenceStorage.EvidenceRecord attachEvidence(UUID caseId, UUID actorId, String filename, String type, java.io.InputStream input) { return evidence.attach("WARRANTY",caseId,actorId,filename,type,input); }
+    public EvidenceStorage.EvidenceRecord attachEvidence(UUID caseId, UUID actorId, String filename, String type, java.io.InputStream input) {
+        throw new IllegalArgumentException("质保证据必须声明用途");
+    }
     public EvidenceStorage.EvidenceRecord attachEvidence(UUID caseId, UUID actorId, String filename, String type, String purpose, java.io.InputStream input) {
-        if (purpose!=null&&!purpose.isBlank()&&!purpose.equals("REPAIR_QUOTE")&&!purpose.equals("RETURN_PROOF")) throw new IllegalArgumentException("证据用途无效");
-        EvidenceStorage.EvidenceRecord result=evidence.attach("WARRANTY",caseId,actorId,filename,type,input);
-        if (purpose!=null&&!purpose.isBlank()) {
-            jdbc.update("UPDATE dispute_evidence SET purpose=? WHERE id=? AND warranty_case_id=?",purpose,result.id().toString(),caseId.toString());
-        }
-        return result;
+        if (purpose==null||purpose.isBlank()||(!purpose.equals("REPAIR_QUOTE")&&!purpose.equals("INVOICE")&&!purpose.equals("RETURN_PROOF")))
+            throw new IllegalArgumentException("证据用途无效");
+        return evidence.attach("WARRANTY",caseId,actorId,filename,type,purpose,input);
     }
     public EvidenceStorage.OpenedEvidence openEvidence(UUID caseId, UUID evidenceId, UUID actorId) { return evidence.open("WARRANTY",caseId,evidenceId,actorId); }
     public CaseView find(UUID caseId) { return jdbc.query("SELECT id,order_id,buyer_id,seller_id,status,decision,compensation_amount_fen,seller_deadline,admin_deadline,hard_deadline FROM warranty_case WHERE id=?",rs->rs.next()?new CaseView(UUID.fromString(rs.getString(1)),UUID.fromString(rs.getString(2)),UUID.fromString(rs.getString(3)),UUID.fromString(rs.getString(4)),rs.getString(5),rs.getString(6),rs.getLong(7),ts(rs.getTimestamp(8)),ts(rs.getTimestamp(9)),ts(rs.getTimestamp(10))):null,caseId.toString()); }
@@ -180,6 +187,11 @@ public final class WarrantyService {
         String payload="{\"caseId\":\""+caseId+"\",\"decision\":\""+decision+"\"}";
         jdbc.update("INSERT INTO audit_event(id,actor_id,action,resource_type,resource_id,result,details,occurred_at) VALUES (?,?,?,'WARRANTY_CASE',?,'SUCCESS',CAST(? AS JSON),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",event.toString(),actor.toString(),type,caseId.toString(),payload);
         jdbc.update("INSERT INTO integration_outbox(id,event_id,event_type,aggregate_id,aggregate_version,schema_version,occurred_at,payload,status,attempt_count,available_at,created_at) VALUES (?,?,?, ?,?,1,CURRENT_TIMESTAMP(6),CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",event.toString(),event.toString(),type,caseId.toString(),version,payload);
+    }
+    private void recordObligationTransition(UUID obligation, UUID actor, String type, long version, String payload) {
+        UUID event=UUID.nameUUIDFromBytes((type+":"+obligation+":"+version).getBytes(StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO audit_event(id,actor_id,action,resource_type,resource_id,result,details,occurred_at) VALUES (?,?,?,'SELLER_OBLIGATION',?,'SUCCESS',CAST(? AS JSON),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",event.toString(),actor.toString(),type,obligation.toString(),payload);
+        jdbc.update("INSERT INTO integration_outbox(id,event_id,event_type,aggregate_id,aggregate_version,schema_version,occurred_at,payload,status,attempt_count,available_at,created_at) VALUES (?,?,?, ?,?,1,CURRENT_TIMESTAMP(6),CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",event.toString(),event.toString(),type,obligation.toString(),version,payload);
     }
     private static byte[] digest(String value){try{return MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));}catch(Exception e){throw new IllegalStateException(e);}}
     private record Existing(UUID id,String orderId,String status,UUID buyerId,byte[] requestHash){} private record OrderFacts(UUID id,UUID buyerId,UUID sellerId,UUID listingId,String title,String description,long unitPriceFen,int quantity,Integer warrantyDays,String scope,String manufacturerProof,Instant manufacturerExpires,OrderStatus status,Instant createdAt,Instant t0){} private record CaseRow(UUID id,UUID orderId,UUID buyerId,UUID sellerId,int quantity,String status,UUID assignedAdmin,long version,String decisionKey,byte[] decisionHash,WarrantyCase.Reason reason){} private record DecisionResult(UUID orderId,WarrantyDecision decision,long amount){} private record PaymentFacts(long paid,long successful,long reserved){}

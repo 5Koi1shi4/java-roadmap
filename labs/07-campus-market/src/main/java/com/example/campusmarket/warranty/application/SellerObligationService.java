@@ -41,7 +41,7 @@ public final class SellerObligationService {
             String state=next==row.amount()?"FUNDED":"PARTIALLY_FUNDED";
             if(jdbc.update("UPDATE seller_obligation SET funded_amount_fen=?,status=?,restriction_status=?,version=version+1,updated_at=? WHERE id=? AND seller_id=? AND funded_amount_fen=? AND status IN ('AWAITING_FUNDING','PARTIALLY_FUNDED')",next,state,next==row.amount()?"NONE":"RESTRICTED",Timestamp.from(now),obligationId.toString(),sellerId.toString(),row.funded())!=1) throw new ConcurrentFundingException();
             jdbc.update("INSERT INTO seller_obligation_funding(id,obligation_id,idempotency_key,request_hash,amount_fen,created_at) VALUES (?,?,?,?,?,?)",UUID.randomUUID().toString(),obligationId.toString(),idempotencyKey,requestHash,amount.fen(),Timestamp.from(now));
-            audit(sellerId, "WARRANTY_OBLIGATION_FUNDED", obligationId, row.version()+1, "{\"fundedAmountFen\":"+next+"}");
+            recordTransition(sellerId, "SELLER_OBLIGATION_FUNDED", obligationId, row.version()+1, "{\"fundedAmountFen\":"+next+"}");
             if(next==row.amount()) { clearRestrictions(sellerId,obligationId,now); refundOutbox(row.caseId(), obligationId, row.amount(), row.version()+1); }
             return new FundingResult(obligationId,row.caseId(),row.amount(),next,state);
         });
@@ -69,7 +69,7 @@ public final class SellerObligationService {
             long next=row.funded()+deduction;
             if(jdbc.update("UPDATE seller_obligation SET funded_amount_fen=?,status=?,restriction_status=?,version=version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND funded_amount_fen=?",next,next==row.amount()?"FUNDED":"PARTIALLY_FUNDED",next==row.amount()?"NONE":"RESTRICTED",obligationId.toString(),row.funded())!=1) throw new ConcurrentFundingException();
             if(jdbc.update("UPDATE settlement SET net_settlement_fen=net_settlement_fen-? WHERE id=? AND net_settlement_fen>=?",deduction,settlementId.toString(),deduction)!=1) throw new ConcurrentFundingException();
-            audit(row.sellerId(), "WARRANTY_OBLIGATION_DEDUCTED", obligationId, row.version()+1, "{\"settlementId\":\""+settlementId+"\",\"amountFen\":"+deduction+"}");
+            recordTransition(row.sellerId(), "SELLER_OBLIGATION_DEDUCTED", obligationId, row.version()+1, "{\"settlementId\":\""+settlementId+"\",\"amountFen\":"+deduction+"}");
             if(next==row.amount()) { clearRestrictions(row.sellerId(),obligationId,dbNow()); refundOutbox(row.caseId(), obligationId, row.amount(), row.version()+1); }
             return deduction;
         });
@@ -88,16 +88,21 @@ public final class SellerObligationService {
         return jdbc.query("SELECT id,warranty_case_id,obligation_amount_fen,funded_amount_fen,status,funding_deadline FROM seller_obligation WHERE seller_id=? ORDER BY funding_deadline,id",
             (rs,n)->new ObligationView(UUID.fromString(rs.getString(1)),UUID.fromString(rs.getString(2)),rs.getLong(3),rs.getLong(4),rs.getString(5),rs.getTimestamp(6).toInstant()),sellerId.toString());
     }
-    private void clearRestrictions(UUID seller,UUID obligation,Instant now){jdbc.update("UPDATE seller_account_restriction SET status='CLEARED',cleared_at=? WHERE seller_id=? AND source_obligation_id=? AND status='ACTIVE'",Timestamp.from(now),seller.toString(),obligation.toString());}
+    private void clearRestrictions(UUID seller,UUID obligation,Instant now){
+        var types=jdbc.query("SELECT restriction_type FROM seller_account_restriction WHERE seller_id=? AND source_obligation_id=? AND status='ACTIVE' FOR UPDATE",(rs,n)->rs.getString(1),seller.toString(),obligation.toString());
+        jdbc.update("UPDATE seller_account_restriction SET status='CLEARED',cleared_at=? WHERE seller_id=? AND source_obligation_id=? AND status='ACTIVE'",Timestamp.from(now),seller.toString(),obligation.toString());
+        for(String type:types) recordTransition(seller,"SELLER_RESTRICTION_CLEARED",obligation,now.toEpochMilli(),"{\"restrictionType\":\""+type+"\"}");
+    }
     private void refundOutbox(UUID caseId, UUID obligationId, long amount, long version) {
         UUID event=UUID.nameUUIDFromBytes(("warranty-refund:"+obligationId).getBytes(StandardCharsets.UTF_8));
         UUID order=jdbc.queryForObject("SELECT order_id FROM warranty_case WHERE id=?",(rs,n)->UUID.fromString(rs.getString(1)),caseId.toString());
         String payload="{\"orderId\":\""+order+"\",\"caseId\":\""+caseId+"\",\"obligationId\":\""+obligationId+"\",\"amountFen\":"+amount+"}";
         jdbc.update("INSERT INTO integration_outbox(id,event_id,event_type,aggregate_id,aggregate_version,schema_version,occurred_at,payload,status,attempt_count,available_at,created_at) VALUES (?,?, 'WARRANTY_REFUND_REQUESTED',?,?,1,CURRENT_TIMESTAMP(6),CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",event.toString(),event.toString(),obligationId.toString(),version,payload);
     }
-    private void audit(UUID actor, String action, UUID obligation, long version, String details) {
-        UUID event=UUID.nameUUIDFromBytes((action+":"+obligation+":"+version).getBytes(StandardCharsets.UTF_8));
+    private void recordTransition(UUID actor, String action, UUID obligation, long version, String details) {
+        UUID event=UUID.nameUUIDFromBytes((action+":"+obligation+":"+version+":"+details).getBytes(StandardCharsets.UTF_8));
         jdbc.update("INSERT INTO audit_event(id,actor_id,action,resource_type,resource_id,result,details,occurred_at) VALUES (?,?,?,'SELLER_OBLIGATION',?,'SUCCESS',CAST(? AS JSON),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",event.toString(),actor.toString(),action,obligation.toString(),details);
+        jdbc.update("INSERT INTO integration_outbox(id,event_id,event_type,aggregate_id,aggregate_version,schema_version,occurred_at,payload,status,attempt_count,available_at,created_at) VALUES (?,?,?, ?,?,1,CURRENT_TIMESTAMP(6),CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",event.toString(),event.toString(),action,obligation.toString(),version,details);
     }
     private Instant dbNow(){return jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)",Timestamp.class).toInstant();}
     private static byte[] digest(String value){try{return MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));}catch(Exception e){throw new IllegalStateException(e);}}

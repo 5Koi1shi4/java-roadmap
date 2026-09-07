@@ -88,7 +88,7 @@ class WarrantyObligationIT extends Task11MySqlContainers {
     void returnAndRefundRequiresReturnProofAndQuarantinesInventory() {
         Fixture f=fixture(1000,30); UUID admin=user();
         WarrantyService.Result opened=warranties.openWarrantyCase(f.order(),1,"FUNCTIONAL_DEFECT","return-"+f.order(),f.buyer());
-        UUID generic=evidence(opened.caseId(),f.buyer());
+        UUID generic=evidence(opened.caseId(),f.buyer(),null);
         assertThatThrownBy(()->warranties.decide(opened.caseId(),admin,WarrantyDecision.RETURN_AND_REFUND,0,generic.toString()))
             .isInstanceOf(IllegalArgumentException.class);
         UUID proof=evidence(opened.caseId(),f.buyer(),"RETURN_PROOF");
@@ -118,6 +118,18 @@ class WarrantyObligationIT extends Task11MySqlContainers {
         var json=new ObjectMapper().readTree(payload); assertThat(json.path("netSettlementFen").asLong()).isEqualTo(200L);
     }
 
+    @Test
+    void latestSuccessfulPaymentIsTheCanonicalRefundBalance() {
+        Fixture f=fixture(1000,30); UUID admin=user();
+        // A stale retry must not contribute its refund counters to the newer
+        // successful payment selected by RefundService/SettlementService.
+        UUID stale=UUID.randomUUID();
+        jdbc.update("INSERT INTO payment_order(id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,successful_refund_fen,reserved_refund_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,1000,1000,1000,0,?,'SUCCEEDED',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 MINUTE),CURRENT_TIMESTAMP(6))",stale.toString(),f.order().toString(),"simulated","stale-"+stale,"stale-ref-"+stale);
+        WarrantyService.Result opened=warranties.openWarrantyCase(f.order(),1,"FUNCTIONAL_DEFECT","canonical-"+f.order(),f.buyer());
+        UUID quote=evidence(opened.caseId(),f.buyer());
+        assertThat(warranties.decide(opened.caseId(),admin,WarrantyDecision.REPAIR_COMPENSATION,800,quote.toString()).status()).isEqualTo("RESOLVED");
+    }
+
     private Fixture fixture(long paid, int daysAgo) {
         UUID buyer = user(), seller = user(), listing = UUID.randomUUID(), order = UUID.randomUUID(), payment = UUID.randomUUID();
         jdbc.update("INSERT INTO listing(id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,'数码',?,0,'SOLD_OUT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", listing.toString(), seller.toString(), "键盘", "描述", paid);
@@ -126,7 +138,7 @@ class WarrantyObligationIT extends Task11MySqlContainers {
         return new Fixture(buyer, seller, order, listing);
     }
     private UUID user() { UUID id=UUID.randomUUID(); jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",id.toString(),id+"@stu.example.edu.cn","hash"); return id; }
-    private UUID evidence(UUID caseId, UUID actor) { return evidence(caseId,actor,null); }
-    private UUID evidence(UUID caseId, UUID actor, String purpose) { UUID id=UUID.randomUUID(); jdbc.update("INSERT INTO dispute_evidence(id,dispute_case_id,warranty_case_id,case_type,purpose,submitted_by,object_key,media_type,size_bytes,created_at) VALUES (?,NULL,?,'WARRANTY',?,?,?,'application/pdf',4,CURRENT_TIMESTAMP(6))",id.toString(),caseId.toString(),purpose,actor.toString(),"fixture-proof-"+caseId+"-"+id); return id; }
+    private UUID evidence(UUID caseId, UUID actor) { return evidence(caseId,actor,"REPAIR_QUOTE"); }
+    private UUID evidence(UUID caseId, UUID actor, String purpose) { UUID id=UUID.randomUUID(); jdbc.update("INSERT INTO dispute_evidence(id,dispute_case_id,warranty_case_id,case_type,purpose,verification_status,submitted_by,object_key,media_type,size_bytes,created_at) VALUES (?,NULL,?,'WARRANTY',?,'VERIFIED',?,'fixture-proof-"+caseId+"-"+id+"','application/pdf',4,CURRENT_TIMESTAMP(6))",id.toString(),caseId.toString(),purpose,actor.toString()); return id; }
     private record Fixture(UUID buyer, UUID seller, UUID order, UUID listing) {}
 }

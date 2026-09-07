@@ -21,7 +21,8 @@ public final class WarrantyEventBusinessHandler implements EventBusinessHandler 
 
     @Override
     public void handle(DomainEvent event) {
-        if (!"WARRANTY_REFUND_REQUESTED".equals(event.eventType())) return;
+        if (!"WARRANTY_REFUND_REQUESTED".equals(event.eventType()))
+            throw new UnsupportedEventException(event.eventType());
         try {
             UUID orderId = UUID.fromString(String.valueOf(event.payload().get("orderId")));
             UUID caseId = UUID.fromString(String.valueOf(event.payload().get("caseId")));
@@ -31,5 +32,10 @@ public final class WarrantyEventBusinessHandler implements EventBusinessHandler 
         } catch (RuntimeException ex) {
             throw new IllegalStateException("质保退款事件处理失败", ex);
         }
+    }
+
+    /** Signals routing misconfiguration; the reliable consumer rejects rather than ACKs it. */
+    public static final class UnsupportedEventException extends EventBusinessHandler.UnsupportedEventException {
+        public UnsupportedEventException(String eventType) { super("质保处理器不支持事件: " + eventType); }
     }
 }

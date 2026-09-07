@@ -61,3 +61,15 @@ R3 控制端预审后的测试补强：新增 `WarrantyEventBusinessHandlerTest`
 ## 自审与关注项
 
 已保持 Task11 订单→案件→支付锁顺序、settled 订单状态隔离、支付 provider 适配框架和退款额度硬上限。关注项：Docker 引擎不可用导致两类 IT 尚未在真实 MySQL 上完成 GREEN；应在 Docker 可用环境运行 `.\mvnw.cmd -Dit.test=WarrantyObligationIT,WarrantyDeadlineRaceIT verify` 并确认 4 cases、0 skipped。
+
+## R4 例外轮复核与实现（基线 e9a9c93）
+
+- RED：在 `WarrantyEventBusinessHandlerTest` 增加非质保事件测试；基线无法提供 `UnsupportedEventException`，测试先失败。GREEN：实现事件族拒绝异常及 `ReliableEventConsumer` reject-without-ACK 分支，定向测试通过。
+- RED：增加 `WarrantyPolicyTest.warrantyEvidenceRequiresAnExplicitPurpose`，基线允许无用途质保证据。GREEN：上传边界强制 `REPAIR_QUOTE`/`INVOICE`/`RETURN_PROOF`，物理上传即写 `verification_status=VERIFIED`，裁定仅接受同案参与者、对应用途和 VERIFIED 证据；V28 增加约束/索引。
+- 多笔成功支付事实统一为最新成功支付行（`created_at DESC,id DESC`）及其退款累计，修复裁定此前混合最新实付与所有行退款而与退款服务/结算不一致；新增真实 MySQL 集成回归待控制端执行。
+- 义务创建、筹资、抵扣、过期及 PUBLISH/WITHDRAW 限制激活/清除现在各写审计和对应 Outbox；截止过期从批量裸 UPDATE 改为逐义务锁定/CAS。
+- `WarrantyDeadlineScheduler.arm` 只对 `NEW` claim 保留更早固定期限，绝不清除 `PROCESSING` 的 owner/token/lease 或重置 `COMPLETED`，修复租约夺取和截止时间漂移。
+- 新增 V29 `seller_withdrawal` 及 `/api/seller/withdrawals` 实际命令：事务内 WITHDRAW 行锁、余额检查、幂等落库，限制拒绝不再是空方法。
+- 质保/筹资/证据/提现 HTTP 错误契约补充 JSON 400/409/422/503；可靠消息配置按事件族路由，解决测试 fixture 与 Warranty handler 多 Bean 注入歧义。
+
+R4 定向 GREEN：`labs/07-campus-market/mvnw.cmd -q -f labs/07-campus-market/pom.xml '-Dtest=WarrantyPolicyTest,WarrantyEventBusinessHandlerTest,WarrantyOutboxDispatcherTest,WarrantyControllerContractTest' test`（通过）；`-DskipTests compile`（通过）；`-DskipTests test-compile`（通过）；`git diff --check`（通过，仅 LF/CRLF 提示）。真实 MySQL/Rabbit/HTTP Failsafe 仍需控制端 Docker 环境运行，未将环境不可用折算为 skipped 或通过。
