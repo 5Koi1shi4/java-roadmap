@@ -19,6 +19,8 @@
 - `.\mvnw.cmd -DskipTests compile`：BUILD SUCCESS。
 - `git diff --check`：通过（仅 CRLF 转换提示）。
 - `.\mvnw.cmd test`：81 tests、0 failures、0 errors、0 skipped。
+- 控制端真实 MySQL 复跑发现 `WarrantyDeadlineRaceIT.expiredSellerClaimIsTakenOverWithFreshTokenAndAdminDeadlinesUseDatabaseTime` 的管理员期限断言为 0：fixture 只插入过期 seller claim，而调度器 `arm` 仅 UPDATE，不会创建缺失的 admin/hard claim。已改为 INSERT ... ON DUPLICATE KEY UPDATE，以数据库时间创建并重置两类管理员 claim；同时保留旧 owner/token fencing。
+- 修复后 `.\mvnw.cmd '-Dtest=WarrantyPolicyTest,ListingTest' test`：9 tests、0 failures、0 errors、0 skipped；IT 已重新 test-compile。
 - 真实 Docker 验收暴露 `ListingService` 有两个 `@Autowired` 构造器（3 参数与 4 参数），导致 ApplicationContext 报 `Invalid autowire-marked constructor`；已移除 3 参数构造器的 `@Autowired`，保留 4 参数为唯一 Spring 注入路径，同时保留 3 参数兼容手动/单测构造。
 - 修复后 ` .\mvnw.cmd '-Dtest=WarrantyPolicyTest,ListingTest' test`：9 tests、0 failures、0 errors、0 skipped；`test-compile` 通过。
 - 新增 `WarrantyObligationIT`（2 cases）与 `WarrantyDeadlineRaceIT`（2 cases），均使用 `Task11MySqlContainers` 的真实 MySQL 8.4/Testcontainers，覆盖结算后义务、筹资幂等、限制、复合抵扣幂等、ACL、seller/admin deadline、过期 claim takeover、owner/token/lease fencing 与筹资/过期竞态。
