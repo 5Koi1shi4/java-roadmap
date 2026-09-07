@@ -151,6 +151,12 @@ public final class WarrantyService {
     public EvidenceStorage.EvidenceRecord attachEvidence(UUID caseId, UUID actorId, String filename, String type, java.io.InputStream input) { return evidence.attach("WARRANTY",caseId,actorId,filename,type,input); }
     public EvidenceStorage.OpenedEvidence openEvidence(UUID caseId, UUID evidenceId, UUID actorId) { return evidence.open("WARRANTY",caseId,evidenceId,actorId); }
     public CaseView find(UUID caseId) { return jdbc.query("SELECT id,order_id,buyer_id,seller_id,status,decision,compensation_amount_fen,seller_deadline,admin_deadline,hard_deadline FROM warranty_case WHERE id=?",rs->rs.next()?new CaseView(UUID.fromString(rs.getString(1)),UUID.fromString(rs.getString(2)),UUID.fromString(rs.getString(3)),UUID.fromString(rs.getString(4)),rs.getString(5),rs.getString(6),rs.getLong(7),ts(rs.getTimestamp(8)),ts(rs.getTimestamp(9)),ts(rs.getTimestamp(10))):null,caseId.toString()); }
+    public CaseView find(UUID caseId, UUID actorId) {
+        CaseView view=find(caseId);
+        Integer admin = actorId==null?0:jdbc.queryForObject("SELECT COUNT(*) FROM warranty_case WHERE id=? AND assigned_admin_id=?",Integer.class,caseId.toString(),actorId.toString());
+        if(view==null || actorId==null || !(actorId.equals(view.buyerId())||actorId.equals(view.sellerId())||Integer.valueOf(1).equals(admin))) throw new NotFoundException();
+        return view;
+    }
     private WarrantyCase.Reason parseReason(String value) { try{return WarrantyCase.Reason.valueOf(value.trim().toUpperCase(java.util.Locale.ROOT));}catch(Exception e){throw new IllegalArgumentException("质保理由无效",e);} }
     private Instant dbNow(){return jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)",Timestamp.class).toInstant();} private static Timestamp ts(Instant i){return i==null?null:Timestamp.from(i);} private static Instant ts(Timestamp t){return t==null?null:t.toInstant();} private static UUID uuid(String s){return s==null?null:UUID.fromString(s);}
     private void auditAndOutbox(UUID caseId, UUID actor, String type, String decision, long version) {
