@@ -9,7 +9,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
@@ -23,6 +28,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /** Task 13 的轻量 MySQL 边界证据；执行 verify 时只启动 MySQL。 */
 @SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.NONE)
+@Import(Task13FencingIT.PasswordEncoderTestConfiguration.class)
 @ActiveProfiles("local")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @TestPropertySource(properties = {
@@ -37,6 +43,16 @@ import static org.assertj.core.api.Assertions.assertThat;
     "campus.market.metrics.refresh-ms=3600000"
 })
 class Task13FencingIT extends Task11MySqlContainers {
+
+    @TestConfiguration(proxyBeanMethods = false)
+    static class PasswordEncoderTestConfiguration {
+
+        @Bean
+        PasswordEncoder passwordEncoder() {
+            return new BCryptPasswordEncoder();
+        }
+    }
+
     @Autowired JdbcTemplate jdbc;
     @Autowired OutboxRepository outbox;
     @Autowired StorageCleanupScheduler cleanup;
