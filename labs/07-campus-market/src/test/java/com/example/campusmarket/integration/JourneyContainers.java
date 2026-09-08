@@ -1,22 +1,156 @@
 package com.example.campusmarket.integration;
 
-import org.junit.jupiter.api.AfterAll;
+import com.example.campusmarket.catalog.search.ProductSearchPort;
+import com.example.campusmarket.catalog.search.SearchOutboxDispatcher;
+import com.example.campusmarket.dispute.application.ReturnResolutionService;
+import com.example.campusmarket.identity.application.AuthenticatedUser;
+import com.example.campusmarket.identity.infrastructure.JwtService;
+import com.example.campusmarket.identity.infrastructure.LocalVerificationMailSender;
+import com.example.campusmarket.payment.application.SettlementService;
+import com.example.campusmarket.payment.infrastructure.SimulatedPaymentProviderController;
+import com.example.campusmarket.warranty.application.SellerObligationService;
+import com.example.campusmarket.warranty.application.WarrantyService;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeEach;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.containers.Network;
+import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.elasticsearch.ElasticsearchContainer;
-import org.testcontainers.lifecycle.Startables;
 import org.testcontainers.images.builder.ImageFromDockerfile;
+import org.testcontainers.lifecycle.Startables;
 import org.testcontainers.utility.DockerImageName;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.util.HexFormat;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.stream.Stream;
 
-/** 最终旅程的最小真实依赖：MySQL、Redis、SmartCN ES 和 MinIO；支付模拟器是应用内 HTTP 端点。 */
-abstract class JourneyContainers {
+import static org.assertj.core.api.Assertions.assertThat;
+
+/** HTTP 旅程共用的断言与 fixture；具体容器由每个阶段的基类独立管理。 */
+abstract class JourneyHttpSupport {
+    protected static final String PAYMENT_SECRET = "local-only-payment-secret-change-me";
+
+    @Autowired protected TestRestTemplate http;
+    @Autowired protected LocalVerificationMailSender mail;
+    @Autowired protected ObjectMapper mapper;
+    @Autowired protected JdbcTemplate jdbc;
+    @Autowired protected SearchOutboxDispatcher searchOutbox;
+    @Autowired protected ProductSearchPort search;
+    @Autowired protected SimulatedPaymentProviderController provider;
+    @Autowired protected ReturnResolutionService returns;
+    @Autowired protected SettlementService settlements;
+    @Autowired protected WarrantyService warranties;
+    @Autowired protected SellerObligationService obligations;
+    @Autowired protected JwtService jwt;
+
+    @BeforeEach
+    void verifyDatabaseIsReady() {
+        assertThat(jdbc.queryForObject("SELECT 1", Integer.class)).isEqualTo(1);
+    }
+
+    protected User register(String email) throws Exception {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        assertThat(http.postForEntity("/api/auth/email-verifications",
+            entity("{\"email\":\"" + email + "\"}", headers), String.class).getStatusCode())
+            .isEqualTo(org.springframework.http.HttpStatus.OK);
+        String code = mail.latestCode(email);
+        assertThat(code).isNotBlank();
+        assertThat(http.postForEntity("/api/auth/register",
+            entity("{\"email\":\"" + email + "\",\"password\":\"Campus123!\",\"code\":\"" + code + "\"}", headers), String.class).getStatusCode())
+            .isEqualTo(org.springframework.http.HttpStatus.CREATED);
+        JsonNode login = mapper.readTree(http.postForEntity("/api/auth/login",
+            entity("{\"email\":\"" + email + "\",\"password\":\"Campus123!\"}", headers), String.class).getBody());
+        return new User(UUID.fromString(login.get("userId").asText()), login.get("accessToken").asText(), headers);
+    }
+
+    protected User seededAdmin() {
+        UUID id = UUID.randomUUID();
+        jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+            id.toString(), id + "@admin.example.edu.cn", "hash");
+        return new User(id, jwt.issue(new AuthenticatedUser(id, java.util.Set.of("ROLE_ADMIN"))), null);
+    }
+
+    protected HttpHeaders bearer(String token) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(token);
+        return headers;
+    }
+
+    protected HttpHeaders withKey(HttpHeaders source, String key) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.putAll(source);
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("Idempotency-Key", key);
+        return headers;
+    }
+
+    protected HttpEntity<String> entity(String body, HttpHeaders headers) {
+        return new HttpEntity<>(body, headers);
+    }
+
+    protected void callback(String type, UUID order, String reference, long amount, String status, String event) throws Exception {
+        String body = "{\"providerEventId\":\"" + event + "\",\"type\":\"" + type
+            + "\",\"providerReference\":\"" + reference + "\",\"amountFen\":" + amount
+            + ",\"status\":\"" + status + "\",\"occurredAt\":\"" + Instant.now()
+            + "\",\"orderId\":\"" + order + "\"}";
+        long now = Instant.now().getEpochSecond();
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("X-Payment-Timestamp", Long.toString(now));
+        headers.set("X-Payment-Nonce", UUID.randomUUID().toString());
+        headers.set("X-Payment-Signature", hmac(now + "\n" + headers.getFirst("X-Payment-Nonce") + "\n" + body));
+        assertThat(http.postForEntity("/api/payment-webhooks/simulated", new HttpEntity<>(body, headers), String.class).getStatusCode())
+            .isEqualTo(org.springframework.http.HttpStatus.OK);
+    }
+
+    protected String hmac(String text) throws Exception {
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(PAYMENT_SECRET.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+        return HexFormat.of().formatHex(mac.doFinal(text.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    protected String refundsReference(UUID id) {
+        return jdbc.queryForObject("SELECT provider_reference FROM refund_order WHERE id=?", String.class, id.toString());
+    }
+
+    protected UUID uuid(String body, String field) throws Exception {
+        return UUID.fromString(mapper.readTree(body).get(field).asText());
+    }
+
+    protected String text(String body, String field) throws Exception {
+        return mapper.readTree(body).get(field).asText();
+    }
+
+    protected record User(UUID id, String token, HttpHeaders ignored) {
+        HttpHeaders headers() {
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            headers.setBearerAuth(token);
+            return headers;
+        }
+    }
+}
+
+/** 教材旅程的最小真实依赖：MySQL、Redis 和 SmartCN Elasticsearch。 */
+abstract class TextbookContainers extends JourneyHttpSupport {
     private static final Network NETWORK = Network.newNetwork();
     protected static final MySQLContainer<?> MYSQL = new MySQLContainer<>(DockerImageName.parse("mysql:8.4"))
         .withDatabaseName("campus_market").withUsername("campus_market").withPassword("campus_market_local")
@@ -24,42 +158,75 @@ abstract class JourneyContainers {
     protected static final GenericContainer<?> REDIS = new GenericContainer<>(DockerImageName.parse("redis:7.4.2-alpine"))
         .withNetwork(NETWORK).withNetworkAliases("redis").withExposedPorts(6379);
     private static final ImageFromDockerfile ES_IMAGE = new ImageFromDockerfile(
-        "campus-market/elasticsearch:8.18.8-smartcn", true)
-        .withDockerfile(Path.of("docker/elasticsearch/Dockerfile"));
+        "campus-market/elasticsearch:8.18.8-smartcn", true).withDockerfile(Path.of("docker/elasticsearch/Dockerfile"));
     protected static final ElasticsearchContainer ELASTICSEARCH = new ElasticsearchContainer(
         DockerImageName.parse("campus-market/elasticsearch:8.18.8-smartcn")
             .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8"))
         .withEnv("xpack.security.enabled", "false")
+        .withEnv("ES_JAVA_OPTS", "-Xms256m -Xmx256m")
         .withNetwork(NETWORK).withNetworkAliases("elasticsearch");
-    protected static final GenericContainer<?> MINIO = new GenericContainer<>(DockerImageName.parse(
-        "quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z"))
-        .withCommand("server /data --console-address :9001")
-        .withEnv("MINIO_ROOT_USER", "minioadmin").withEnv("MINIO_ROOT_PASSWORD", "minioadmin-local")
-        .withNetwork(NETWORK).withNetworkAliases("minio").withExposedPorts(9000, 9001);
 
     static {
         ELASTICSEARCH.setImage(ES_IMAGE);
-        Startables.deepStart(Stream.of(MYSQL, REDIS, ELASTICSEARCH, MINIO)).join();
+        Startables.deepStart(Stream.of(MYSQL, REDIS, ELASTICSEARCH)).join();
     }
 
     @DynamicPropertySource
-    static void registerJourneyProperties(DynamicPropertyRegistry registry) {
+    static void registerTextbookProperties(DynamicPropertyRegistry registry) {
         registry.add("spring.datasource.url", MYSQL::getJdbcUrl);
         registry.add("spring.datasource.username", MYSQL::getUsername);
         registry.add("spring.datasource.password", MYSQL::getPassword);
         registry.add("spring.data.redis.url", () -> "redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379));
         registry.add("spring.elasticsearch.uris", () -> "http://" + ELASTICSEARCH.getHost() + ":" + ELASTICSEARCH.getMappedPort(9200));
-        registry.add("campus.market.storage.endpoint", () -> "http://" + MINIO.getHost() + ":" + MINIO.getMappedPort(9000));
+        registry.add("campus.market.storage.endpoint", () -> "http://127.0.0.1:1");
+        registerCommonDisabledDependencies(registry);
+    }
+
+    static void registerCommonDisabledDependencies(DynamicPropertyRegistry registry) {
         registry.add("spring.rabbitmq.host", () -> "127.0.0.1");
         registry.add("spring.rabbitmq.port", () -> "1");
         registry.add("spring.rabbitmq.listener.simple.auto-startup", () -> "false");
         registry.add("spring.rabbitmq.listener.direct.auto-startup", () -> "false");
     }
 
-    @AfterAll
-    static void stopJourneyContainers() {
-        Stream.of(MINIO, ELASTICSEARCH, REDIS, MYSQL).filter(Objects::nonNull)
-            .forEach(GenericContainer::stop);
+    static void stopTextbookContainers() {
+        Stream.of(ELASTICSEARCH, REDIS, MYSQL).filter(Objects::nonNull).forEach(GenericContainer::stop);
+        NETWORK.close();
+    }
+}
+
+/** 质保旅程的最小真实依赖：MySQL、Redis 和 MinIO。 */
+abstract class WarrantyContainers extends JourneyHttpSupport {
+    private static final Network NETWORK = Network.newNetwork();
+    protected static final MySQLContainer<?> MYSQL = new MySQLContainer<>(DockerImageName.parse("mysql:8.4"))
+        .withDatabaseName("campus_market").withUsername("campus_market").withPassword("campus_market_local")
+        .withNetwork(NETWORK).withNetworkAliases("mysql");
+    protected static final GenericContainer<?> REDIS = new GenericContainer<>(DockerImageName.parse("redis:7.4.2-alpine"))
+        .withNetwork(NETWORK).withNetworkAliases("redis").withExposedPorts(6379);
+    protected static final GenericContainer<?> MINIO = new GenericContainer<>(DockerImageName.parse(
+        "quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z"))
+        .withCommand("server /data --console-address :9001")
+        .withEnv("MINIO_ROOT_USER", "minioadmin").withEnv("MINIO_ROOT_PASSWORD", "minioadmin-local")
+        .withNetwork(NETWORK).withNetworkAliases("minio").withExposedPorts(9000, 9001)
+        .waitingFor(Wait.forListeningPort());
+
+    static {
+        Startables.deepStart(Stream.of(MYSQL, REDIS, MINIO)).join();
+    }
+
+    @DynamicPropertySource
+    static void registerWarrantyProperties(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.url", MYSQL::getJdbcUrl);
+        registry.add("spring.datasource.username", MYSQL::getUsername);
+        registry.add("spring.datasource.password", MYSQL::getPassword);
+        registry.add("spring.data.redis.url", () -> "redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379));
+        registry.add("spring.elasticsearch.uris", () -> "http://127.0.0.1:1");
+        registry.add("campus.market.storage.endpoint", () -> "http://" + MINIO.getHost() + ":" + MINIO.getMappedPort(9000));
+        TextbookContainers.registerCommonDisabledDependencies(registry);
+    }
+
+    static void stopWarrantyContainers() {
+        Stream.of(MINIO, REDIS, MYSQL).filter(Objects::nonNull).forEach(GenericContainer::stop);
         NETWORK.close();
     }
 }

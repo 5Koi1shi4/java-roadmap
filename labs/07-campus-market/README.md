@@ -71,7 +71,7 @@ PENDING_PAYMENT -> AWAITING_HANDOFF -> AWAITING_RECEIPT
 
 更多故障症状与边界见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
 
-低内存主机必须串行运行两个最终验收套件，不要并行启动它们。`CampusMarketJourneyIT` 只启动真实 MySQL、Redis、SmartCN Elasticsearch 和 MinIO；支付模拟器是应用内 HTTP provider，因此不启动 RabbitMQ、Toxiproxy、SSHD 或 Python。`RecoveryDrillIT` 会依次运行三个嵌套轮次，并在每轮结束时停止容器：Rabbit 轮为 MySQL+Redis+RabbitMQ+Toxiproxy，搜索轮为 MySQL+Redis+Elasticsearch+Toxiproxy，存储轮为 MySQL+Redis+MinIO+Toxiproxy。
+低内存主机必须串行运行两个最终验收套件，不要并行启动它们。`CampusMarketJourneyIT` 是按序执行的两个嵌套阶段：教材阶段只启动真实 MySQL、Redis、SmartCN Elasticsearch，质保阶段只启动真实 MySQL、Redis、MinIO；每个阶段的 `@AfterAll` 都会停止自己的容器。支付模拟器是应用内 HTTP provider，因此不启动 RabbitMQ、Toxiproxy、SSHD 或 Python。`RecoveryDrillIT` 会依次运行三个嵌套轮次，并在每轮结束时停止容器：Rabbit 轮为 MySQL+Redis+RabbitMQ+Toxiproxy，搜索轮为 MySQL+Redis+Elasticsearch+Toxiproxy，存储轮为 MySQL+Redis+MinIO+Toxiproxy。
 
 ```powershell
 .\mvnw.cmd -Dit.test=CampusMarketJourneyIT verify

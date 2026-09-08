@@ -103,7 +103,7 @@ class RecoveryDrillIT {
         protected static final MySQLContainer<?> MYSQL=new MySQLContainer<>(DockerImageName.parse("mysql:8.4")).withDatabaseName("campus_market").withUsername("campus_market").withPassword("campus_market_local").withNetwork(NETWORK).withNetworkAliases("mysql");
         protected static final GenericContainer<?> REDIS=new GenericContainer<>(DockerImageName.parse("redis:7.4.2-alpine")).withNetwork(NETWORK).withNetworkAliases("redis").withExposedPorts(6379);
         private static final ImageFromDockerfile ES_IMAGE=new ImageFromDockerfile("campus-market/elasticsearch:8.18.8-smartcn",true).withDockerfile(Path.of("docker/elasticsearch/Dockerfile"));
-        protected static final ElasticsearchContainer ES=new ElasticsearchContainer(DockerImageName.parse("campus-market/elasticsearch:8.18.8-smartcn").asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8")).withEnv("xpack.security.enabled","false").withNetwork(NETWORK).withNetworkAliases("elasticsearch");
+        protected static final ElasticsearchContainer ES=new ElasticsearchContainer(DockerImageName.parse("campus-market/elasticsearch:8.18.8-smartcn").asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8")).withEnv("xpack.security.enabled","false").withEnv("ES_JAVA_OPTS","-Xms256m -Xmx256m").withNetwork(NETWORK).withNetworkAliases("elasticsearch");
         protected static final ToxiproxyContainer TOXIPROXY=new ToxiproxyContainer(DockerImageName.parse("ghcr.io/shopify/toxiproxy:2.12.0")).withNetwork(NETWORK).withNetworkAliases("toxiproxy");
         protected static ToxiproxyContainer.ContainerProxy PROXY;
         static{ES.setImage(ES_IMAGE);start(Stream.of(MYSQL,REDIS,ES,TOXIPROXY));PROXY=TOXIPROXY.getProxy(ES,9200);}

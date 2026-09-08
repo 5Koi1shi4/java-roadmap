@@ -48,4 +48,4 @@ git diff --check
 .\mvnw.cmd -Dit.test=RecoveryDrillIT verify
 ```
 
-第一条命令的容器集合固定为 MySQL、Redis、SmartCN Elasticsearch、MinIO，应用内 HTTP 支付 provider 不需要额外容器；第二条命令是三个嵌套轮次，依次为 MySQL+Redis+RabbitMQ+Toxiproxy、MySQL+Redis+Elasticsearch+Toxiproxy、MySQL+Redis+MinIO+Toxiproxy。每轮测试类结束会回收自己的容器，且所有轮次都不启动 SSHD、Python 或其他未参与该轮的外部系统。不要并行执行两条命令，也不要在它们之间保留上一轮的容器。
+第一条命令由 `@Order(1)` 教材嵌套类（MySQL+Redis+SmartCN Elasticsearch）和 `@Order(2)` 质保嵌套类（MySQL+Redis+MinIO）组成；两个类都显式声明 `@AfterAll` 停止自己的容器，所以不会同时初始化两套静态容器。应用内 HTTP 支付 provider 不需要额外容器。第二条命令是三个嵌套轮次，依次为 MySQL+Redis+RabbitMQ+Toxiproxy、MySQL+Redis+Elasticsearch+Toxiproxy、MySQL+Redis+MinIO+Toxiproxy。每轮测试类结束会回收自己的容器，且所有轮次都不启动 SSHD、Python 或其他未参与该轮的外部系统。不要并行执行两条命令，也不要在它们之间保留上一轮的容器。
