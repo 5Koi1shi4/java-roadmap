@@ -66,7 +66,9 @@ class RecoveryDrillIT {
             registry.add("spring.datasource.username", mysql::getUsername);
             registry.add("spring.datasource.password", mysql::getPassword);
             registry.add("spring.data.redis.url",
-                () -> "redis://" + redis.getHost() + ":" + redis.getMappedPort(6379));
+                redis == null
+                    ? () -> "redis://127.0.0.1:1"
+                    : () -> "redis://" + redis.getHost() + ":" + redis.getMappedPort(6379));
 
             registry.add("spring.rabbitmq.listener.simple.auto-startup", () -> "false");
             registry.add("spring.rabbitmq.listener.direct.auto-startup", () -> "false");
@@ -469,12 +471,13 @@ class RecoveryDrillIT {
     }
 
     private abstract static class SearchContainers extends DrillContainers {
+        private static final long MYSQL_MEMORY_BYTES = 512L * 1024L * 1024L;
+        private static final long ELASTICSEARCH_MEMORY_BYTES = 768L * 1024L * 1024L;
         protected static final Network NETWORK = Network.newNetwork();
         protected static final MySQLContainer<?> MYSQL = new MySQLContainer<>(DockerImageName.parse("mysql:8.4"))
             .withDatabaseName("campus_market").withUsername("campus_market").withPassword("campus_market_local")
-            .withNetwork(NETWORK).withNetworkAliases("mysql");
-        protected static final GenericContainer<?> REDIS = new GenericContainer<>(DockerImageName.parse("redis:7.4.2-alpine"))
-            .withNetwork(NETWORK).withNetworkAliases("redis").withExposedPorts(6379);
+            .withNetwork(NETWORK).withNetworkAliases("mysql")
+            .withCreateContainerCmdModifier(cmd -> cmd.getHostConfig().withMemory(MYSQL_MEMORY_BYTES));
         private static final ImageFromDockerfile ES_IMAGE = new ImageFromDockerfile(
             "campus-market/elasticsearch:8.18.8-smartcn", true)
             .withDockerfile(Path.of("docker/elasticsearch/Dockerfile"));
@@ -482,7 +485,8 @@ class RecoveryDrillIT {
             DockerImageName.parse("campus-market/elasticsearch:8.18.8-smartcn")
                 .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8"))
             .withEnv("xpack.security.enabled", "false")
-            .withEnv("ES_JAVA_OPTS", "-Xms256m -Xmx256m")
+            .withEnv("ES_JAVA_OPTS", "-Xms128m -Xmx192m")
+            .withCreateContainerCmdModifier(cmd -> cmd.getHostConfig().withMemory(ELASTICSEARCH_MEMORY_BYTES))
             .withNetwork(NETWORK).withNetworkAliases("elasticsearch");
         protected static final ToxiproxyContainer TOXIPROXY = new ToxiproxyContainer(DockerImageName.parse("ghcr.io/shopify/toxiproxy:2.12.0"))
             .withNetwork(NETWORK).withNetworkAliases("toxiproxy");
@@ -490,20 +494,22 @@ class RecoveryDrillIT {
 
         static {
             ES.setImage(ES_IMAGE);
-            start(Stream.of(MYSQL, REDIS, ES, TOXIPROXY));
+            start(Stream.of(MYSQL, ES, TOXIPROXY));
             PROXY = TOXIPROXY.getProxy(ES, 9200);
         }
 
         @DynamicPropertySource
         static void properties(DynamicPropertyRegistry registry) {
-            common(registry, MYSQL, REDIS);
+            // SearchRound 只调用 MySQL 与搜索端口；Redis bean 仅为生产认证适配器提供依赖，
+            // 本轮没有认证/验证码调用，因此显式指向不可达端口，避免启动无用 Redis 容器。
+            common(registry, MYSQL, null);
             registry.add("spring.elasticsearch.uris",
                 () -> "http://" + PROXY.getContainerIpAddress() + ":" + PROXY.getProxyPort());
         }
 
         @AfterAll
         static void stop() {
-            Stream.of(TOXIPROXY, ES, MYSQL, REDIS).forEach(GenericContainer::stop);
+            Stream.of(TOXIPROXY, ES, MYSQL).forEach(GenericContainer::stop);
             NETWORK.close();
         }
     }
