@@ -175,7 +175,9 @@ public class ReturnResolutionService {
         orderId = (UUID) row[0];
         UUID lockedOrderId = orderId;
         String status = (String) row[2];
-        if (!"OPEN".equals(status) && !"SELLER_RESPONDED".equals(status) && !"UNDER_REVIEW".equals(status) && !"ESCALATED".equals(status)) {
+        // 管理员 HTTP 裁决先将争议写成 RESOLVED；退回/退款是其后的外部支付与库存收敛步骤。
+        // 没有既有 return_case 时允许该状态继续 prepare，保证 HTTP 裁决与异步退款之间可恢复。
+        if (!"OPEN".equals(status) && !"SELLER_RESPONDED".equals(status) && !"UNDER_REVIEW".equals(status) && !"ESCALATED".equals(status) && !"RESOLVED".equals(status)) {
             var existing = jdbc.query("SELECT refund_id,order_id,listing_id,unit_price_fen,approved_quantity,status FROM return_case WHERE dispute_case_id=? FOR UPDATE",
                 rs -> rs.next() ? new CaseFacts(caseId, lockedOrderId, UUID.fromString(rs.getString("listing_id")),
                     rs.getInt("approved_quantity"), rs.getInt("approved_quantity"), rs.getLong("unit_price_fen"),
