@@ -176,6 +176,7 @@ abstract class JourneyHttpSupport {
  */
 abstract class TextbookContainers extends JourneyHttpSupport {
     private static final int TEXTBOOK_ELASTICSEARCH_PORT = 19200;
+    private static final long TEXTBOOK_ELASTICSEARCH_MEMORY_BYTES = 768L * 1024L * 1024L;
     private static final Network NETWORK = Network.newNetwork();
     protected static final MySQLContainer<?> MYSQL = new MySQLContainer<>(DockerImageName.parse("mysql:8.4"))
         .withDatabaseName("campus_market").withUsername("campus_market").withPassword("campus_market_local")
@@ -188,7 +189,8 @@ abstract class TextbookContainers extends JourneyHttpSupport {
         DockerImageName.parse("campus-market/elasticsearch:8.18.8-smartcn")
             .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8"))
         .withEnv("xpack.security.enabled", "false")
-        .withEnv("ES_JAVA_OPTS", "-Xms256m -Xmx256m")
+        .withEnv("ES_JAVA_OPTS", "-Xms128m -Xmx192m")
+        .withCreateContainerCmdModifier(cmd -> cmd.getHostConfig().withMemory(TEXTBOOK_ELASTICSEARCH_MEMORY_BYTES))
         .withNetwork(NETWORK).withNetworkAliases("elasticsearch");
     protected static final GenericContainer<?> MINIO = new GenericContainer<>(DockerImageName.parse(
         "quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z"))
@@ -231,9 +233,27 @@ abstract class TextbookContainers extends JourneyHttpSupport {
         if (!ELASTICSEARCH.isRunning()) ELASTICSEARCH.start();
     }
 
-    /** 释放重型对象存储阶段；幂等 stop 允许测试失败后由 @AfterAll 再次清理。 */
+    /**
+     * 释放媒体阶段及注册阶段才需要的 Redis；停止后用有界屏障确认不会与 ES 启动重叠。
+     * 幂等 stop 允许测试失败后由 @AfterAll 再次清理。
+     */
     protected static void stopTextbookMediaContainer() {
-        if (MINIO.isRunning()) MINIO.stop();
+        stopAndAwait(MINIO);
+        stopAndAwait(REDIS);
+    }
+
+    private static void stopAndAwait(GenericContainer<?> container) {
+        if (container.isRunning()) container.stop();
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+        while (container.isRunning() && System.nanoTime() < deadline) {
+            try {
+                Thread.sleep(25);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("容器停止屏障被中断", interrupted);
+            }
+        }
+        if (container.isRunning()) throw new IllegalStateException("容器未在有界时间内停止");
     }
 }
 
