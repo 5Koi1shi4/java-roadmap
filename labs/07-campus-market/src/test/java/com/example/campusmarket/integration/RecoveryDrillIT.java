@@ -242,6 +242,9 @@ class RecoveryDrillIT {
         @Autowired private JdbcTemplate jdbc;
         @Autowired private StorageCleanupScheduler cleanup;
 
+        private static final Duration STORAGE_RECOVERY_TIMEOUT = Duration.ofSeconds(30);
+        private static final Duration STORAGE_RECOVERY_POLL = Duration.ofMillis(250);
+
         @Test
         void round3MinioDisconnectLeavesCleanupPendingThenDeletesAfterRecovery() {
             UUID submitter = insertUser();
@@ -263,14 +266,50 @@ class RecoveryDrillIT {
                 PROXY.setConnectionCut(false);
             }
 
-            jdbc.update("UPDATE storage_cleanup_task SET run_after=CURRENT_TIMESTAMP(6), "
-                    + "lease_until=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) "
-                    + "WHERE cleanup_business_key=?", "listing-upload:" + session);
-            assertThat(cleanup.runOnce(10)).isEqualTo(1);
+            String businessKey = "listing-upload:" + session;
+            recoverCleanup(businessKey);
             assertThat(jdbc.queryForObject(
                 "SELECT status FROM storage_cleanup_task WHERE cleanup_business_key=?",
-                String.class, "listing-upload:" + session)).isEqualTo("COMPLETED");
+                String.class, businessKey)).isEqualTo("COMPLETED");
             assertInvariants(jdbc);
+        }
+
+        /**
+         * Re-drive the production cleanup scheduler until the restored MinIO proxy converges.
+         * The database clock makes both PENDING backoff and PROCESSING lease expiry eligible;
+         * this never changes the task status or marks the task complete from the test.
+         */
+        private void recoverCleanup(String businessKey) {
+            long deadline = System.nanoTime() + STORAGE_RECOVERY_TIMEOUT.toNanos();
+            int attempts = 0;
+            int completed = 0;
+            while (System.nanoTime() < deadline) {
+                jdbc.update("UPDATE storage_cleanup_task SET run_after=CURRENT_TIMESTAMP(6), "
+                        + "lease_until=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) "
+                        + "WHERE cleanup_business_key=? AND status IN ('PENDING','PROCESSING')", businessKey);
+                attempts++;
+                completed = cleanup.runOnce(10);
+                if (completed == 1) {
+                    return;
+                }
+                try {
+                    Thread.sleep(STORAGE_RECOVERY_POLL.toMillis());
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError("storage cleanup recovery interrupted after "
+                            + attempts + " attempts", interrupted);
+                }
+            }
+
+            String details = jdbc.queryForObject(
+                "SELECT CONCAT('status=',status,', failure_class=',COALESCE(failure_class,'NULL'),"
+                    + "', attempts=',attempt_count,', run_after=',COALESCE(run_after,'NULL'),"
+                    + "', lease_until=',COALESCE(lease_until,'NULL')) "
+                    + "FROM storage_cleanup_task WHERE cleanup_business_key=?",
+                String.class, businessKey);
+            assertThat(completed)
+                .withFailMessage("cleanup did not converge after %s attempts: %s", attempts, details)
+                .isEqualTo(1);
         }
 
         private UUID insertUser() {
