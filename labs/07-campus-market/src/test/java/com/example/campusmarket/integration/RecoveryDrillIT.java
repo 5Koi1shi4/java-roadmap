@@ -302,7 +302,7 @@ class RecoveryDrillIT {
 
     @Nested
     @Order(3)
-    @SpringBootTest(classes = CampusMarketApplication.class)
+    @SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
     @ActiveProfiles("local")
     @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
     class StorageRound extends StorageContainers {
