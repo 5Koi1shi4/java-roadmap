@@ -5,6 +5,8 @@ import com.example.campusmarket.catalog.search.ProductSearchPort;
 import com.example.campusmarket.catalog.search.SearchOutboxDispatcher;
 import com.example.campusmarket.messaging.InboxRepository;
 import com.example.campusmarket.messaging.OutboxDispatcher;
+import com.example.campusmarket.storage.MinioPrivateObjectStorage;
+import com.example.campusmarket.storage.PrivateObjectStorage;
 import com.example.campusmarket.storage.StorageCleanupScheduler;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.ClassOrderer;
@@ -31,6 +33,8 @@ import org.testcontainers.lifecycle.Startable;
 import org.testcontainers.lifecycle.Startables;
 import org.testcontainers.utility.DockerImageName;
 
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Set;
@@ -38,6 +42,7 @@ import java.util.UUID;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** 三轮故障演练套件；每个嵌套类仅启动当前轮次需要的真实容器。 */
 @TestClassOrder(ClassOrderer.OrderAnnotation.class)
@@ -241,19 +246,28 @@ class RecoveryDrillIT {
     class StorageRound extends StorageContainers {
         @Autowired private JdbcTemplate jdbc;
         @Autowired private StorageCleanupScheduler cleanup;
+        @Autowired private PrivateObjectStorage storage;
 
-        private static final Duration STORAGE_RECOVERY_TIMEOUT = Duration.ofSeconds(30);
+        private static final int STORAGE_RECOVERY_ATTEMPTS = 8;
         private static final Duration STORAGE_RECOVERY_POLL = Duration.ofMillis(250);
 
         @Test
         void round3MinioDisconnectLeavesCleanupPendingThenDeletesAfterRecovery() {
             UUID submitter = insertUser();
             UUID session = UUID.randomUUID();
+            String objectKey = "cleanup-drill/" + session;
+            byte[] object = "recovery-drill-object".getBytes(StandardCharsets.UTF_8);
+            storage.put(objectKey, new ByteArrayInputStream(object), object.length, "text/plain");
+            try (var uploaded = storage.open(objectKey)) {
+                assertThat(uploaded.readAllBytes()).containsExactly(object);
+            } catch (Exception failure) {
+                throw new AssertionError("failed to verify the real MinIO fixture", failure);
+            }
             jdbc.update("INSERT INTO object_upload_session "
                     + "(id,submitted_by,purpose,object_key,status,expires_at,created_at,updated_at) "
                     + "VALUES (?,?, 'LISTING_MEDIA',?,'OPEN',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 MINUTE),"
                     + "CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-                session.toString(), submitter.toString(), "cleanup-drill-" + session);
+                session.toString(), submitter.toString(), objectKey);
 
             PROXY.setConnectionCut(true);
             try {
@@ -271,19 +285,20 @@ class RecoveryDrillIT {
             assertThat(jdbc.queryForObject(
                 "SELECT status FROM storage_cleanup_task WHERE cleanup_business_key=?",
                 String.class, businessKey)).isEqualTo("COMPLETED");
+            assertThatThrownBy(() -> storage.open(objectKey))
+                .isInstanceOf(MinioPrivateObjectStorage.ObjectNotFoundException.class);
             assertInvariants(jdbc);
         }
 
         /**
          * Re-drive the production cleanup scheduler until the restored MinIO proxy converges.
          * The database clock makes both PENDING backoff and PROCESSING lease expiry eligible;
-         * this never changes the task status or marks the task complete from the test.
+        * this never changes the task status or marks the task complete from the test.
          */
         private void recoverCleanup(String businessKey) {
-            long deadline = System.nanoTime() + STORAGE_RECOVERY_TIMEOUT.toNanos();
             int attempts = 0;
             int completed = 0;
-            while (System.nanoTime() < deadline) {
+            while (attempts < STORAGE_RECOVERY_ATTEMPTS) {
                 jdbc.update("UPDATE storage_cleanup_task SET run_after=CURRENT_TIMESTAMP(6), "
                         + "lease_until=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) "
                         + "WHERE cleanup_business_key=? AND status IN ('PENDING','PROCESSING')", businessKey);
@@ -292,12 +307,14 @@ class RecoveryDrillIT {
                 if (completed == 1) {
                     return;
                 }
-                try {
-                    Thread.sleep(STORAGE_RECOVERY_POLL.toMillis());
-                } catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                    throw new AssertionError("storage cleanup recovery interrupted after "
-                            + attempts + " attempts", interrupted);
+                if (attempts < STORAGE_RECOVERY_ATTEMPTS) {
+                    try {
+                        Thread.sleep(STORAGE_RECOVERY_POLL.toMillis());
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError("storage cleanup recovery interrupted after "
+                                + attempts + " attempts", interrupted);
+                    }
                 }
             }
 
