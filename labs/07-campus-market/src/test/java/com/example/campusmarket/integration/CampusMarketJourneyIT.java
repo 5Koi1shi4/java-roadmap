@@ -13,6 +13,7 @@ import org.junit.jupiter.api.ClassOrderer;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -70,7 +71,7 @@ class CampusMarketJourneyIT {
             assertThat(published.getStatusCode()).isEqualTo(HttpStatus.OK);
             assertThat(searchOutbox.dispatchOnce(20)).isGreaterThanOrEqualTo(1);
             search.refresh();
-            ResponseEntity<String> found = http.getForEntity("/api/search?keyword=并发&size=20", String.class);
+            ResponseEntity<String> found = http.exchange("/api/search?keyword=并发&size=20", HttpMethod.GET, entity("", sellerHeaders), String.class);
             assertThat(found.getStatusCode()).isEqualTo(HttpStatus.OK);
             assertThat(found.getBody()).contains(listing.toString());
 
@@ -81,11 +82,12 @@ class CampusMarketJourneyIT {
             UUID order = uuid(orderResponse.getBody(), "orderId");
 
             ResponseEntity<String> payment = http.postForEntity("/api/orders/" + order + "/payments",
-                entity("{}", withKey(new HttpHeaders(), "payment-" + order)), String.class);
+                entity("{}", withKey(buyerHeaders, "payment-" + order)), String.class);
             assertThat(payment.getStatusCode()).isEqualTo(HttpStatus.CREATED);
             UUID paymentId = uuid(payment.getBody(), "paymentId");
             String paymentReference = text(payment.getBody(), "providerReference");
-            http.postForEntity("/simulated-provider/payments/" + paymentReference + "/SUCCEEDED", new HttpEntity<>(new HttpHeaders()), String.class);
+            ResponseEntity<String> providerPayment = http.postForEntity("/simulated-provider/payments/" + paymentReference + "/SUCCEEDED", new HttpEntity<>(new HttpHeaders()), String.class);
+            assertThat(providerPayment.getStatusCode()).isEqualTo(HttpStatus.OK);
             callback("PAYMENT", order, paymentReference, 300, "SUCCEEDED", "payment-event-" + order);
             assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("AWAITING_HANDOFF");
 
@@ -103,7 +105,8 @@ class CampusMarketJourneyIT {
                 seller.id().toString(), ProofAuthority.seller(seller.id()));
             assertThat(prepared.refundId()).isNotNull();
             String refundRef = refundsReference(prepared.refundId());
-            http.postForEntity("/simulated-provider/refunds/" + refundRef + "/SUCCEEDED", new HttpEntity<>(new HttpHeaders()), String.class);
+            ResponseEntity<String> providerRefund = http.postForEntity("/simulated-provider/refunds/" + refundRef + "/SUCCEEDED", new HttpEntity<>(new HttpHeaders()), String.class);
+            assertThat(providerRefund.getStatusCode()).isEqualTo(HttpStatus.OK);
             callback("REFUND", order, refundRef, 100, "SUCCEEDED", "refund-event-" + dispute);
             returns.reconcileSuccessfulRefund(prepared.refundId());
             jdbc.update("UPDATE trade_order SET t0=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 8 DAY) WHERE id=?", order.toString());
@@ -153,12 +156,14 @@ class CampusMarketJourneyIT {
             ResponseEntity<String> orderResponse = http.postForEntity("/api/orders", entity("{\"listingId\":\"" + listing + "\",\"quantity\":1}", withKey(buyerHeaders, "w-order-" + listing)), String.class);
             assertThat(orderResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
             UUID order = uuid(orderResponse.getBody(), "orderId");
-            ResponseEntity<String> payment = http.postForEntity("/api/orders/" + order + "/payments", entity("{}", withKey(new HttpHeaders(), "w-pay-" + order)), String.class);
+            ResponseEntity<String> payment = http.postForEntity("/api/orders/" + order + "/payments", entity("{}", withKey(buyerHeaders, "w-pay-" + order)), String.class);
+            assertThat(payment.getStatusCode()).isEqualTo(HttpStatus.CREATED);
             String paymentRef = text(payment.getBody(), "providerReference");
-            http.postForEntity("/simulated-provider/payments/" + paymentRef + "/SUCCEEDED", new HttpEntity<>(new HttpHeaders()), String.class);
+            ResponseEntity<String> providerPayment = http.postForEntity("/simulated-provider/payments/" + paymentRef + "/SUCCEEDED", new HttpEntity<>(new HttpHeaders()), String.class);
+            assertThat(providerPayment.getStatusCode()).isEqualTo(HttpStatus.OK);
             callback("PAYMENT", order, paymentRef, 500, "SUCCEEDED", "w-payment-event-" + order);
-            http.postForEntity("/api/orders/" + order + "/handoff", entity("{}", withKey(sellerHeaders, "w-handoff-" + order)), String.class);
-            http.postForEntity("/api/orders/" + order + "/receipt", entity("{}", withKey(buyerHeaders, "w-receipt-" + order)), String.class);
+            assertThat(http.postForEntity("/api/orders/" + order + "/handoff", entity("{}", withKey(sellerHeaders, "w-handoff-" + order)), String.class).getStatusCode()).isEqualTo(HttpStatus.OK);
+            assertThat(http.postForEntity("/api/orders/" + order + "/receipt", entity("{}", withKey(buyerHeaders, "w-receipt-" + order)), String.class).getStatusCode()).isEqualTo(HttpStatus.OK);
             jdbc.update("UPDATE trade_order SET t0=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 8 DAY) WHERE id=?", order.toString());
             assertThat(settlements.settle(order).status()).isEqualTo("SETTLED");
             jdbc.update("UPDATE trade_order SET t0=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 30 DAY) WHERE id=?", order.toString());
@@ -175,12 +180,16 @@ class CampusMarketJourneyIT {
             ResponseEntity<String> evidence = http.postForEntity("/api/warranty-cases/" + caseId + "/evidence", new HttpEntity<>(form, evidenceHeaders), String.class);
             assertThat(evidence.getStatusCode()).isEqualTo(HttpStatus.CREATED);
             String evidenceId = text(evidence.getBody(), "evidenceId");
-            http.postForEntity("/api/warranty-cases/" + caseId + "/assignments", entity("{\"adminId\":\"" + admin.id() + "\"}", admin.headers()), String.class);
+            assertThat(http.postForEntity("/api/warranty-cases/" + caseId + "/assignments", entity("{\"adminId\":\"" + admin.id() + "\"}", admin.headers()), String.class).getStatusCode()).isEqualTo(HttpStatus.OK);
             assertThat(http.postForEntity("/api/warranty-cases/" + caseId + "/decisions", entity("{\"decision\":\"REPAIR_COMPENSATION\",\"compensationAmountFen\":200,\"evidenceId\":\"" + evidenceId + "\"}", withKey(admin.headers(), "w-decision-" + caseId)), String.class).getStatusCode()).isEqualTo(HttpStatus.OK);
-            assertThat(http.getForEntity("/api/seller/restrictions", String.class).getBody()).contains("\"publishRestricted\":true");
+            ResponseEntity<String> restricted = http.exchange("/api/seller/restrictions", HttpMethod.GET, entity("", sellerHeaders), String.class);
+            assertThat(restricted.getStatusCode()).isEqualTo(HttpStatus.OK);
+            assertThat(restricted.getBody()).contains("\"publishRestricted\":true");
             UUID obligationId = UUID.fromString(jdbc.queryForObject("SELECT id FROM seller_obligation WHERE warranty_case_id=?", String.class, caseId.toString()));
             assertThat(http.postForEntity("/api/seller/obligations/" + obligationId + "/fund", entity("{\"amountFen\":200}", withKey(sellerHeaders, "fund-" + obligationId)), String.class).getStatusCode()).isEqualTo(HttpStatus.OK);
-            assertThat(http.getForEntity("/api/seller/restrictions", String.class).getBody()).contains("\"publishRestricted\":false");
+            ResponseEntity<String> unrestricted = http.exchange("/api/seller/restrictions", HttpMethod.GET, entity("", sellerHeaders), String.class);
+            assertThat(unrestricted.getStatusCode()).isEqualTo(HttpStatus.OK);
+            assertThat(unrestricted.getBody()).contains("\"publishRestricted\":false");
             assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, order.toString())).isEqualTo("SETTLED");
             assertThat(obligations.findForSeller(seller.id())).isNotEmpty();
         }

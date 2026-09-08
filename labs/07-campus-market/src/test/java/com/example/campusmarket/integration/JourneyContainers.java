@@ -79,8 +79,10 @@ abstract class JourneyHttpSupport {
         assertThat(http.postForEntity("/api/auth/register",
             entity("{\"email\":\"" + email + "\",\"password\":\"Campus123!\",\"code\":\"" + code + "\"}", headers), String.class).getStatusCode())
             .isEqualTo(org.springframework.http.HttpStatus.CREATED);
-        JsonNode login = mapper.readTree(http.postForEntity("/api/auth/login",
-            entity("{\"email\":\"" + email + "\",\"password\":\"Campus123!\"}", headers), String.class).getBody());
+        ResponseEntity<String> loginResponse = http.postForEntity("/api/auth/login",
+            entity("{\"email\":\"" + email + "\",\"password\":\"Campus123!\"}", headers), String.class);
+        assertThat(loginResponse.getStatusCode()).isEqualTo(org.springframework.http.HttpStatus.OK);
+        JsonNode login = mapper.readTree(loginResponse.getBody());
         return new User(UUID.fromString(login.get("userId").asText()), login.get("accessToken").asText(), headers);
     }
 
