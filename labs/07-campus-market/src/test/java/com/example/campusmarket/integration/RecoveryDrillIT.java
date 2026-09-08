@@ -134,7 +134,7 @@ class RecoveryDrillIT {
             jdbc.update("INSERT INTO payment_order(id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,100,100,?,'SUCCEEDED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
                 payment.toString(), order.toString(), "simulated", "recovery-pay-" + order, "recovery-payment-" + order);
             jdbc.update("INSERT INTO refund_order(id,order_id,payment_order_id,provider,idempotency_key,source_type,source_id,paid_amount_fen,amount_fen,successful_refund_fen,reserved_refund_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,?,'DRILL',?,?,100,20,0,?,'SUCCEEDED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-                refund.toString(), order.toString(), payment.toString(), "simulated", "recovery-refund-" + order, order.toString(), "recovery-refund-ref-" + order);
+                refund.toString(), order.toString(), payment.toString(), "simulated", "recovery-refund-" + order, order.toString(), 100L, "recovery-refund-ref-" + order);
             jdbc.update("UPDATE payment_order SET paid_amount_fen=100,successful_refund_fen=20,reserved_refund_fen=0 WHERE id=?", payment.toString());
             jdbc.update("INSERT INTO settlement(id,order_id,paid_amount_fen,successful_refund_fen,net_settlement_fen,status,created_at) VALUES (?,?,100,20,80,'SETTLED',CURRENT_TIMESTAMP(6))",
                 UUID.nameUUIDFromBytes(("drill-settlement:" + order).getBytes(StandardCharsets.UTF_8)).toString(), order.toString());
