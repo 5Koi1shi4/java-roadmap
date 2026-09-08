@@ -62,6 +62,9 @@ class CampusMarketJourneyIT {
             assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
             UUID listing = uuid(created.getBody(), "id");
             assertThat(uploadListingMedia(listing, seller).getStatusCode()).isEqualTo(HttpStatus.CREATED);
+            // 释放 MinIO 后再启动 ES，保持同一 HTTP/数据库旅程且避免低内存主机重叠重型容器。
+            stopTextbookMediaContainer();
+            startTextbookSearchContainer();
             ResponseEntity<String> published = http.postForEntity("/api/listings/" + listing + "/publish", entity("", sellerHeaders), String.class);
             assertThat(published.getStatusCode()).isEqualTo(HttpStatus.OK);
             assertThat(searchOutbox.dispatchOnce(20)).isGreaterThanOrEqualTo(1);

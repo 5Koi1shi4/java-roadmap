@@ -167,8 +167,15 @@ abstract class JourneyHttpSupport {
     }
 }
 
-/** 教材旅程的最小真实依赖：MySQL、Redis、SmartCN Elasticsearch 和 MinIO。 */
+/**
+ * 教材旅程的分阶段真实依赖：MySQL、Redis、MinIO 与 SmartCN Elasticsearch 不重叠运行。
+ *
+ * Spring 上下文启动前只启动数据库、缓存和对象存储；媒体 HTTP 上传完成后释放 MinIO，
+ * 再在固定 localhost 端口启动 ES。ES 客户端是懒连接，因此同一应用上下文可以继续完成
+ * 发布、Outbox 投影和搜索，同时避免低内存主机上两个重型容器重叠。
+ */
 abstract class TextbookContainers extends JourneyHttpSupport {
+    private static final int TEXTBOOK_ELASTICSEARCH_PORT = 19200;
     private static final Network NETWORK = Network.newNetwork();
     protected static final MySQLContainer<?> MYSQL = new MySQLContainer<>(DockerImageName.parse("mysql:8.4"))
         .withDatabaseName("campus_market").withUsername("campus_market").withPassword("campus_market_local")
@@ -182,6 +189,7 @@ abstract class TextbookContainers extends JourneyHttpSupport {
             .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8"))
         .withEnv("xpack.security.enabled", "false")
         .withEnv("ES_JAVA_OPTS", "-Xms256m -Xmx256m")
+        .withFixedExposedPort(TEXTBOOK_ELASTICSEARCH_PORT, 9200)
         .withNetwork(NETWORK).withNetworkAliases("elasticsearch");
     protected static final GenericContainer<?> MINIO = new GenericContainer<>(DockerImageName.parse(
         "quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z"))
@@ -192,7 +200,7 @@ abstract class TextbookContainers extends JourneyHttpSupport {
 
     static {
         ELASTICSEARCH.setImage(ES_IMAGE);
-        Startables.deepStart(Stream.of(MYSQL, REDIS, ELASTICSEARCH, MINIO)).join();
+        Startables.deepStart(Stream.of(MYSQL, REDIS, MINIO)).join();
     }
 
     @DynamicPropertySource
@@ -201,7 +209,7 @@ abstract class TextbookContainers extends JourneyHttpSupport {
         registry.add("spring.datasource.username", MYSQL::getUsername);
         registry.add("spring.datasource.password", MYSQL::getPassword);
         registry.add("spring.data.redis.url", () -> "redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379));
-        registry.add("spring.elasticsearch.uris", () -> "http://" + ELASTICSEARCH.getHost() + ":" + ELASTICSEARCH.getMappedPort(9200));
+        registry.add("spring.elasticsearch.uris", () -> "http://127.0.0.1:" + TEXTBOOK_ELASTICSEARCH_PORT);
         registry.add("campus.market.storage.endpoint", () -> "http://" + MINIO.getHost() + ":" + MINIO.getMappedPort(9000));
         registerCommonDisabledDependencies(registry);
     }
@@ -216,6 +224,16 @@ abstract class TextbookContainers extends JourneyHttpSupport {
     static void stopTextbookContainers() {
         Stream.of(MINIO, ELASTICSEARCH, REDIS, MYSQL).filter(Objects::nonNull).forEach(GenericContainer::stop);
         NETWORK.close();
+    }
+
+    /** 在媒体已通过 HTTP 写入对象存储后切换到搜索阶段，确保 MinIO 与 ES 不重叠。 */
+    protected static void startTextbookSearchContainer() {
+        if (!ELASTICSEARCH.isRunning()) ELASTICSEARCH.start();
+    }
+
+    /** 释放重型对象存储阶段；幂等 stop 允许测试失败后由 @AfterAll 再次清理。 */
+    protected static void stopTextbookMediaContainer() {
+        if (MINIO.isRunning()) MINIO.stop();
     }
 }
 
