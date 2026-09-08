@@ -10,6 +10,7 @@ import com.example.campusmarket.messaging.OutboxDispatcher;
 import com.example.campusmarket.storage.MinioPrivateObjectStorage;
 import com.example.campusmarket.storage.PrivateObjectStorage;
 import com.example.campusmarket.storage.StorageCleanupScheduler;
+import com.github.dockerjava.api.command.CreateContainerCmd;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.ClassOrderer;
 import org.junit.jupiter.api.Nested;
@@ -46,6 +47,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -57,6 +59,14 @@ class RecoveryDrillIT {
     private abstract static class DrillContainers {
         protected static void start(Stream<? extends Startable> containers) {
             Startables.deepStart(containers).join();
+        }
+
+        /**
+         * 在父类中创建 Docker 回调，避免子类静态初始化期间并发容器线程回调子类 lambda，
+         * 从而等待正在执行 deepStart().join() 的子类初始化锁。
+         */
+        protected static Consumer<CreateContainerCmd> memoryLimit(long bytes) {
+            return command -> command.getHostConfig().withMemory(bytes);
         }
 
         protected static void common(DynamicPropertyRegistry registry,
@@ -477,16 +487,16 @@ class RecoveryDrillIT {
         protected static final MySQLContainer<?> MYSQL = new MySQLContainer<>(DockerImageName.parse("mysql:8.4"))
             .withDatabaseName("campus_market").withUsername("campus_market").withPassword("campus_market_local")
             .withNetwork(NETWORK).withNetworkAliases("mysql")
-            .withCreateContainerCmdModifier(cmd -> cmd.getHostConfig().withMemory(MYSQL_MEMORY_BYTES));
+            .withCreateContainerCmdModifier(memoryLimit(MYSQL_MEMORY_BYTES));
         private static final ImageFromDockerfile ES_IMAGE = new ImageFromDockerfile(
             "campus-market/elasticsearch:8.18.8-smartcn", true)
             .withDockerfile(Path.of("docker/elasticsearch/Dockerfile"));
         protected static final ElasticsearchContainer ES = new ElasticsearchContainer(
             DockerImageName.parse("campus-market/elasticsearch:8.18.8-smartcn")
-                .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8"))
+            .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8"))
             .withEnv("xpack.security.enabled", "false")
             .withEnv("ES_JAVA_OPTS", "-Xms128m -Xmx192m")
-            .withCreateContainerCmdModifier(cmd -> cmd.getHostConfig().withMemory(ELASTICSEARCH_MEMORY_BYTES))
+            .withCreateContainerCmdModifier(memoryLimit(ELASTICSEARCH_MEMORY_BYTES))
             .withNetwork(NETWORK).withNetworkAliases("elasticsearch");
         protected static final ToxiproxyContainer TOXIPROXY = new ToxiproxyContainer(DockerImageName.parse("ghcr.io/shopify/toxiproxy:2.12.0"))
             .withNetwork(NETWORK).withNetworkAliases("toxiproxy");
