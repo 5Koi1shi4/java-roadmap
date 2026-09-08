@@ -63,6 +63,9 @@ class CampusMarketJourneyIT {
                 "{\"title\":\"Java 并发教材\",\"description\":\"第六版教材\",\"category\":\"教材\",\"unitPriceFen\":100,\"availableQuantity\":6}", sellerHeaders), String.class);
             assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
             UUID listing = uuid(created.getBody(), "id");
+            // 本阶段不启动 MinIO；发布只需媒体元数据，内容读取由专门的存储 IT 验证。
+            jdbc.update("INSERT INTO listing_media(id,listing_id,object_key,media_type,size_bytes,sort_order,created_at) VALUES (?,?,?,'image/png',1,0,CURRENT_TIMESTAMP(6))",
+                UUID.randomUUID().toString(), listing.toString(), "fixture/textbook-" + listing + ".png");
             ResponseEntity<String> published = http.postForEntity("/api/listings/" + listing + "/publish", entity("", sellerHeaders), String.class);
             assertThat(published.getStatusCode()).isEqualTo(HttpStatus.OK);
             assertThat(searchOutbox.dispatchOnce(20)).isGreaterThanOrEqualTo(1);
@@ -143,9 +146,13 @@ class CampusMarketJourneyIT {
             HttpHeaders sellerHeaders = bearer(seller.token());
             HttpHeaders buyerHeaders = bearer(buyer.token());
             ResponseEntity<String> created = http.postForEntity("/api/listings", entity("{\"title\":\"二手键盘\",\"description\":\"机械键盘\",\"category\":\"电子\",\"unitPriceFen\":500,\"availableQuantity\":1,\"sellerWarrantyDays\":90}", sellerHeaders), String.class);
+            assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
             UUID listing = uuid(created.getBody(), "id");
-            http.postForEntity("/api/listings/" + listing + "/publish", entity("", sellerHeaders), String.class);
-            UUID order = uuid(http.postForEntity("/api/orders", entity("{\"listingId\":\"" + listing + "\",\"quantity\":1}", withKey(buyerHeaders, "w-order-" + listing)), String.class).getBody(), "orderId");
+            assertThat(uploadListingMedia(listing, seller).getStatusCode()).isEqualTo(HttpStatus.CREATED);
+            assertThat(http.postForEntity("/api/listings/" + listing + "/publish", entity("", sellerHeaders), String.class).getStatusCode()).isEqualTo(HttpStatus.OK);
+            ResponseEntity<String> orderResponse = http.postForEntity("/api/orders", entity("{\"listingId\":\"" + listing + "\",\"quantity\":1}", withKey(buyerHeaders, "w-order-" + listing)), String.class);
+            assertThat(orderResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+            UUID order = uuid(orderResponse.getBody(), "orderId");
             ResponseEntity<String> payment = http.postForEntity("/api/orders/" + order + "/payments", entity("{}", withKey(new HttpHeaders(), "w-pay-" + order)), String.class);
             String paymentRef = text(payment.getBody(), "providerReference");
             http.postForEntity("/simulated-provider/payments/" + paymentRef + "/SUCCEEDED", new HttpEntity<>(new HttpHeaders()), String.class);

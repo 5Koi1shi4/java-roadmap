@@ -17,10 +17,13 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.core.io.ByteArrayResource;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.containers.Network;
@@ -35,6 +38,7 @@ import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.HexFormat;
 import java.util.Objects;
 import java.util.UUID;
@@ -104,6 +108,18 @@ abstract class JourneyHttpSupport {
 
     protected HttpEntity<String> entity(String body, HttpHeaders headers) {
         return new HttpEntity<>(body, headers);
+    }
+
+    protected ResponseEntity<String> uploadListingMedia(UUID listing, User seller) {
+        byte[] png = Base64.getDecoder().decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+        LinkedMultiValueMap<String, Object> form = new LinkedMultiValueMap<>();
+        form.add("file", new ByteArrayResource(png) {
+            @Override public String getFilename() { return "cover.png"; }
+        });
+        HttpHeaders headers = bearer(seller.token());
+        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+        return http.postForEntity("/api/listings/" + listing + "/media", new HttpEntity<>(form, headers), String.class);
     }
 
     protected void callback(String type, UUID order, String reference, long amount, String status, String event) throws Exception {
