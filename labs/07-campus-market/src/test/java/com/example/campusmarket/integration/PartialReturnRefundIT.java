@@ -108,6 +108,23 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
     }
 
     @Test
+    void resolvedReturnRetryReadsExistingRefundAndDoesNotOverwriteProofMetadata() {
+        Fixture f = fixture(1, 100);
+        var first = returns.resolve(f.dispute(), DisputeDecision.RETURN_AND_REFUND, 1,
+            ReturnProofType.SELLER_CONFIRMED, "seller-confirmed-original", ProofAuthority.seller(f.seller()));
+
+        var second = returns.resolve(f.dispute(), DisputeDecision.RETURN_AND_REFUND, 1,
+            ReturnProofType.SELLER_CONFIRMED, "seller-confirmed-late-retry", ProofAuthority.seller(f.seller()));
+
+        assertThat(second.refundId()).isEqualTo(first.refundId());
+        assertThat(second.refundStatus()).isEqualTo(first.refundStatus());
+        assertThat(jdbc.queryForObject("SELECT proof_reference FROM return_case WHERE dispute_case_id=?", String.class,
+            f.dispute().toString())).isEqualTo("seller-confirmed-original");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class,
+            f.order().toString())).isEqualTo(1);
+    }
+
+    @Test
     void recoveryScanLinksFailedRefundAndEscalatesWhileKeepingRefundId() {
         Fixture f = fixture(1, 100);
         UUID refund = UUID.randomUUID();

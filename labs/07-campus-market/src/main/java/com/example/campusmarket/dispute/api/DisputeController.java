@@ -3,6 +3,7 @@ package com.example.campusmarket.dispute.api;
 import com.example.campusmarket.dispute.application.DisputeService;
 import com.example.campusmarket.api.ApiErrors;
 import com.example.campusmarket.dispute.application.EvidenceStorage;
+import com.example.campusmarket.dispute.application.ReturnResolutionService;
 import com.example.campusmarket.dispute.domain.DisputeDecision;
 import com.example.campusmarket.identity.application.AuthenticatedUser;
 import com.example.campusmarket.order.application.IdempotentCommandService;
@@ -26,8 +27,16 @@ public final class DisputeController {
     private static final MediaType JSON = MediaType.parseMediaType("application/json; charset=UTF-8");
     private final DisputeService disputes;
     private final EvidenceStorage evidence;
+    private final ReturnResolutionService returns;
+    private final IdempotentCommandService commands;
 
-    public DisputeController(DisputeService disputes, EvidenceStorage evidence) { this.disputes = disputes; this.evidence = evidence; }
+    public DisputeController(DisputeService disputes, EvidenceStorage evidence, ReturnResolutionService returns,
+                             IdempotentCommandService commands) {
+        this.disputes = disputes;
+        this.evidence = evidence;
+        this.returns = returns;
+        this.commands = commands;
+    }
 
     @PostMapping(path = "/api/orders/{orderId}/disputes", consumes = MediaType.APPLICATION_JSON_VALUE, produces = "application/json; charset=UTF-8")
     public ResponseEntity<byte[]> open(@PathVariable UUID orderId, @RequestBody OpenRequest request,
@@ -65,6 +74,33 @@ public final class DisputeController {
         catch (IllegalArgumentException ex) { return error(HttpStatus.BAD_REQUEST, "请求参数无效"); }
     }
 
+    @PostMapping(path = "/api/disputes/{caseId}/return-confirmations", consumes = MediaType.APPLICATION_JSON_VALUE,
+                 produces = "application/json; charset=UTF-8")
+    public ResponseEntity<byte[]> confirmReturn(@PathVariable UUID caseId, @RequestBody ConfirmRequest request,
+                                                @RequestHeader(value = "Idempotency-Key", required = false) String key,
+                                                Authentication auth) {
+        try {
+            requireKey(key);
+            if (request == null) throw new IllegalArgumentException("请求不能为空");
+            UUID seller = user(auth);
+            var current = disputes.requireCase(caseId);
+            byte[] response = commands.executeLifecycle(seller, key, "DISPUTE_RETURN_CONFIRM", caseId,
+                requestBytes(request), current.orderId(), () -> resolutionBody(
+                    returns.confirmSellerReturn(caseId, seller, request.proofReference())));
+            return ResponseEntity.ok().contentType(JSON).body(response);
+        } catch (DisputeService.NotFoundException | ReturnResolutionService.NotFoundException ex) {
+            return error(HttpStatus.NOT_FOUND, "争议不存在");
+        } catch (ReturnResolutionService.ForbiddenException ex) {
+            return error(HttpStatus.FORBIDDEN, "无权执行该角色操作");
+        } catch (DisputeService.ConflictException | IdempotentCommandService.IdempotencyConflictException ex) {
+            return error(HttpStatus.CONFLICT, "争议状态或幂等键冲突");
+        } catch (IllegalStateException ex) {
+            return error(HttpStatus.CONFLICT, "争议状态不允许退回确认");
+        } catch (IllegalArgumentException ex) {
+            return error(HttpStatus.BAD_REQUEST, "请求参数无效");
+        }
+    }
+
     @PostMapping(path = "/api/disputes/{caseId}/evidence", consumes = MediaType.MULTIPART_FORM_DATA_VALUE, produces = "application/json; charset=UTF-8")
     public ResponseEntity<byte[]> attach(@PathVariable UUID caseId, @RequestPart("file") MultipartFile file, Authentication auth) {
         try { EvidenceStorage.EvidenceRecord saved = evidence.attach(caseId, user(auth), file.getOriginalFilename(), file.getContentType(), file.getInputStream()); return ResponseEntity.status(HttpStatus.CREATED).contentType(JSON).body(("{\"evidenceId\":\"" + saved.id() + "\",\"mediaType\":\"" + saved.mediaType() + "\",\"sizeBytes\":" + saved.sizeBytes() + "}").getBytes(StandardCharsets.UTF_8)); }
@@ -87,6 +123,13 @@ public final class DisputeController {
     private static void requireKey(String key) { if (key == null || key.isBlank() || key.length() > 191 || key.chars().anyMatch(Character::isISOControl)) throw new IllegalArgumentException("幂等参数无效"); }
     private static byte[] requestBytes(Object request) { return request.toString().getBytes(StandardCharsets.UTF_8); }
     private static ResponseEntity<byte[]> body(DisputeService.Result result, HttpStatus status) { return ResponseEntity.status(status).contentType(JSON).body(result.responseUtf8()); }
+    private static byte[] resolutionBody(ReturnResolutionService.Resolution result) {
+        String refundId = result.refundId() == null ? "null" : "\"" + result.refundId() + "\"";
+        String body = "{\"disputeId\":\"" + result.disputeCaseId() + "\",\"refundId\":" + refundId
+            + ",\"refundStatus\":\"" + result.refundStatus() + "\",\"amountFen\":" + result.amountFen()
+            + ",\"quarantined\":" + result.quarantined() + "}";
+        return body.getBytes(StandardCharsets.UTF_8);
+    }
     private static ResponseEntity<byte[]> error(HttpStatus status, String message) { return ApiErrors.bytes(status, message); }
 
     @ExceptionHandler(HttpMessageNotReadableException.class)
@@ -100,4 +143,6 @@ public final class DisputeController {
     public record AssignmentRequest(UUID adminId) {}
     @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = false)
     public record DecisionRequest(DisputeDecision decision, int approvedQuantity) {}
+    @com.fasterxml.jackson.annotation.JsonIgnoreProperties(ignoreUnknown = false)
+    public record ConfirmRequest(String proofReference) {}
 }

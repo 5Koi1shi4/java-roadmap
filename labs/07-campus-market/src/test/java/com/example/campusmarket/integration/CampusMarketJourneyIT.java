@@ -1,9 +1,6 @@
 package com.example.campusmarket.integration;
 
 import com.example.campusmarket.CampusMarketApplication;
-import com.example.campusmarket.dispute.application.ProofAuthority;
-import com.example.campusmarket.dispute.domain.DisputeDecision;
-import com.example.campusmarket.dispute.domain.ReturnProofType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Order;
@@ -101,14 +98,16 @@ class CampusMarketJourneyIT {
             assertThat(http.postForEntity("/api/disputes/" + dispute + "/assignments", entity("{\"adminId\":\"" + admin.id() + "\"}", admin.headers()), String.class).getStatusCode()).isEqualTo(HttpStatus.OK);
             assertThat(http.postForEntity("/api/disputes/" + dispute + "/decisions", entity("{\"decision\":\"RETURN_AND_REFUND\",\"approvedQuantity\":1}", withKey(admin.headers(), "decision-" + dispute)), String.class).getStatusCode()).isEqualTo(HttpStatus.OK);
 
-            var prepared = returns.resolve(dispute, DisputeDecision.RETURN_AND_REFUND, 1, ReturnProofType.SELLER_CONFIRMED,
-                seller.id().toString(), ProofAuthority.seller(seller.id()));
-            assertThat(prepared.refundId()).isNotNull();
-            String refundRef = refundsReference(prepared.refundId());
+            ResponseEntity<String> confirmed = http.postForEntity("/api/disputes/" + dispute + "/return-confirmations", entity(
+                "{\"proofReference\":\"seller-confirmed-" + dispute + "\"}", withKey(sellerHeaders, "return-confirm-" + dispute)), String.class);
+            assertThat(confirmed.getStatusCode()).isEqualTo(HttpStatus.OK);
+            UUID confirmedRefund = uuid(confirmed.getBody(), "refundId");
+            assertThat(confirmedRefund).isNotNull();
+            String refundRef = refundsReference(confirmedRefund);
             ResponseEntity<String> providerRefund = http.postForEntity("/simulated-provider/refunds/" + refundRef + "/SUCCEEDED", new HttpEntity<>(new HttpHeaders()), String.class);
             assertThat(providerRefund.getStatusCode()).isEqualTo(HttpStatus.OK);
             callback("REFUND", order, refundRef, 100, "SUCCEEDED", "refund-event-" + dispute);
-            returns.reconcileSuccessfulRefund(prepared.refundId());
+            returns.reconcileSuccessfulRefund(confirmedRefund);
             jdbc.update("UPDATE trade_order SET t0=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 8 DAY) WHERE id=?", order.toString());
             assertThat(settlements.settle(order).status()).isEqualTo("SETTLED");
             assertThat(jdbc.queryForObject("SELECT quarantined_quantity FROM listing WHERE id=?", Integer.class, listing.toString())).isEqualTo(1);

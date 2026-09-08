@@ -77,6 +77,24 @@ public class ReturnResolutionService {
             request.proofType(), request.proofReference(), request.authority());
     }
 
+    /** 卖家确认管理员退回裁决；调用方必须先经过 HTTP 幂等命令边界。 */
+    public Resolution confirmSellerReturn(UUID disputeCaseId, UUID sellerId, String proofReference) {
+        Objects.requireNonNull(disputeCaseId, "争议ID不能为空");
+        Objects.requireNonNull(sellerId, "卖家ID不能为空");
+        if (proofReference == null || proofReference.isBlank()) throw new IllegalArgumentException("退回证明不能为空");
+        SellerReturnFacts facts = jdbc.query("SELECT c.order_id,c.decision,c.approved_quantity,o.seller_id "
+                + "FROM dispute_case c JOIN trade_order o ON o.id=c.order_id WHERE c.id=?",
+            rs -> rs.next() ? new SellerReturnFacts(UUID.fromString(rs.getString(1)),
+                rs.getString(2) == null ? null : DisputeDecision.valueOf(rs.getString(2)),
+                (Integer) rs.getObject(3), UUID.fromString(rs.getString(4))) : null, disputeCaseId.toString());
+        if (facts == null) throw new NotFoundException();
+        if (!sellerId.equals(facts.sellerId())) throw new ForbiddenException();
+        if (facts.decision() != DisputeDecision.RETURN_AND_REFUND || facts.approvedQuantity() == null
+                || facts.approvedQuantity() <= 0) throw new IllegalStateException("当前争议不允许卖家确认退回");
+        return resolve(disputeCaseId, facts.decision(), facts.approvedQuantity(), ReturnProofType.SELLER_CONFIRMED,
+            proofReference, ProofAuthority.seller(sellerId));
+    }
+
     /** 硬期限任务提交的退款意图在截止事务外执行；失败或进程崩溃可由收敛器重试。 */
     public Resolution executeHardDeadlineRefund(UUID disputeCaseId) {
         Objects.requireNonNull(disputeCaseId, "争议ID不能为空");
@@ -175,15 +193,17 @@ public class ReturnResolutionService {
         orderId = (UUID) row[0];
         UUID lockedOrderId = orderId;
         String status = (String) row[2];
-        // 管理员 HTTP 裁决先将争议写成 RESOLVED；退回/退款是其后的外部支付与库存收敛步骤。
-        // 没有既有 return_case 时允许该状态继续 prepare，保证 HTTP 裁决与异步退款之间可恢复。
+        // 先读取不可变的退回事实。管理员裁决已提交但退款仍在外部处理时，任何重试
+        // 都必须返回原事实，不能用迟到证明覆盖 proof/reference 或 resolution 元数据。
+        var existing = jdbc.query("SELECT refund_id,order_id,listing_id,unit_price_fen,approved_quantity,status FROM return_case WHERE dispute_case_id=? FOR UPDATE",
+            rs -> rs.next() ? new CaseFacts(caseId, lockedOrderId, UUID.fromString(rs.getString("listing_id")),
+                rs.getInt("approved_quantity"), rs.getInt("approved_quantity"), rs.getLong("unit_price_fen"),
+                rs.getLong("unit_price_fen") * rs.getInt("approved_quantity"),
+                rs.getString("refund_id") == null ? null : UUID.fromString(rs.getString("refund_id")), rs.getString("status")) : null, caseId.toString());
+        if (existing != null) return existing;
+        // 管理员 HTTP 裁决先将争议写成 RESOLVED；没有既有 return_case 时允许该状态继续
+        // prepare，保证 HTTP 裁决与异步退款之间可恢复。
         if (!"OPEN".equals(status) && !"SELLER_RESPONDED".equals(status) && !"UNDER_REVIEW".equals(status) && !"ESCALATED".equals(status) && !"RESOLVED".equals(status)) {
-            var existing = jdbc.query("SELECT refund_id,order_id,listing_id,unit_price_fen,approved_quantity,status FROM return_case WHERE dispute_case_id=? FOR UPDATE",
-                rs -> rs.next() ? new CaseFacts(caseId, lockedOrderId, UUID.fromString(rs.getString("listing_id")),
-                    rs.getInt("approved_quantity"), rs.getInt("approved_quantity"), rs.getLong("unit_price_fen"),
-                    rs.getLong("unit_price_fen") * rs.getInt("approved_quantity"),
-                    rs.getString("refund_id") == null ? null : UUID.fromString(rs.getString("refund_id")), rs.getString("status")) : null, caseId.toString());
-            if (existing != null) return existing;
             throw new IllegalStateException("争议已经裁决");
         }
         int disputed = (Integer) row[1];
@@ -353,4 +373,8 @@ public class ReturnResolutionService {
         private TimestampValue() {}
         static java.sql.Timestamp of(Instant value) { return java.sql.Timestamp.from(value); }
     }
+
+    private record SellerReturnFacts(UUID orderId, DisputeDecision decision, Integer approvedQuantity, UUID sellerId) {}
+    public static class NotFoundException extends RuntimeException {}
+    public static class ForbiddenException extends RuntimeException {}
 }
