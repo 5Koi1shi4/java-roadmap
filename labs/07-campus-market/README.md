@@ -70,3 +70,12 @@ PENDING_PAYMENT -> AWAITING_HANDOFF -> AWAITING_RECEIPT
 `RecoveryDrillIT` 明确执行三轮：RabbitMQ 断连后恢复 Outbox/Inbox，Elasticsearch 断连后恢复搜索投影，MinIO 断连后恢复清理任务。每轮均执行 dispatcher/projector/cleanup 并检查库存非负、返还业务键唯一、退款额度、单结算、租约、证据 ACL 和搜索最终一致。
 
 更多故障症状与边界见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
+
+低内存主机必须串行运行两个最终验收套件，不要并行启动它们。`CampusMarketJourneyIT` 只启动真实 MySQL、Redis、SmartCN Elasticsearch 和 MinIO；支付模拟器是应用内 HTTP provider，因此不启动 RabbitMQ、Toxiproxy、SSHD 或 Python。`RecoveryDrillIT` 会依次运行三个嵌套轮次，并在每轮结束时停止容器：Rabbit 轮为 MySQL+Redis+RabbitMQ+Toxiproxy，搜索轮为 MySQL+Redis+Elasticsearch+Toxiproxy，存储轮为 MySQL+Redis+MinIO+Toxiproxy。
+
+```powershell
+.\mvnw.cmd -Dit.test=CampusMarketJourneyIT verify
+.\mvnw.cmd -Dit.test=RecoveryDrillIT verify
+```
+
+两条命令必须等待上一条完全结束后再执行；若内存门仍触发，先关闭其他 Docker 容器与并行构建进程，再逐条重试。

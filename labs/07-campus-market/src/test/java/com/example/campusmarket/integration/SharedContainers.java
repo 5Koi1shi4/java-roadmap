@@ -68,13 +68,11 @@ public abstract class SharedContainers {
         .waitingFor(Wait.forListeningPort());
     protected static ToxiproxyContainer.ContainerProxy MINIO_PROXY;
     protected static ToxiproxyContainer.ContainerProxy ELASTICSEARCH_PROXY;
-    protected static ToxiproxyContainer.ContainerProxy RABBIT_PROXY;
 
     static {
         Startables.deepStart(Stream.of(MYSQL, REDIS, RABBITMQ, ELASTICSEARCH, MINIO, TOXIPROXY, PAYMENT_PROVIDER_HTTP)).join();
         MINIO_PROXY = TOXIPROXY.getProxy(MINIO, 9000);
         ELASTICSEARCH_PROXY = TOXIPROXY.getProxy(ELASTICSEARCH, 9200);
-        RABBIT_PROXY = TOXIPROXY.getProxy(RABBITMQ, 5672);
     }
 
     private static ElasticsearchContainer elasticsearchContainer() {
@@ -94,8 +92,8 @@ public abstract class SharedContainers {
         registry.add("spring.datasource.username", MYSQL::getUsername);
         registry.add("spring.datasource.password", MYSQL::getPassword);
         registry.add("spring.data.redis.url", () -> "redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379));
-        registry.add("spring.rabbitmq.host", () -> RABBIT_PROXY.getContainerIpAddress());
-        registry.add("spring.rabbitmq.port", () -> RABBIT_PROXY.getProxyPort());
+        registry.add("spring.rabbitmq.host", RABBITMQ::getHost);
+        registry.add("spring.rabbitmq.port", RABBITMQ::getAmqpPort);
         registry.add("spring.rabbitmq.username", RABBITMQ::getAdminUsername);
         registry.add("spring.rabbitmq.password", RABBITMQ::getAdminPassword);
         registry.add("spring.elasticsearch.uris", () -> "http://" + ELASTICSEARCH_PROXY.getContainerIpAddress() + ":" + ELASTICSEARCH_PROXY.getProxyPort());

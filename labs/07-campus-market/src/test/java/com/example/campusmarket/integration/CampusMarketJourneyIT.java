@@ -55,7 +55,7 @@ import static org.assertj.core.api.Assertions.assertThat;
     "spring.rabbitmq.listener.direct.auto-startup=false"
 })
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
-class CampusMarketJourneyIT extends SharedContainers {
+class CampusMarketJourneyIT extends JourneyContainers {
     private static final String PAYMENT_SECRET = "local-only-payment-secret-change-me";
     @Autowired private TestRestTemplate http;
     @Autowired private LocalVerificationMailSender mail;

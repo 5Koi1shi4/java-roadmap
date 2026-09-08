@@ -40,3 +40,12 @@ git diff --check
 ```
 
 测试中的每轮故障都应看到积压/503，恢复后无过期未决租约、库存非负、搜索与 MySQL 在售集合一致，且证据 ACL 没有放宽。
+
+低内存环境只允许串行验收：
+
+```powershell
+.\mvnw.cmd -Dit.test=CampusMarketJourneyIT verify
+.\mvnw.cmd -Dit.test=RecoveryDrillIT verify
+```
+
+第一条命令的容器集合固定为 MySQL、Redis、SmartCN Elasticsearch、MinIO，应用内 HTTP 支付 provider 不需要额外容器；第二条命令是三个嵌套轮次，依次为 MySQL+Redis+RabbitMQ+Toxiproxy、MySQL+Redis+Elasticsearch+Toxiproxy、MySQL+Redis+MinIO+Toxiproxy。每轮测试类结束会回收自己的容器，且所有轮次都不启动 SSHD、Python 或其他未参与该轮的外部系统。不要并行执行两条命令，也不要在它们之间保留上一轮的容器。
