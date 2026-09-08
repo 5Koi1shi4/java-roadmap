@@ -189,7 +189,6 @@ abstract class TextbookContainers extends JourneyHttpSupport {
             .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8"))
         .withEnv("xpack.security.enabled", "false")
         .withEnv("ES_JAVA_OPTS", "-Xms256m -Xmx256m")
-        .withFixedExposedPort(TEXTBOOK_ELASTICSEARCH_PORT, 9200)
         .withNetwork(NETWORK).withNetworkAliases("elasticsearch");
     protected static final GenericContainer<?> MINIO = new GenericContainer<>(DockerImageName.parse(
         "quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z"))
@@ -200,6 +199,7 @@ abstract class TextbookContainers extends JourneyHttpSupport {
 
     static {
         ELASTICSEARCH.setImage(ES_IMAGE);
+        ELASTICSEARCH.setPortBindings(java.util.List.of(TEXTBOOK_ELASTICSEARCH_PORT + ":9200"));
         Startables.deepStart(Stream.of(MYSQL, REDIS, MINIO)).join();
     }
 
