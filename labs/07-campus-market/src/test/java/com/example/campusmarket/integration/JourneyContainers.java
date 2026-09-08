@@ -167,7 +167,7 @@ abstract class JourneyHttpSupport {
     }
 }
 
-/** 教材旅程的最小真实依赖：MySQL、Redis 和 SmartCN Elasticsearch。 */
+/** 教材旅程的最小真实依赖：MySQL、Redis、SmartCN Elasticsearch 和 MinIO。 */
 abstract class TextbookContainers extends JourneyHttpSupport {
     private static final Network NETWORK = Network.newNetwork();
     protected static final MySQLContainer<?> MYSQL = new MySQLContainer<>(DockerImageName.parse("mysql:8.4"))
@@ -183,10 +183,16 @@ abstract class TextbookContainers extends JourneyHttpSupport {
         .withEnv("xpack.security.enabled", "false")
         .withEnv("ES_JAVA_OPTS", "-Xms256m -Xmx256m")
         .withNetwork(NETWORK).withNetworkAliases("elasticsearch");
+    protected static final GenericContainer<?> MINIO = new GenericContainer<>(DockerImageName.parse(
+        "quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z"))
+        .withCommand("server /data --console-address :9001")
+        .withEnv("MINIO_ROOT_USER", "minioadmin").withEnv("MINIO_ROOT_PASSWORD", "minioadmin-local")
+        .withNetwork(NETWORK).withNetworkAliases("minio").withExposedPorts(9000, 9001)
+        .waitingFor(Wait.forListeningPort());
 
     static {
         ELASTICSEARCH.setImage(ES_IMAGE);
-        Startables.deepStart(Stream.of(MYSQL, REDIS, ELASTICSEARCH)).join();
+        Startables.deepStart(Stream.of(MYSQL, REDIS, ELASTICSEARCH, MINIO)).join();
     }
 
     @DynamicPropertySource
@@ -196,7 +202,7 @@ abstract class TextbookContainers extends JourneyHttpSupport {
         registry.add("spring.datasource.password", MYSQL::getPassword);
         registry.add("spring.data.redis.url", () -> "redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379));
         registry.add("spring.elasticsearch.uris", () -> "http://" + ELASTICSEARCH.getHost() + ":" + ELASTICSEARCH.getMappedPort(9200));
-        registry.add("campus.market.storage.endpoint", () -> "http://127.0.0.1:1");
+        registry.add("campus.market.storage.endpoint", () -> "http://" + MINIO.getHost() + ":" + MINIO.getMappedPort(9000));
         registerCommonDisabledDependencies(registry);
     }
 
@@ -208,7 +214,7 @@ abstract class TextbookContainers extends JourneyHttpSupport {
     }
 
     static void stopTextbookContainers() {
-        Stream.of(ELASTICSEARCH, REDIS, MYSQL).filter(Objects::nonNull).forEach(GenericContainer::stop);
+        Stream.of(MINIO, ELASTICSEARCH, REDIS, MYSQL).filter(Objects::nonNull).forEach(GenericContainer::stop);
         NETWORK.close();
     }
 }

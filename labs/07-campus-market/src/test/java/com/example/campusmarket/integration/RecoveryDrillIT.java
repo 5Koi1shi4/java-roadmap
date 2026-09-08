@@ -1,6 +1,8 @@
 package com.example.campusmarket.integration;
 
 import com.example.campusmarket.CampusMarketApplication;
+import com.example.campusmarket.identity.application.AuthenticatedUser;
+import com.example.campusmarket.identity.infrastructure.JwtService;
 import com.example.campusmarket.catalog.search.ProductSearchPort;
 import com.example.campusmarket.catalog.search.SearchOutboxDispatcher;
 import com.example.campusmarket.messaging.InboxRepository;
@@ -17,6 +19,7 @@ import org.junit.jupiter.api.TestClassOrder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -34,6 +37,10 @@ import org.testcontainers.lifecycle.Startables;
 import org.testcontainers.utility.DockerImageName;
 
 import java.io.ByteArrayInputStream;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -78,6 +85,10 @@ class RecoveryDrillIT {
         }
 
         protected static void assertInvariants(JdbcTemplate jdbc) {
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM payment_order WHERE status='SUCCEEDED'", Integer.class)).isGreaterThan(0);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE status='SUCCEEDED'", Integer.class)).isGreaterThan(0);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM settlement WHERE status='SETTLED'", Integer.class)).isGreaterThan(0);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM inventory_movement", Integer.class)).isGreaterThan(0);
             assertThat(jdbc.queryForObject(
                 "SELECT COALESCE(MIN(available_quantity),0) FROM listing", Integer.class))
                 .isGreaterThanOrEqualTo(0);
@@ -89,7 +100,7 @@ class RecoveryDrillIT {
                     + "GROUP BY business_key HAVING COUNT(*)>1) d", Integer.class))
                 .isZero();
             assertThat(jdbc.queryForObject(
-                "SELECT COUNT(*) FROM payment_order "
+                "SELECT COUNT(*) FROM refund_order "
                     + "WHERE successful_refund_fen+reserved_refund_fen>paid_amount_fen", Integer.class))
                 .isZero();
             assertThat(jdbc.queryForObject(
@@ -110,11 +121,34 @@ class RecoveryDrillIT {
                     + "WHERE c.id IS NULL", Integer.class))
                 .isZero();
         }
+
+        protected static BusinessFacts seedBusinessFacts(JdbcTemplate jdbc) {
+            UUID buyer = UUID.randomUUID(), seller = UUID.randomUUID(), listing = UUID.randomUUID();
+            UUID order = UUID.randomUUID(), payment = UUID.randomUUID(), refund = UUID.randomUUID();
+            jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)),(?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+                buyer.toString(), buyer + "@stu.example.edu.cn", "hash", seller.toString(), seller + "@stu.example.edu.cn", "hash");
+            jdbc.update("INSERT INTO listing(id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?,?,'恢复演练','教材',100,1,'ON_SALE',1,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+                listing.toString(), seller.toString(), "恢复演练商品");
+            jdbc.update("INSERT INTO trade_order(id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,warranty_days,warranty_scope_snapshot,paid_amount_fen,status,version,t0,created_at,updated_at) VALUES (?,?,?,?,?,?,100,1,100,NULL,NULL,100,'SETTLED',1,DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 8 DAY),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+                order.toString(), buyer.toString(), seller.toString(), listing.toString(), "恢复演练商品", "恢复演练");
+            jdbc.update("INSERT INTO payment_order(id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,100,100,?,'SUCCEEDED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+                payment.toString(), order.toString(), "simulated", "recovery-pay-" + order, "recovery-payment-" + order);
+            jdbc.update("INSERT INTO refund_order(id,order_id,payment_order_id,provider,idempotency_key,source_type,source_id,paid_amount_fen,amount_fen,successful_refund_fen,reserved_refund_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,?,'DRILL',?,?,100,20,0,?,'SUCCEEDED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+                refund.toString(), order.toString(), payment.toString(), "simulated", "recovery-refund-" + order, order.toString(), "recovery-refund-ref-" + order);
+            jdbc.update("UPDATE payment_order SET paid_amount_fen=100,successful_refund_fen=20,reserved_refund_fen=0 WHERE id=?", payment.toString());
+            jdbc.update("INSERT INTO settlement(id,order_id,paid_amount_fen,successful_refund_fen,net_settlement_fen,status,created_at) VALUES (?,?,100,20,80,'SETTLED',CURRENT_TIMESTAMP(6))",
+                UUID.nameUUIDFromBytes(("drill-settlement:" + order).getBytes(StandardCharsets.UTF_8)).toString(), order.toString());
+            jdbc.update("INSERT INTO inventory_movement(id,business_key,listing_id,order_id,reason,quantity_delta,created_at) VALUES (?,?,?,?,'ORDER_RESERVED',-1,CURRENT_TIMESTAMP(6)),(?,?,?,?,'RETURN_QUARANTINED',1,CURRENT_TIMESTAMP(6))",
+                UUID.randomUUID().toString(), "drill-reserve-" + order, listing.toString(), order.toString(), UUID.randomUUID().toString(), "drill-return-" + order, listing.toString(), order.toString());
+            return new BusinessFacts(buyer, seller, listing, order, payment, refund);
+        }
+
+        protected record BusinessFacts(UUID buyer, UUID seller, UUID listing, UUID order, UUID payment, UUID refund) {}
     }
 
     @Nested
     @Order(1)
-    @SpringBootTest(classes = CampusMarketApplication.class)
+    @SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
     @ActiveProfiles("local")
     @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
     class RabbitRound extends RabbitContainers {
@@ -124,14 +158,16 @@ class RecoveryDrillIT {
 
         @Test
         void round1RabbitDisconnectLeavesOutboxAndExpiredInboxThenRecovers() {
+            BusinessFacts facts = seedBusinessFacts(jdbc);
             UUID event = UUID.randomUUID();
-            insertOutbox(event, "ORDER_CREATED", UUID.randomUUID());
+            insertOutbox(event, "ORDER_PAID", facts.order());
             insertExpiredInbox(event);
 
             PROXY.setConnectionCut(true);
             try {
                 outbox.dispatchOnce(10, Duration.ofSeconds(2));
                 assertThat(status("integration_outbox", event)).isIn("NEW", "PUBLISHING");
+                assertThat(jdbc.queryForObject("SELECT attempt_count FROM integration_outbox WHERE event_id=?", Integer.class, event.toString())).isGreaterThan(0);
             } finally {
                 PROXY.setConnectionCut(false);
             }
@@ -143,10 +179,16 @@ class RecoveryDrillIT {
             assertThat(outbox.dispatchOnce(10, Duration.ofSeconds(30))).isEqualTo(1);
             assertThat(status("integration_outbox", event)).isEqualTo("PUBLISHED");
 
-            assertThat(inbox.process("recovery-drill", event, Duration.ofSeconds(30), claim -> { })).isTrue();
+            assertThat(inbox.process("recovery-drill", event, Duration.ofSeconds(30), claim -> {
+                assertThat(jdbc.update("UPDATE trade_order SET status='AWAITING_HANDOFF',version=version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND status='SETTLED'", facts.order().toString())).isEqualTo(1);
+                jdbc.update("INSERT INTO integration_outbox(id,event_id,event_type,aggregate_id,aggregate_version,schema_version,occurred_at,payload,status,attempt_count,available_at,created_at) VALUES (?,?, 'ORDER_HANDOFF_CONFIRMED',?,?,1,CURRENT_TIMESTAMP(6),CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+                    UUID.randomUUID().toString(), UUID.nameUUIDFromBytes(("derived:" + event).getBytes(StandardCharsets.UTF_8)).toString(), facts.order().toString(), 2L, "{\"orderId\":\"" + facts.order() + "\"}");
+            })).isTrue();
             assertThat(jdbc.queryForObject(
                 "SELECT status FROM consumed_event WHERE consumer_name='recovery-drill' AND event_id=?",
                 String.class, event.toString())).isEqualTo("COMPLETED");
+            assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, facts.order().toString())).isEqualTo("AWAITING_HANDOFF");
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='ORDER_HANDOFF_CONFIRMED' AND aggregate_id=?", Integer.class, facts.order().toString())).isEqualTo(1);
             assertInvariants(jdbc);
         }
 
@@ -185,6 +227,7 @@ class RecoveryDrillIT {
         @Test
         void round2ElasticsearchDisconnectLeavesSearchOutboxThenCatchesUp() {
             UUID seller = insertUser();
+            BusinessFacts facts = seedBusinessFacts(jdbc);
             UUID listing = UUID.randomUUID();
             jdbc.update("INSERT INTO listing "
                     + "(id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,"
@@ -198,11 +241,17 @@ class RecoveryDrillIT {
                     + "VALUES (?,?,1,'LISTING_PUBLISHED',CAST(? AS JSON),'NEW',0,"
                     + "CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
                 event.toString(), listing.toString(), "{}");
+            UUID seededEvent = UUID.randomUUID();
+            jdbc.update("INSERT INTO search_outbox "
+                    + "(id,listing_id,aggregate_version,event_type,payload,status,attempt_count,available_at,created_at) "
+                    + "VALUES (?,?,1,'LISTING_PUBLISHED',CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+                seededEvent.toString(), facts.listing().toString(), "{}");
 
             PROXY.setConnectionCut(true);
             try {
                 searchOutbox.dispatchOnce(10, Duration.ofSeconds(2));
                 assertThat(status(event)).isIn("NEW", "PUBLISHING");
+                assertThat(jdbc.queryForObject("SELECT attempt_count FROM search_outbox WHERE id=?", Integer.class, event.toString())).isGreaterThan(0);
             } finally {
                 PROXY.setConnectionCut(false);
             }
@@ -210,16 +259,17 @@ class RecoveryDrillIT {
             jdbc.update("UPDATE search_outbox SET available_at=CURRENT_TIMESTAMP(6), "
                     + "lease_until=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE id=?",
                 event.toString());
-            assertThat(searchOutbox.dispatchOnce(10, Duration.ofSeconds(30))).isEqualTo(1);
+            assertThat(searchOutbox.dispatchOnce(10, Duration.ofSeconds(30))).isEqualTo(2);
             search.refresh();
             assertThat(status(event)).isEqualTo("PUBLISHED");
             Set<String> indexed = Set.copyOf(search.search(
-                new ProductSearchPort.SearchRequest("故障演练教材", null, null, null, 0, 20))
+                new ProductSearchPort.SearchRequest(null, null, null, null, 0, 20))
                 .items().stream().map(ProductSearchPort.SearchItem::listingId).toList());
             assertThat(indexed).contains(listing.toString());
-            assertThat(indexed).isSubsetOf(jdbc.query(
+            Set<String> mysqlOnSale = Set.copyOf(jdbc.query(
                 "SELECT id FROM listing WHERE status='ON_SALE' AND available_quantity>0",
                 (rs, n) -> rs.getString(1)));
+            assertThat(indexed).isEqualTo(mysqlOnSale);
             assertInvariants(jdbc);
         }
 
@@ -244,15 +294,20 @@ class RecoveryDrillIT {
     @ActiveProfiles("local")
     @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
     class StorageRound extends StorageContainers {
+        @LocalServerPort private int port;
         @Autowired private JdbcTemplate jdbc;
+        @Autowired private JwtService jwt;
         @Autowired private StorageCleanupScheduler cleanup;
         @Autowired private PrivateObjectStorage storage;
+        private final HttpClient client = HttpClient.newHttpClient();
 
         private static final int STORAGE_RECOVERY_ATTEMPTS = 8;
         private static final Duration STORAGE_RECOVERY_POLL = Duration.ofMillis(250);
 
         @Test
         void round3MinioDisconnectLeavesCleanupPendingThenDeletesAfterRecovery() {
+            seedBusinessFacts(jdbc);
+            assertEvidenceAclOverHttp();
             UUID submitter = insertUser();
             UUID session = UUID.randomUUID();
             String objectKey = "cleanup-drill/" + session;
@@ -274,8 +329,12 @@ class RecoveryDrillIT {
                 cleanup.runOnce(10);
                 assertThat(jdbc.queryForObject(
                     "SELECT COUNT(*) FROM storage_cleanup_task WHERE cleanup_business_key=? "
-                        + "AND status IN ('PENDING','PROCESSING')", Integer.class,
+                    + "AND status IN ('PENDING','PROCESSING')", Integer.class,
                     "listing-upload:" + session)).isEqualTo(1);
+                assertThat(jdbc.queryForObject("SELECT attempt_count FROM storage_cleanup_task WHERE cleanup_business_key=?", Integer.class,
+                    "listing-upload:" + session)).isGreaterThan(0);
+                assertThat(jdbc.queryForObject("SELECT failure_class FROM storage_cleanup_task WHERE cleanup_business_key=?", String.class,
+                    "listing-upload:" + session)).isEqualTo("TRANSIENT");
             } finally {
                 PROXY.setConnectionCut(false);
             }
@@ -336,6 +395,42 @@ class RecoveryDrillIT {
                     + "CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
                 id.toString(), id + "@stu.example.edu.cn", "hash");
             return id;
+        }
+
+        private void assertEvidenceAclOverHttp() {
+            UUID buyer = insertUser(), seller = insertUser(), other = insertUser(), listing = UUID.randomUUID(), order = UUID.randomUUID(), dispute = UUID.randomUUID();
+            jdbc.update("INSERT INTO listing(id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?, '证据商品','描述','教材',100,0,'SOLD_OUT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", listing.toString(), seller.toString());
+            jdbc.update("INSERT INTO trade_order(id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,t0,acceptance_deadline,trial_deadline,paid_amount_fen,status,created_at,updated_at) VALUES (?,?,?,?, '证据商品','描述',100,1,100,DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 HOUR),DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 HOUR),DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 167 HOUR),100,'AFTERSALE_WINDOW',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", order.toString(), buyer.toString(), seller.toString(), listing.toString());
+            jdbc.update("INSERT INTO dispute_case(id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,opened_at,created_at,updated_at) VALUES (?,?,?,1,'FUNCTIONAL_DEFECT','OPEN',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", dispute.toString(), order.toString(), buyer.toString());
+            try {
+                HttpResponse<String> uploaded = multipart("/api/disputes/" + dispute + "/evidence", token(buyer), "proof.png", "image/png",
+                    java.util.Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="));
+                assertThat(uploaded.statusCode()).isEqualTo(201);
+                String evidenceId = field(uploaded.body(), "evidenceId");
+                assertThat(get("/api/disputes/" + dispute + "/evidence/" + evidenceId + "/content", token(buyer)).statusCode()).isEqualTo(200);
+                assertThat(get("/api/disputes/" + dispute + "/evidence/" + evidenceId + "/content", token(seller)).statusCode()).isEqualTo(200);
+                assertThat(get("/api/disputes/" + dispute + "/evidence/" + evidenceId + "/content", token(other)).statusCode()).isEqualTo(404);
+            } catch (Exception failure) {
+                throw new AssertionError("HTTP evidence ACL drill failed", failure);
+            }
+        }
+
+        private String token(UUID user) { return jwt.issue(new AuthenticatedUser(user, Set.of("ROLE_USER"))); }
+        private HttpResponse<String> multipart(String path, String bearer, String filename, String type, byte[] bytes) throws Exception {
+            String boundary = "----recovery" + UUID.randomUUID();
+            byte[] prefix = ("--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"" + filename + "\"\r\nContent-Type: " + type + "\r\n\r\n").getBytes(StandardCharsets.UTF_8);
+            byte[] suffix = ("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8);
+            byte[] body = new byte[prefix.length + bytes.length + suffix.length];
+            System.arraycopy(prefix, 0, body, 0, prefix.length); System.arraycopy(bytes, 0, body, prefix.length, bytes.length); System.arraycopy(suffix, 0, body, prefix.length + bytes.length, suffix.length);
+            return client.send(HttpRequest.newBuilder(URI.create("http://localhost:" + port + path)).header("Authorization", "Bearer " + bearer).header("Content-Type", "multipart/form-data; boundary=" + boundary).POST(HttpRequest.BodyPublishers.ofByteArray(body)).build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        }
+        private HttpResponse<String> get(String path, String bearer) throws Exception {
+            return client.send(HttpRequest.newBuilder(URI.create("http://localhost:" + port + path)).header("Authorization", "Bearer " + bearer).GET().build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        }
+        private static String field(String json, String name) {
+            java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("\\\"" + name + "\\\"\\s*:\\s*\\\"([^\\\"]+)").matcher(json);
+            if (!matcher.find()) throw new AssertionError("missing " + name + " in " + json);
+            return matcher.group(1);
         }
     }
 

@@ -45,6 +45,8 @@ Content-Type: application/json; charset=UTF-8
 
 本地 `LocalVerificationMailSender` 仅保存最近验证码，模拟支付提供方位于 `/simulated-provider`。注册后使用 `/api/auth/login` 获取 15 分钟 JWT；发布商品、下单、交付、争议、质保和评价均需携带 `Authorization: Bearer <token>`。商品搜索为 `GET /api/search?keyword=Java&size=20`，游标使用返回的 `nextSearchAfter`。
 
+管理员裁决退货退款后，卖家必须通过 `POST /api/disputes/{disputeId}/return-confirmations` 携带 `Idempotency-Key` 和受控证明完成确认；同一卖家与幂等键重放原始响应，改变证明内容返回 409。
+
 所有金额是人民币整数分并以数据库 `BIGINT` 保存，禁止浮点数。订单只含一个发布项但数量可大于 1，库存使用带数量条件的更新。
 
 ## 订单和售后窗口
@@ -67,11 +69,11 @@ PENDING_PAYMENT -> AWAITING_HANDOFF -> AWAITING_RECEIPT
 
 商品变更先写 MySQL 与搜索 Outbox；`SearchProjector` 使用外部版本，删除写 tombstone。在线重建流程是 RR 快照、高水位补放、写入门禁和原子别名切换；重建失败可由意图收敛器继续处理。
 
-`RecoveryDrillIT` 明确执行三轮：RabbitMQ 断连后恢复 Outbox/Inbox，Elasticsearch 断连后恢复搜索投影，MinIO 断连后恢复清理任务。每轮均执行 dispatcher/projector/cleanup 并检查库存非负、返还业务键唯一、退款额度、单结算、租约、证据 ACL 和搜索最终一致。
+`RecoveryDrillIT` 明确执行三轮：RabbitMQ 断连后恢复 Outbox/Inbox，Elasticsearch 断连后恢复搜索投影，MinIO 断连后恢复清理任务。每轮均先建立支付、退款、结算和库存事实，再执行 dispatcher/projector/cleanup；断连期间断言尝试次数/瞬时失败分类，恢复后检查库存非负、返还业务键唯一、退款额度、单结算、租约、真实 HTTP 证据 ACL 和搜索集合与 MySQL 在售集合相等。Rabbit Inbox 接管还必须在同一事务中完成订单状态和派生 Outbox。
 
 更多故障症状与边界见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
 
-低内存主机必须串行运行两个最终验收套件，不要并行启动它们。`CampusMarketJourneyIT` 是按序执行的两个嵌套阶段：教材阶段只启动真实 MySQL、Redis、SmartCN Elasticsearch，质保阶段只启动真实 MySQL、Redis、MinIO；每个阶段的 `@AfterAll` 都会停止自己的容器。支付模拟器是应用内 HTTP provider，因此不启动 RabbitMQ、Toxiproxy、SSHD 或 Python。`RecoveryDrillIT` 会依次运行三个嵌套轮次，并在每轮结束时停止容器：Rabbit 轮为 MySQL+Redis+RabbitMQ+Toxiproxy，搜索轮为 MySQL+Redis+Elasticsearch+Toxiproxy，存储轮为 MySQL+Redis+MinIO+Toxiproxy。
+低内存主机必须串行运行两个最终验收套件，不要并行启动它们。`CampusMarketJourneyIT` 是按序执行的两个嵌套阶段：教材阶段启动真实 MySQL、Redis、SmartCN Elasticsearch、MinIO 并通过商品媒体 HTTP 上传，质保阶段启动真实 MySQL、Redis、MinIO；每个阶段的 `@AfterAll` 都会停止自己的容器。支付模拟器是应用内 HTTP provider，因此不启动 RabbitMQ、Toxiproxy、SSHD 或 Python。`RecoveryDrillIT` 会依次运行三个嵌套轮次，并在每轮结束时停止容器：Rabbit 轮为 MySQL+Redis+RabbitMQ+Toxiproxy，搜索轮为 MySQL+Redis+Elasticsearch+Toxiproxy，存储轮为 MySQL+Redis+MinIO+Toxiproxy。
 
 ```powershell
 .\mvnw.cmd -Dit.test=CampusMarketJourneyIT verify

@@ -61,9 +61,7 @@ class CampusMarketJourneyIT {
                 "{\"title\":\"Java 并发教材\",\"description\":\"第六版教材\",\"category\":\"教材\",\"unitPriceFen\":100,\"availableQuantity\":6}", sellerHeaders), String.class);
             assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
             UUID listing = uuid(created.getBody(), "id");
-            // 本阶段不启动 MinIO；发布只需媒体元数据，内容读取由专门的存储 IT 验证。
-            jdbc.update("INSERT INTO listing_media(id,listing_id,object_key,media_type,size_bytes,sort_order,created_at) VALUES (?,?,?,'image/png',1,0,CURRENT_TIMESTAMP(6))",
-                UUID.randomUUID().toString(), listing.toString(), "fixture/textbook-" + listing + ".png");
+            assertThat(uploadListingMedia(listing, seller).getStatusCode()).isEqualTo(HttpStatus.CREATED);
             ResponseEntity<String> published = http.postForEntity("/api/listings/" + listing + "/publish", entity("", sellerHeaders), String.class);
             assertThat(published.getStatusCode()).isEqualTo(HttpStatus.OK);
             assertThat(searchOutbox.dispatchOnce(20)).isGreaterThanOrEqualTo(1);
@@ -169,6 +167,10 @@ class CampusMarketJourneyIT {
             ResponseEntity<String> opened = http.postForEntity("/api/orders/" + order + "/warranty", entity("{\"quantity\":1,\"reason\":\"FUNCTIONAL_DEFECT\"}", withKey(buyerHeaders, "w-case-" + order)), String.class);
             assertThat(opened.getStatusCode()).isEqualTo(HttpStatus.CREATED);
             UUID caseId = uuid(opened.getBody(), "caseId");
+            assertThat(jdbc.queryForObject("SELECT warranty_days FROM trade_order WHERE id=?", Integer.class,
+                order.toString())).isEqualTo(90);
+            assertThat(jdbc.queryForObject("SELECT warranty_scope_snapshot FROM trade_order WHERE id=?", String.class,
+                order.toString())).isEqualTo("SELLER_NON_HUMAN_FUNCTIONAL_FAILURE");
             LinkedMultiValueMap<String, Object> form = new LinkedMultiValueMap<>();
             form.add("file", new ByteArrayResource("%PDF-1.4\nrepair quote\n%%EOF".getBytes(StandardCharsets.US_ASCII)) {
                 @Override public String getFilename() { return "quote.pdf"; }
@@ -185,7 +187,29 @@ class CampusMarketJourneyIT {
             assertThat(restricted.getStatusCode()).isEqualTo(HttpStatus.OK);
             assertThat(restricted.getBody()).contains("\"publishRestricted\":true");
             UUID obligationId = UUID.fromString(jdbc.queryForObject("SELECT id FROM seller_obligation WHERE warranty_case_id=?", String.class, caseId.toString()));
-            assertThat(http.postForEntity("/api/seller/obligations/" + obligationId + "/fund", entity("{\"amountFen\":200}", withKey(sellerHeaders, "fund-" + obligationId)), String.class).getStatusCode()).isEqualTo(HttpStatus.OK);
+            assertThat(jdbc.queryForObject("SELECT funding_deadline > DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 71 HOUR) FROM seller_obligation WHERE id=?", Boolean.class,
+                obligationId.toString())).isTrue();
+            jdbc.update("UPDATE seller_obligation SET funding_deadline=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE id=?", obligationId.toString());
+            assertThat(http.postForEntity("/api/seller/obligations/" + obligationId + "/fund", entity("{\"amountFen\":200}", withKey(sellerHeaders, "fund-expired-" + obligationId)), String.class).getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+            ResponseEntity<String> restrictedAfterExpiry = http.exchange("/api/seller/restrictions", HttpMethod.GET, entity("", sellerHeaders), String.class);
+            assertThat(restrictedAfterExpiry.getBody()).contains("\"publishRestricted\":true", "\"withdrawRestricted\":true");
+            ResponseEntity<String> blockedDraft = http.postForEntity("/api/listings", entity(
+                "{\"title\":\"受限商品\",\"description\":\"不能发布\",\"category\":\"电子\",\"unitPriceFen\":10,\"availableQuantity\":1}", sellerHeaders), String.class);
+            assertThat(blockedDraft.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+            UUID blockedListing = uuid(blockedDraft.getBody(), "id");
+            assertThat(uploadListingMedia(blockedListing, seller).getStatusCode()).isEqualTo(HttpStatus.CREATED);
+            assertThat(http.postForEntity("/api/listings/" + blockedListing + "/publish", entity("", sellerHeaders), String.class).getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+            assertThat(http.postForEntity("/api/seller/withdrawals", entity("{\"amountFen\":1}", withKey(sellerHeaders, "withdraw-expired-" + obligationId)), String.class).getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+            UUID settlementId = UUID.nameUUIDFromBytes(("settlement:" + order).getBytes(StandardCharsets.UTF_8));
+            assertThat(obligations.deductFutureSettlement(settlementId, obligationId, com.example.campusmarket.shared.Money.ofFen(200))).isEqualTo(200L);
+            assertThat(obligations.deductFutureSettlement(settlementId, obligationId, com.example.campusmarket.shared.Money.ofFen(200))).isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM settlement_obligation_deduction WHERE settlement_id=? AND obligation_id=?", Integer.class,
+                settlementId.toString(), obligationId.toString())).isEqualTo(1);
+            String compensationRef = jdbc.queryForObject("SELECT provider_reference FROM refund_order WHERE source_type='WARRANTY' AND source_id=?", String.class, caseId.toString());
+            ResponseEntity<String> providerCompensation = http.postForEntity("/simulated-provider/refunds/" + compensationRef + "/SUCCEEDED", new HttpEntity<>(new HttpHeaders()), String.class);
+            assertThat(providerCompensation.getStatusCode()).isEqualTo(HttpStatus.OK);
+            callback("REFUND", order, compensationRef, 200, "SUCCEEDED", "w-refund-event-" + caseId);
+            assertThat(jdbc.queryForObject("SELECT status FROM refund_order WHERE source_type='WARRANTY' AND source_id=?", String.class, caseId.toString())).isEqualTo("SUCCEEDED");
             ResponseEntity<String> unrestricted = http.exchange("/api/seller/restrictions", HttpMethod.GET, entity("", sellerHeaders), String.class);
             assertThat(unrestricted.getStatusCode()).isEqualTo(HttpStatus.OK);
             assertThat(unrestricted.getBody()).contains("\"publishRestricted\":false");
