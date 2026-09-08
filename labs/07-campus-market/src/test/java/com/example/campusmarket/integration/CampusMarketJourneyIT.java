@@ -201,7 +201,7 @@ class CampusMarketJourneyIT {
             assertThat(blockedDraft.getStatusCode()).isEqualTo(HttpStatus.CREATED);
             UUID blockedListing = uuid(blockedDraft.getBody(), "id");
             assertThat(uploadListingMedia(blockedListing, seller).getStatusCode()).isEqualTo(HttpStatus.CREATED);
-            assertThat(http.postForEntity("/api/listings/" + blockedListing + "/publish", entity("", sellerHeaders), String.class).getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+            assertThat(http.postForEntity("/api/listings/" + blockedListing + "/publish", entity("", sellerHeaders), String.class).getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
             assertThat(http.postForEntity("/api/seller/withdrawals", entity("{\"amountFen\":1}", withKey(sellerHeaders, "withdraw-expired-" + obligationId)), String.class).getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
             UUID settlementId = UUID.nameUUIDFromBytes(("settlement:" + order).getBytes(StandardCharsets.UTF_8));
             assertThat(obligations.deductFutureSettlement(settlementId, obligationId, com.example.campusmarket.shared.Money.ofFen(200))).isEqualTo(200L);

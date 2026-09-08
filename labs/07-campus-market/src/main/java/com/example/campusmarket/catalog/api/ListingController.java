@@ -84,6 +84,9 @@ public class ListingController {
     @ExceptionHandler(MinioPrivateObjectStorage.StorageUnavailableException.class)
     ResponseEntity<ApiError> unavailable() { return ApiErrors.entity(HttpStatus.SERVICE_UNAVAILABLE, "对象存储暂时不可用"); }
 
+    @ExceptionHandler(ListingService.RestrictionException.class)
+    ResponseEntity<ApiError> restricted() { return ApiErrors.entity(HttpStatus.CONFLICT, "发布受限"); }
+
     @ExceptionHandler({IllegalArgumentException.class, IllegalStateException.class})
     ResponseEntity<ApiError> badRequest(RuntimeException e) { return ApiErrors.entity(HttpStatus.BAD_REQUEST, "请求参数无效"); }
 
