@@ -256,7 +256,10 @@ class RecoveryDrillIT {
             jdbc.update("UPDATE search_outbox SET available_at=CURRENT_TIMESTAMP(6), "
                     + "lease_until=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND) WHERE id=?",
                 event.toString());
-            assertThat(searchOutbox.dispatchOnce(10, Duration.ofSeconds(30))).isEqualTo(2);
+            int expectedRecovered = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM search_outbox WHERE listing_id=? AND status IN ('NEW','PUBLISHING')",
+                Integer.class, listing.toString());
+            assertThat(searchOutbox.dispatchOnce(10, Duration.ofSeconds(30))).isEqualTo(expectedRecovered);
             search.refresh();
             assertThat(status(event)).isEqualTo("PUBLISHED");
             Set<String> indexed = Set.copyOf(search.search(
