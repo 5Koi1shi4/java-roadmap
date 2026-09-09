@@ -74,4 +74,23 @@ class WarrantyOutboxDispatcherTest {
         assertThat(registry.get("campus.market.retry.total.OUTBOX").tag("result", "RETRY").counter().count())
             .isEqualTo(1.0);
     }
+
+    @Test
+    void lostLeaseDoesNotReportARetryThatWasNotPersisted() {
+        OutboxRepository repository = mock(OutboxRepository.class);
+        RabbitTemplate rabbit = mock(RabbitTemplate.class);
+        UUID event = UUID.randomUUID();
+        var message = new OutboxRepository.OutboxMessage(UUID.randomUUID(), event, "ORDER_PAID",
+            UUID.randomUUID().toString(), 1, 1, "{}", Instant.now(), "owner", "token",
+            Instant.now().minusSeconds(1), 1, false);
+        when(repository.claimBatch(any(), eq(10), any())).thenReturn(List.of(message));
+        when(repository.releaseForRetry(eq(event), any(), any(), any())).thenReturn(0);
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+
+        var dispatcher = new OutboxDispatcher(repository, rabbit, new EventEnvelopeCodec(),
+            (key, ignored) -> { throw new IllegalStateException("socket closed after lease expiry"); }, new CampusMetrics(registry));
+
+        assertThat(dispatcher.dispatchOnce(10)).isZero();
+        assertThat(registry.find("campus.market.retry.total.OUTBOX").tag("result", "RETRY").counter()).isNull();
+    }
 }

@@ -248,11 +248,20 @@ class RecoveryDrillIT {
 
             PROXY.setConnectionCut(true);
             try {
-                outbox.dispatchOnce(10, Duration.ofSeconds(2));
-                assertThat(status("integration_outbox", event)).isIn("NEW", "PUBLISHING");
+                outbox.dispatchOnce(10, Duration.ofSeconds(30));
+                assertThat(status("integration_outbox", event)).isEqualTo("NEW");
                 assertThat(jdbc.queryForObject("SELECT attempt_count FROM integration_outbox WHERE event_id=?", Integer.class, event.toString())).isGreaterThan(0);
-                assertThat(metrics.get("campus.market.retry.total.OUTBOX").tag("result", "RETRY").counter().count())
-                    .isGreaterThan(0.0);
+                String meterDiagnostics = metrics.getMeters().stream().map(meter -> meter.getId().toString()).sorted()
+                    .collect(java.util.stream.Collectors.joining("; "));
+                io.micrometer.core.instrument.Counter retryCounter = metrics.find("campus.market.retry.total.OUTBOX")
+                    .tag("result", "RETRY").counter();
+                assertThat(retryCounter)
+                    .withFailMessage("retry meter missing; outbox status=%s attempt=%s meters=%s",
+                        status("integration_outbox", event),
+                        jdbc.queryForObject("SELECT attempt_count FROM integration_outbox WHERE event_id=?", Integer.class, event.toString()),
+                        meterDiagnostics)
+                    .isNotNull();
+                assertThat(retryCounter.count()).isGreaterThan(0.0);
             } finally {
                 PROXY.setConnectionCut(false);
             }
