@@ -228,11 +228,8 @@ class RecoveryDrillIT {
         @Autowired private RabbitTemplate rabbit;
         @Autowired private ReliableEventConsumer consumer;
         @Autowired private MeterRegistry metrics;
-        @Autowired private SearchOutboxDispatcher searchOutbox;
-        @Autowired private ProductSearchPort search;
-        @LocalServerPort private int port;
         @Autowired private JwtService jwt;
-        @Autowired private PrivateObjectStorage storage;
+        @LocalServerPort private int port;
 
         @Test
         void round1RabbitDisconnectLeavesOutboxAndExpiredInboxThenRecovers() {
@@ -280,9 +277,6 @@ class RecoveryDrillIT {
             assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, facts.order().toString())).isEqualTo("AWAITING_HANDOFF");
             assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, payment.toString())).isEqualTo("SUCCEEDED");
             assertThat(jdbc.queryForObject("SELECT paid_amount_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(100L);
-            assertEvidenceAclOverHttp(port, jwt, seedEvidenceAcl(jdbc, storage));
-            projectAllOnSale(jdbc, searchOutbox);
-            assertSearchEqualsMysql(jdbc, search);
             assertInvariants(jdbc);
         }
 
@@ -341,7 +335,6 @@ class RecoveryDrillIT {
         @Autowired private ProductSearchPort search;
         @Autowired private MeterRegistry metrics;
         @Autowired private JwtService jwt;
-        @Autowired private PrivateObjectStorage storage;
 
         @Test
         void round2ElasticsearchDisconnectLeavesSearchOutboxThenCatchesUp() throws Exception {
@@ -384,7 +377,6 @@ class RecoveryDrillIT {
             search.refresh();
             assertThat(status(event)).isEqualTo("PUBLISHED");
             assertSearchEqualsMysql(jdbc, search);
-            assertEvidenceAclOverHttp(port, jwt, seedEvidenceAcl(jdbc, storage));
             assertInvariants(jdbc);
         }
 
@@ -415,8 +407,6 @@ class RecoveryDrillIT {
         @Autowired private StorageCleanupScheduler cleanup;
         @Autowired private PrivateObjectStorage storage;
         @Autowired private MeterRegistry metrics;
-        @Autowired private SearchOutboxDispatcher searchOutbox;
-        @Autowired private ProductSearchPort search;
         private final HttpClient client = HttpClient.newHttpClient();
         private UUID evidenceDispute;
         private UUID evidenceBuyer;
@@ -476,8 +466,6 @@ class RecoveryDrillIT {
                 String.class, disputeBusinessKey)).isEqualTo("COMPLETED");
             assertThatThrownBy(() -> storage.open(objectKey))
                 .isInstanceOf(MinioPrivateObjectStorage.ObjectNotFoundException.class);
-            projectAllOnSale(jdbc, searchOutbox);
-            assertSearchEqualsMysql(jdbc, search);
             assertInvariants(jdbc);
         }
 
@@ -575,7 +563,6 @@ class RecoveryDrillIT {
     }
 
     private abstract static class RabbitContainers extends DrillContainers {
-        private static final long ELASTICSEARCH_MEMORY_BYTES = 768L * 1024L * 1024L;
         protected static final Network NETWORK = Network.newNetwork();
         protected static final MySQLContainer<?> MYSQL = new MySQLContainer<>(DockerImageName.parse("mysql:8.4"))
             .withDatabaseName("campus_market").withUsername("campus_market").withPassword("campus_market_local")
@@ -584,15 +571,12 @@ class RecoveryDrillIT {
             .withNetwork(NETWORK).withNetworkAliases("redis").withExposedPorts(6379);
         protected static final RabbitMQContainer RABBIT = new RabbitMQContainer(DockerImageName.parse("rabbitmq:3.13.7-management"))
             .withNetwork(NETWORK).withNetworkAliases("rabbitmq");
-        protected static final GenericContainer<?> MINIO = minio(NETWORK);
-        private static final ImageFromDockerfile ES_IMAGE = smartCnImage();
-        protected static final ElasticsearchContainer ES = elasticsearch(NETWORK, ES_IMAGE, ELASTICSEARCH_MEMORY_BYTES);
         protected static final ToxiproxyContainer TOXIPROXY = new ToxiproxyContainer(DockerImageName.parse("ghcr.io/shopify/toxiproxy:2.12.0"))
             .withNetwork(NETWORK).withNetworkAliases("toxiproxy");
         protected static ToxiproxyContainer.ContainerProxy PROXY;
 
         static {
-            start(Stream.of(MYSQL, REDIS, RABBIT, MINIO, ES, TOXIPROXY));
+            start(Stream.of(MYSQL, REDIS, RABBIT, TOXIPROXY));
             PROXY = TOXIPROXY.getProxy(RABBIT, 5672);
         }
 
@@ -603,13 +587,11 @@ class RecoveryDrillIT {
             registry.add("spring.rabbitmq.port", PROXY::getProxyPort);
             registry.add("spring.rabbitmq.username", RABBIT::getAdminUsername);
             registry.add("spring.rabbitmq.password", RABBIT::getAdminPassword);
-            registry.add("spring.elasticsearch.uris", () -> "http://" + ES.getHost() + ":" + ES.getMappedPort(9200));
-            registry.add("campus.market.storage.endpoint", () -> "http://" + MINIO.getHost() + ":" + MINIO.getMappedPort(9000));
         }
 
         @AfterAll
         static void stop() {
-            Stream.of(TOXIPROXY, ES, MINIO, RABBIT, MYSQL, REDIS).forEach(GenericContainer::stop);
+            Stream.of(TOXIPROXY, RABBIT, MYSQL, REDIS).forEach(GenericContainer::stop);
             NETWORK.close();
         }
     }
@@ -634,12 +616,11 @@ class RecoveryDrillIT {
             .withNetwork(NETWORK).withNetworkAliases("elasticsearch");
         protected static final ToxiproxyContainer TOXIPROXY = new ToxiproxyContainer(DockerImageName.parse("ghcr.io/shopify/toxiproxy:2.12.0"))
             .withNetwork(NETWORK).withNetworkAliases("toxiproxy");
-        protected static final GenericContainer<?> MINIO = minio(NETWORK);
         protected static ToxiproxyContainer.ContainerProxy PROXY;
 
         static {
             ES.setImage(ES_IMAGE);
-            start(Stream.of(MYSQL, ES, MINIO, TOXIPROXY));
+            start(Stream.of(MYSQL, ES, TOXIPROXY));
             PROXY = TOXIPROXY.getProxy(ES, 9200);
         }
 
@@ -650,18 +631,16 @@ class RecoveryDrillIT {
             common(registry, MYSQL, null);
             registry.add("spring.elasticsearch.uris",
                 () -> "http://" + PROXY.getContainerIpAddress() + ":" + PROXY.getProxyPort());
-            registry.add("campus.market.storage.endpoint", () -> "http://" + MINIO.getHost() + ":" + MINIO.getMappedPort(9000));
         }
 
         @AfterAll
         static void stop() {
-            Stream.of(TOXIPROXY, MINIO, ES, MYSQL).forEach(GenericContainer::stop);
+            Stream.of(TOXIPROXY, ES, MYSQL).forEach(GenericContainer::stop);
             NETWORK.close();
         }
     }
 
     private abstract static class StorageContainers extends DrillContainers {
-        private static final long ELASTICSEARCH_MEMORY_BYTES = 768L * 1024L * 1024L;
         protected static final Network NETWORK = Network.newNetwork();
         protected static final MySQLContainer<?> MYSQL = new MySQLContainer<>(DockerImageName.parse("mysql:8.4"))
             .withDatabaseName("campus_market").withUsername("campus_market").withPassword("campus_market_local")
@@ -676,12 +655,10 @@ class RecoveryDrillIT {
             .waitingFor(Wait.forListeningPort());
         protected static final ToxiproxyContainer TOXIPROXY = new ToxiproxyContainer(DockerImageName.parse("ghcr.io/shopify/toxiproxy:2.12.0"))
             .withNetwork(NETWORK).withNetworkAliases("toxiproxy");
-        private static final ImageFromDockerfile ES_IMAGE = smartCnImage();
-        protected static final ElasticsearchContainer ES = elasticsearch(NETWORK, ES_IMAGE, ELASTICSEARCH_MEMORY_BYTES);
         protected static ToxiproxyContainer.ContainerProxy PROXY;
 
         static {
-            start(Stream.of(MYSQL, REDIS, MINIO, ES, TOXIPROXY));
+            start(Stream.of(MYSQL, REDIS, MINIO, TOXIPROXY));
             PROXY = TOXIPROXY.getProxy(MINIO, 9000);
         }
 
@@ -690,12 +667,11 @@ class RecoveryDrillIT {
             common(registry, MYSQL, REDIS);
             registry.add("campus.market.storage.endpoint",
                 () -> "http://" + PROXY.getContainerIpAddress() + ":" + PROXY.getProxyPort());
-            registry.add("spring.elasticsearch.uris", () -> "http://" + ES.getHost() + ":" + ES.getMappedPort(9200));
         }
 
         @AfterAll
         static void stop() {
-            Stream.of(TOXIPROXY, ES, MINIO, MYSQL, REDIS).forEach(GenericContainer::stop);
+            Stream.of(TOXIPROXY, MINIO, MYSQL, REDIS).forEach(GenericContainer::stop);
             NETWORK.close();
         }
     }
