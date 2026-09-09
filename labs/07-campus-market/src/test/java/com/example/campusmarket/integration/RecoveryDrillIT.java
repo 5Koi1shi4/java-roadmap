@@ -234,7 +234,7 @@ class RecoveryDrillIT {
         @Test
         void round1RabbitDisconnectLeavesOutboxAndExpiredInboxThenRecovers() {
             BusinessFacts facts = seedBusinessFacts(jdbc);
-            String reference = "provider-" + UUID.randomUUID();
+            String reference = createPendingPaymentOverHttp(facts.order());
             UUID event = triggerSuccessfulPaymentWebhook(facts.order(), reference);
             UUID payment = jdbc.queryForObject("SELECT id FROM payment_order WHERE order_id=? AND status='SUCCEEDED'",
                 (rs, n) -> UUID.fromString(rs.getString(1)), facts.order().toString());
@@ -282,6 +282,10 @@ class RecoveryDrillIT {
 
         private UUID triggerSuccessfulPaymentWebhook(UUID orderId, String reference) {
             try {
+                HttpResponse<String> provider = HttpClient.newHttpClient().send(HttpRequest.newBuilder(
+                        URI.create("http://localhost:" + port + "/simulated-provider/payments/" + reference + "/SUCCEEDED"))
+                    .POST(HttpRequest.BodyPublishers.noBody()).build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                assertThat(provider.statusCode()).withFailMessage("provider status update failed: status=%s body=%s", provider.statusCode(), provider.body()).isEqualTo(200);
                 String providerEvent = "recovery-payment-" + UUID.randomUUID();
                 String body = "{\"providerEventId\":\"" + providerEvent + "\",\"type\":\"PAYMENT\",\"providerReference\":\""
                     + reference + "\",\"amountFen\":100,\"status\":\"SUCCEEDED\",\"occurredAt\":\""
@@ -295,11 +299,34 @@ class RecoveryDrillIT {
                     .header("X-Payment-Signature", hmac(timestamp + "\n" + nonce + "\n" + body))
                     .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8)).build(),
                     HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-                assertThat(response.statusCode()).isEqualTo(200);
-                return UUID.fromString(jdbc.queryForObject("SELECT event_id FROM integration_outbox WHERE event_type='ORDER_PAID' "
-                    + "AND aggregate_id=? ORDER BY created_at DESC LIMIT 1", String.class, orderId.toString()));
+                assertThat(response.statusCode()).withFailMessage("webhook failed: status=%s body=%s", response.statusCode(), response.body()).isEqualTo(200);
+                String eventId = jdbc.query("SELECT event_id FROM integration_outbox WHERE event_type='ORDER_PAID' "
+                    + "AND aggregate_id=? ORDER BY created_at DESC LIMIT 1", rs -> rs.next() ? rs.getString(1) : null, orderId.toString());
+                String diagnostics = jdbc.query("SELECT CONCAT('payment=',status,',ref=',COALESCE(provider_reference,'NULL')) FROM payment_order WHERE order_id=?",
+                    rs -> rs.next() ? rs.getString(1) : "payment=missing", orderId.toString());
+                String callback = jdbc.query("SELECT CONCAT('callback=',status) FROM payment_callback_event WHERE provider_event_id=?",
+                    rs -> rs.next() ? rs.getString(1) : "callback=missing", providerEvent);
+                assertThat(eventId).withFailMessage("webhook returned 200 but ORDER_PAID missing: %s, %s, body=%s", diagnostics, callback, response.body()).isNotNull();
+                return UUID.fromString(eventId);
             } catch (Exception failure) {
                 throw new AssertionError("payment webhook trigger failed", failure);
+            }
+        }
+
+        private String createPendingPaymentOverHttp(UUID orderId) {
+            try {
+                String key = "recovery-payment-" + orderId;
+                HttpResponse<String> response = HttpClient.newHttpClient().send(HttpRequest.newBuilder(
+                        URI.create("http://localhost:" + port + "/api/orders/" + orderId + "/payments"))
+                    .header("Content-Type", "application/json; charset=UTF-8").header("Idempotency-Key", key)
+                    .POST(HttpRequest.BodyPublishers.ofString("{}", StandardCharsets.UTF_8)).build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                assertThat(response.statusCode()).withFailMessage("payment create failed: status=%s body=%s", response.statusCode(), response.body()).isEqualTo(201);
+                java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("\"providerReference\"\\s*:\\s*\"([^\"]+)\"").matcher(response.body());
+                assertThat(matcher.find()).withFailMessage("payment response has no providerReference: %s", response.body()).isTrue();
+                return matcher.group(1);
+            } catch (Exception failure) {
+                throw new AssertionError("payment create trigger failed", failure);
             }
         }
 
