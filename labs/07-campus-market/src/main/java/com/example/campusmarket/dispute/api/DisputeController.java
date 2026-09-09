@@ -9,6 +9,7 @@ import com.example.campusmarket.identity.application.AuthenticatedUser;
 import com.example.campusmarket.order.application.IdempotentCommandService;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.context.annotation.Profile;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -30,6 +31,7 @@ public final class DisputeController {
     private final ReturnResolutionService returns;
     private final IdempotentCommandService commands;
 
+    @Autowired
     public DisputeController(DisputeService disputes, EvidenceStorage evidence, ReturnResolutionService returns,
                              IdempotentCommandService commands) {
         this.disputes = disputes;
