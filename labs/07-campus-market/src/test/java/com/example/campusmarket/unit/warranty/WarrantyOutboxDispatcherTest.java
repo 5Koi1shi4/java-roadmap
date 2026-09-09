@@ -91,6 +91,7 @@ class WarrantyOutboxDispatcherTest {
             (key, ignored) -> { throw new IllegalStateException("socket closed after lease expiry"); }, new CampusMetrics(registry));
 
         assertThat(dispatcher.dispatchOnce(10)).isZero();
+        verify(repository).releaseForRetry(eq(event), any(), any(), any());
         assertThat(registry.find("campus.market.retry.total.OUTBOX").tag("result", "RETRY").counter()).isNull();
     }
 }
