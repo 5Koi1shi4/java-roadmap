@@ -44,7 +44,7 @@ public final class SettlementController {
         UUID seller = jdbc.query("SELECT seller_id FROM trade_order WHERE id=?", rs -> rs.next() ? UUID.fromString(rs.getString(1)) : null,
             orderId.toString());
         if (seller == null) return error(HttpStatus.NOT_FOUND, "订单不存在");
-        if (!seller.equals(user) && !authentication.getAuthorities().stream().anyMatch(a -> "ROLE_ADMIN".equals(a.getAuthority())))
+        if (!seller.equals(user))
             return error(HttpStatus.FORBIDDEN, "无权执行该订单操作");
         byte[] response = commands.executeLifecycle(user, key, "ORDER_SETTLEMENT", orderId, new byte[0], orderId,
             () -> {

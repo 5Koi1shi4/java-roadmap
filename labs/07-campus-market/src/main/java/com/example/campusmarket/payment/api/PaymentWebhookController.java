@@ -38,6 +38,11 @@ public class PaymentWebhookController {
         this(gateway, payments, refunds, mapper, null, null);
     }
 
+    public PaymentWebhookController(PaymentGateway gateway, PaymentService payments, RefundService refunds, ObjectMapper mapper,
+                                    CampusMetrics metrics) {
+        this(gateway, payments, refunds, mapper, metrics, null);
+    }
+
     @org.springframework.beans.factory.annotation.Autowired
     public PaymentWebhookController(PaymentGateway gateway, PaymentService payments, RefundService refunds, ObjectMapper mapper,
                                     CampusMetrics metrics, ReturnResolutionService returnResolutions) {

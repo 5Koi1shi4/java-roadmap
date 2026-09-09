@@ -97,9 +97,9 @@ public class ListingController {
                                 String manufacturerWarrantyProofSnapshot,
                                 Instant manufacturerWarrantyExpiresAt) { }
     public record ListingResponse(String id, String title, String status, long unitPriceFen, int availableQuantity,
-                                  String manufacturerWarrantyProofSnapshot, Instant manufacturerWarrantyExpiresAt) {
+                                  Instant manufacturerWarrantyExpiresAt) {
         static ListingResponse from(Listing l) { return new ListingResponse(l.id().toString(), l.title(), l.status().name(), l.unitPrice().fen(), l.availableQuantity(),
-            l.manufacturerWarrantyProofSnapshot(), l.manufacturerWarrantyExpiresAt()); }
+            l.manufacturerWarrantyExpiresAt()); }
     }
     public record MediaResponse(String id, String mediaType, long sizeBytes) {
         static MediaResponse from(ListingRepository.MediaRecord m) { return new MediaResponse(m.id().toString(), m.mediaType(), m.sizeBytes()); }
