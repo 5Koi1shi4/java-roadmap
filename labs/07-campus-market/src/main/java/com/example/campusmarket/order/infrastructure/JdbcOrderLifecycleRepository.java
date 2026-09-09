@@ -274,6 +274,7 @@ public class JdbcOrderLifecycleRepository {
         return switch (reason) {
             case "SELLER_HANDOFF" -> "ORDER_HANDOFF_CONFIRMED";
             case "BUYER_RECEIPT", "AUTO_RECEIPT" -> "ORDER_RECEIPT_CONFIRMED";
+            case "PAYMENT_SUCCEEDED" -> "ORDER_PAID";
             case "HANDOFF_TIMEOUT" -> "ORDER_REFUNDING_CANCEL";
             case "TRIAL_ELAPSED" -> "ORDER_TRIAL_ELAPSED";
             case "PAYMENT_TIMEOUT" -> "ORDER_CANCELLED";

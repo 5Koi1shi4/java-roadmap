@@ -12,6 +12,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.InputStream;
+import java.time.Instant;
 import java.util.UUID;
 
 @Service
@@ -39,9 +40,21 @@ public class ListingService {
     @Transactional
     public Listing createDraft(UUID sellerId, String title, String description, String category,
                                long unitPriceFen, int quantity, Integer sellerWarrantyDays) {
+        return createDraft(sellerId, title, description, category, unitPriceFen, quantity,
+            sellerWarrantyDays, null, null);
+    }
+
+    @Transactional
+    public Listing createDraft(UUID sellerId, String title, String description, String category,
+                               long unitPriceFen, int quantity, Integer sellerWarrantyDays,
+                               String manufacturerWarrantyProofSnapshot,
+                               Instant manufacturerWarrantyExpiresAt) {
         Listing listing = Listing.draft(sellerId, title, description, category,
             com.example.campusmarket.shared.Money.ofFen(unitPriceFen), quantity,
             sellerWarrantyDays == null ? WarrantyTerm.none() : WarrantyTerm.sellerWarrantyDays(sellerWarrantyDays));
+        if (manufacturerWarrantyProofSnapshot != null || manufacturerWarrantyExpiresAt != null) {
+            listing.setManufacturerWarranty(manufacturerWarrantyProofSnapshot, manufacturerWarrantyExpiresAt);
+        }
         return listings.save(listing);
     }
 

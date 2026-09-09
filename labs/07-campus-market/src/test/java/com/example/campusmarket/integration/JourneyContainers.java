@@ -2,11 +2,9 @@ package com.example.campusmarket.integration;
 
 import com.example.campusmarket.catalog.search.ProductSearchPort;
 import com.example.campusmarket.catalog.search.SearchOutboxDispatcher;
-import com.example.campusmarket.dispute.application.ReturnResolutionService;
 import com.example.campusmarket.identity.application.AuthenticatedUser;
 import com.example.campusmarket.identity.infrastructure.JwtService;
 import com.example.campusmarket.identity.infrastructure.LocalVerificationMailSender;
-import com.example.campusmarket.payment.application.SettlementService;
 import com.example.campusmarket.payment.infrastructure.SimulatedPaymentProviderController;
 import com.example.campusmarket.warranty.application.SellerObligationService;
 import com.example.campusmarket.warranty.application.WarrantyService;
@@ -57,8 +55,6 @@ abstract class JourneyHttpSupport {
     @Autowired protected SearchOutboxDispatcher searchOutbox;
     @Autowired protected ProductSearchPort search;
     @Autowired protected SimulatedPaymentProviderController provider;
-    @Autowired protected ReturnResolutionService returns;
-    @Autowired protected SettlementService settlements;
     @Autowired protected WarrantyService warranties;
     @Autowired protected SellerObligationService obligations;
     @Autowired protected JwtService jwt;

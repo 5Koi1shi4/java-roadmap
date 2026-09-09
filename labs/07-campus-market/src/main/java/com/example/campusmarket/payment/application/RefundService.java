@@ -57,6 +57,13 @@ public class RefundService {
         return row == null ? null : new RefundResult(row.id(), row.providerReference(), row.status(), row.responseUtf8());
     }
 
+    /** 查找提供方回调对应的退款聚合，供回调适配器在提交后触发领域收敛。 */
+    public UUID findRefundIdByProviderReference(String provider, String providerReference) {
+        if (provider == null || provider.isBlank() || providerReference == null || providerReference.isBlank()) return null;
+        JdbcPaymentRepository.RefundRecord row = repository.findRefundByProviderReference(provider, providerReference);
+        return row == null ? null : row.id();
+    }
+
     public RefundResult reconcileRefund(UUID refundId) {
         String token = UUID.randomUUID().toString();
         if (!repository.claimRefundReconciliationDirect(refundId, "direct-refund-reconciler", token)) return queryRefund(refundId);

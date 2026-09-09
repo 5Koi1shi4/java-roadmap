@@ -12,6 +12,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Consumer;
+import com.example.campusmarket.shared.DomainEvent;
 
 /** consumed_event 的原子领取与完成记录。 */
 @Repository
@@ -156,6 +157,17 @@ public class InboxRepository {
             throw new IllegalArgumentException("业务处理不可恢复失败");
         }
         return result == DeliveryResult.COMPLETED;
+    }
+
+    /**
+     * 生产事件处理入口，保证业务处理器与 Inbox 完成标记仍处于同一事务。
+     * 集成恢复演练直接调用该入口，避免测试自行拼装数据库写入 lambda。
+     */
+    public boolean processEvent(String consumerName, DomainEvent event, Duration lease,
+                                EventBusinessHandler businessHandler) {
+        Objects.requireNonNull(event, "事件不能为空");
+        Objects.requireNonNull(businessHandler, "业务处理器不能为空");
+        return process(consumerName, event.eventId(), lease, claim -> businessHandler.handle(event));
     }
 
     /**

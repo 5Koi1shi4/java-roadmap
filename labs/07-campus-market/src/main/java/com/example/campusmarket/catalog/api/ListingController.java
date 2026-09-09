@@ -26,6 +26,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.time.Instant;
 import java.util.UUID;
 
 @RestController
@@ -42,7 +43,8 @@ public class ListingController {
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
     public ResponseEntity<ListingResponse> create(@RequestBody CreateRequest request, Authentication authentication) {
         Listing listing = service.createDraft(user(authentication), request.title(), request.description(), request.category(),
-            request.unitPriceFen(), request.availableQuantity(), request.sellerWarrantyDays());
+            request.unitPriceFen(), request.availableQuantity(), request.sellerWarrantyDays(),
+            request.manufacturerWarrantyProofSnapshot(), request.manufacturerWarrantyExpiresAt());
         return ResponseEntity.status(HttpStatus.CREATED).body(ListingResponse.from(listing));
     }
 
@@ -91,9 +93,13 @@ public class ListingController {
     ResponseEntity<ApiError> badRequest(RuntimeException e) { return ApiErrors.entity(HttpStatus.BAD_REQUEST, "请求参数无效"); }
 
     public record CreateRequest(String title, String description, String category, long unitPriceFen,
-                                int availableQuantity, Integer sellerWarrantyDays) { }
-    public record ListingResponse(String id, String title, String status, long unitPriceFen, int availableQuantity) {
-        static ListingResponse from(Listing l) { return new ListingResponse(l.id().toString(), l.title(), l.status().name(), l.unitPrice().fen(), l.availableQuantity()); }
+                                int availableQuantity, Integer sellerWarrantyDays,
+                                String manufacturerWarrantyProofSnapshot,
+                                Instant manufacturerWarrantyExpiresAt) { }
+    public record ListingResponse(String id, String title, String status, long unitPriceFen, int availableQuantity,
+                                  String manufacturerWarrantyProofSnapshot, Instant manufacturerWarrantyExpiresAt) {
+        static ListingResponse from(Listing l) { return new ListingResponse(l.id().toString(), l.title(), l.status().name(), l.unitPrice().fen(), l.availableQuantity(),
+            l.manufacturerWarrantyProofSnapshot(), l.manufacturerWarrantyExpiresAt()); }
     }
     public record MediaResponse(String id, String mediaType, long sizeBytes) {
         static MediaResponse from(ListingRepository.MediaRecord m) { return new MediaResponse(m.id().toString(), m.mediaType(), m.sizeBytes()); }

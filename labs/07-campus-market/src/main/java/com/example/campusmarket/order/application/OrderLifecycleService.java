@@ -59,6 +59,24 @@ public final class OrderLifecycleService {
         }));
     }
 
+    /**
+     * 收敛支付成功事件。支付回调与 Rabbit 重放共用该状态机用例，
+     * 已经进入交付阶段时保持幂等成功。
+     */
+    public boolean applyPaymentSucceeded(java.util.UUID orderId) {
+        Objects.requireNonNull(orderId, "订单ID不能为空");
+        return Boolean.TRUE.equals(transactions.execute(status -> {
+            var row = repository.lock(orderId);
+            if (row == null) throw new OrderNotFoundException();
+            if (row.status() == OrderStatus.AWAITING_HANDOFF) return true;
+            if (row.status() != OrderStatus.PENDING_PAYMENT) return false;
+            Instant now = repository.databaseNow();
+            if (row.paymentDeadline() != null && !now.isBefore(row.paymentDeadline())) return false;
+            return repository.transition(orderId, OrderStatus.PENDING_PAYMENT, OrderStatus.AWAITING_HANDOFF,
+                row.version(), now, null, false, null, null, null, "PAYMENT_SUCCEEDED") == 1;
+        }));
+    }
+
     public boolean expirePayment(java.util.UUID orderId, JdbcOrderLifecycleRepository.DeadlineClaim claim) {
         return runClaim(claim, orderId, (row, now) -> {
             if (row.status() != OrderStatus.PENDING_PAYMENT || row.paymentDeadline() == null || now.isBefore(row.paymentDeadline())) return false;

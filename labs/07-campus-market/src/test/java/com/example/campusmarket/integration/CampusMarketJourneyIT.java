@@ -39,7 +39,7 @@ class CampusMarketJourneyIT {
         "campus.market.search.dispatcher.enabled=false",
         "campus.market.payment.reconciliation.enabled=false",
         "campus.market.dispute.deadline.enabled=false",
-        "campus.market.dispute.return-reconciliation.enabled=false",
+        "campus.market.dispute.return-reconciliation.enabled=true",
         "campus.market.warranty.deadline.enabled=false",
         "spring.task.scheduling.enabled=false"
     })
@@ -58,7 +58,7 @@ class CampusMarketJourneyIT {
 
             HttpHeaders sellerHeaders = bearer(seller.token());
             ResponseEntity<String> created = http.postForEntity("/api/listings", entity(
-                "{\"title\":\"Java 并发教材\",\"description\":\"第六版教材\",\"category\":\"教材\",\"unitPriceFen\":100,\"availableQuantity\":6}", sellerHeaders), String.class);
+                "{\"title\":\"Java 并发教材\",\"description\":\"第六版教材\",\"category\":\"教材\",\"unitPriceFen\":100,\"availableQuantity\":6,\"manufacturerWarrantyProofSnapshot\":\"invoice-sha256\",\"manufacturerWarrantyExpiresAt\":\"2027-01-01T00:00:00Z\"}", sellerHeaders), String.class);
             assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
             UUID listing = uuid(created.getBody(), "id");
             assertThat(uploadListingMedia(listing, seller).getStatusCode()).isEqualTo(HttpStatus.CREATED);
@@ -78,6 +78,10 @@ class CampusMarketJourneyIT {
                 "{\"listingId\":\"" + listing + "\",\"quantity\":3}", withKey(buyerHeaders, "order-" + UUID.randomUUID())), String.class);
             assertThat(orderResponse.getStatusCode()).isEqualTo(HttpStatus.CREATED);
             UUID order = uuid(orderResponse.getBody(), "orderId");
+            assertThat(jdbc.queryForObject("SELECT manufacturer_warranty_proof_snapshot FROM trade_order WHERE id=?", String.class, order.toString()))
+                .isEqualTo("invoice-sha256");
+            assertThat(jdbc.queryForObject("SELECT manufacturer_warranty_expires_at FROM trade_order WHERE id=?", java.sql.Timestamp.class, order.toString()).toInstant())
+                .isEqualTo(java.time.Instant.parse("2027-01-01T00:00:00Z"));
 
             ResponseEntity<String> payment = http.postForEntity("/api/orders/" + order + "/payments",
                 entity("{}", withKey(buyerHeaders, "payment-" + order)), String.class);
@@ -104,13 +108,24 @@ class CampusMarketJourneyIT {
             assertThat(confirmed.getStatusCode()).isEqualTo(HttpStatus.OK);
             UUID confirmedRefund = uuid(confirmed.getBody(), "refundId");
             assertThat(confirmedRefund).isNotNull();
+            ResponseEntity<String> replayedConfirmation = http.postForEntity("/api/disputes/" + dispute + "/return-confirmations", entity(
+                "{\"proofReference\":\"seller-confirmed-" + dispute + "\"}", withKey(sellerHeaders, "return-confirm-" + dispute)), String.class);
+            assertThat(replayedConfirmation.getStatusCode()).isEqualTo(HttpStatus.OK);
+            assertThat(replayedConfirmation.getBody()).isEqualTo(confirmed.getBody());
+            ResponseEntity<String> conflictingConfirmation = http.postForEntity("/api/disputes/" + dispute + "/return-confirmations", entity(
+                "{\"proofReference\":\"late-proof-" + dispute + "\"}", withKey(sellerHeaders, "return-confirm-" + dispute)), String.class);
+            assertThat(conflictingConfirmation.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
             String refundRef = refundsReference(confirmedRefund);
             ResponseEntity<String> providerRefund = http.postForEntity("/simulated-provider/refunds/" + refundRef + "/SUCCEEDED", new HttpEntity<>(new HttpHeaders()), String.class);
             assertThat(providerRefund.getStatusCode()).isEqualTo(HttpStatus.OK);
             callback("REFUND", order, refundRef, 100, "SUCCEEDED", "refund-event-" + dispute);
-            returns.reconcileSuccessfulRefund(confirmedRefund);
+            // 退款 HTTP 回调完成后由生产回调适配器触发退回事实收敛；旅程不直接调用 scheduler/service。
+            assertThat(jdbc.queryForObject("SELECT quarantined_quantity FROM listing WHERE id=?", Integer.class, listing.toString())).isEqualTo(1);
             jdbc.update("UPDATE trade_order SET t0=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 8 DAY) WHERE id=?", order.toString());
-            assertThat(settlements.settle(order).status()).isEqualTo("SETTLED");
+            ResponseEntity<String> settled = http.postForEntity("/api/orders/" + order + "/settlement",
+                entity("{}", withKey(sellerHeaders, "settlement-" + order)), String.class);
+            assertThat(settled.getStatusCode()).isEqualTo(HttpStatus.OK);
+            assertThat(settled.getBody()).contains("\"status\":\"SETTLED\"");
             assertThat(jdbc.queryForObject("SELECT quarantined_quantity FROM listing WHERE id=?", Integer.class, listing.toString())).isEqualTo(1);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM settlement WHERE order_id=?", Integer.class, order.toString())).isEqualTo(1);
             assertThat(http.postForEntity("/api/orders/" + order + "/reviews", entity("{\"rating\":5,\"content\":\"交付清晰\"}", buyerHeaders), String.class).getStatusCode()).isEqualTo(HttpStatus.CREATED);
@@ -148,7 +163,7 @@ class CampusMarketJourneyIT {
             User admin = seededAdmin();
             HttpHeaders sellerHeaders = bearer(seller.token());
             HttpHeaders buyerHeaders = bearer(buyer.token());
-            ResponseEntity<String> created = http.postForEntity("/api/listings", entity("{\"title\":\"二手键盘\",\"description\":\"机械键盘\",\"category\":\"电子\",\"unitPriceFen\":500,\"availableQuantity\":1,\"sellerWarrantyDays\":90}", sellerHeaders), String.class);
+            ResponseEntity<String> created = http.postForEntity("/api/listings", entity("{\"title\":\"二手键盘\",\"description\":\"机械键盘\",\"category\":\"电子\",\"unitPriceFen\":500,\"availableQuantity\":1,\"sellerWarrantyDays\":90,\"manufacturerWarrantyProofSnapshot\":\"keyboard-invoice-sha256\",\"manufacturerWarrantyExpiresAt\":\"2027-06-01T00:00:00Z\"}", sellerHeaders), String.class);
             assertThat(created.getStatusCode()).isEqualTo(HttpStatus.CREATED);
             UUID listing = uuid(created.getBody(), "id");
             assertThat(uploadListingMedia(listing, seller).getStatusCode()).isEqualTo(HttpStatus.CREATED);
@@ -165,7 +180,10 @@ class CampusMarketJourneyIT {
             assertThat(http.postForEntity("/api/orders/" + order + "/handoff", entity("{}", withKey(sellerHeaders, "w-handoff-" + order)), String.class).getStatusCode()).isEqualTo(HttpStatus.OK);
             assertThat(http.postForEntity("/api/orders/" + order + "/receipt", entity("{}", withKey(buyerHeaders, "w-receipt-" + order)), String.class).getStatusCode()).isEqualTo(HttpStatus.OK);
             jdbc.update("UPDATE trade_order SET t0=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 8 DAY) WHERE id=?", order.toString());
-            assertThat(settlements.settle(order).status()).isEqualTo("SETTLED");
+            ResponseEntity<String> settled = http.postForEntity("/api/orders/" + order + "/settlement",
+                entity("{}", withKey(sellerHeaders, "w-settlement-" + order)), String.class);
+            assertThat(settled.getStatusCode()).isEqualTo(HttpStatus.OK);
+            assertThat(settled.getBody()).contains("\"status\":\"SETTLED\"");
             jdbc.update("UPDATE trade_order SET t0=DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 30 DAY) WHERE id=?", order.toString());
             ResponseEntity<String> opened = http.postForEntity("/api/orders/" + order + "/warranty", entity("{\"quantity\":1,\"reason\":\"FUNCTIONAL_DEFECT\"}", withKey(buyerHeaders, "w-case-" + order)), String.class);
             assertThat(opened.getStatusCode()).isEqualTo(HttpStatus.CREATED);
@@ -174,6 +192,10 @@ class CampusMarketJourneyIT {
                 order.toString())).isEqualTo(90);
             assertThat(jdbc.queryForObject("SELECT warranty_scope_snapshot FROM trade_order WHERE id=?", String.class,
                 order.toString())).isEqualTo("SELLER_NON_HUMAN_FUNCTIONAL_FAILURE");
+            assertThat(jdbc.queryForObject("SELECT manufacturer_warranty_proof_snapshot FROM trade_order WHERE id=?", String.class,
+                order.toString())).isEqualTo("keyboard-invoice-sha256");
+            assertThat(jdbc.queryForObject("SELECT manufacturer_warranty_expires_at FROM trade_order WHERE id=?", java.sql.Timestamp.class,
+                order.toString()).toInstant()).isEqualTo(java.time.Instant.parse("2027-06-01T00:00:00Z"));
             LinkedMultiValueMap<String, Object> form = new LinkedMultiValueMap<>();
             form.add("file", new ByteArrayResource("%PDF-1.4\nrepair quote\n%%EOF".getBytes(StandardCharsets.US_ASCII)) {
                 @Override public String getFilename() { return "quote.pdf"; }

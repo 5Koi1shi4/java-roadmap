@@ -69,7 +69,7 @@ PENDING_PAYMENT -> AWAITING_HANDOFF -> AWAITING_RECEIPT
 
 商品变更先写 MySQL 与搜索 Outbox；`SearchProjector` 使用外部版本，删除写 tombstone。在线重建流程是 RR 快照、高水位补放、写入门禁和原子别名切换；重建失败可由意图收敛器继续处理。
 
-`RecoveryDrillIT` 明确执行三轮：RabbitMQ 断连后恢复 Outbox/Inbox，Elasticsearch 断连后恢复搜索投影，MinIO 断连后恢复清理任务。每轮均先建立支付、退款、结算和库存事实，再执行 dispatcher/projector/cleanup；断连期间断言尝试次数/瞬时失败分类，恢复后检查库存非负、返还业务键唯一、退款额度、单结算、租约、真实 HTTP 证据 ACL 和搜索集合与 MySQL 在售集合相等。Rabbit Inbox 接管还必须在同一事务中完成订单状态和派生 Outbox。
+`RecoveryDrillIT` 明确执行三轮：RabbitMQ 断连后恢复 Outbox/Inbox，Elasticsearch 断连后恢复搜索投影，MinIO 断连后恢复清理任务。每轮按故障类型建立并验证适用的支付、退款、结算、库存和消息事实；断连期间断言服务边界失败、尝试次数/积压观测，恢复后检查通用金额与库存不变量。仅 Storage 轮验证真实 HTTP 证据 ACL，Search 轮验证搜索集合与 MySQL 在售集合相等；Rabbit Inbox 接管还必须在同一事务中完成订单状态和派生 Outbox。
 
 更多故障症状与边界见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
 

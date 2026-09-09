@@ -38,6 +38,15 @@ public final class DisputeController {
         this.commands = commands;
     }
 
+    /**
+     * Source-compatible constructor retained for integrations that only expose
+     * the original dispute/evidence endpoints.  Return confirmation is not
+     * available on that legacy wiring until its collaborators are supplied.
+     */
+    public DisputeController(DisputeService disputes, EvidenceStorage evidence) {
+        this(disputes, evidence, null, null);
+    }
+
     @PostMapping(path = "/api/orders/{orderId}/disputes", consumes = MediaType.APPLICATION_JSON_VALUE, produces = "application/json; charset=UTF-8")
     public ResponseEntity<byte[]> open(@PathVariable UUID orderId, @RequestBody OpenRequest request,
                                        @RequestHeader(value = "Idempotency-Key", required = false) String key, Authentication auth) {
@@ -82,6 +91,7 @@ public final class DisputeController {
         try {
             requireKey(key);
             if (request == null) throw new IllegalArgumentException("请求不能为空");
+            if (returns == null || commands == null) throw new IllegalStateException("退回确认依赖未装配");
             UUID seller = user(auth);
             var current = disputes.requireCase(caseId);
             byte[] response = commands.executeLifecycle(seller, key, "DISPUTE_RETURN_CONFIRM", caseId,

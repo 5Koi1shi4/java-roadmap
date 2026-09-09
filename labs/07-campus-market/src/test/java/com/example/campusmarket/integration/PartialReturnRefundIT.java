@@ -125,6 +125,25 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
     }
 
     @Test
+    void preparedReturnWithoutRefundIdKeepsOriginalProofWhenExternalCallRecoveryReplays() {
+        Fixture f = fixture(1, 100);
+        var first = returns.resolve(f.dispute(), DisputeDecision.RETURN_AND_REFUND, 1,
+            ReturnProofType.SELLER_CONFIRMED, "seller-confirmed-original", ProofAuthority.seller(f.seller()));
+        jdbc.update("UPDATE return_case SET refund_id=NULL,refund_status='PROCESSING' WHERE dispute_case_id=?", f.dispute().toString());
+
+        var recovered = returns.resolve(f.dispute(), DisputeDecision.REFUND_ONLY, 1,
+            ReturnProofType.SELLER_CONFIRMED, "late-proof-must-not-replace", ProofAuthority.seller(f.seller()));
+
+        assertThat(recovered.refundId()).isEqualTo(first.refundId());
+        assertThat(jdbc.queryForObject("SELECT proof_reference FROM return_case WHERE dispute_case_id=?", String.class,
+            f.dispute().toString())).isEqualTo("seller-confirmed-original");
+        assertThat(jdbc.queryForObject("SELECT resolution_type FROM return_case WHERE dispute_case_id=?", String.class,
+            f.dispute().toString())).isEqualTo("RETURN_AND_REFUND");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM refund_order WHERE order_id=?", Integer.class,
+            f.order().toString())).isEqualTo(1);
+    }
+
+    @Test
     void recoveryScanLinksFailedRefundAndEscalatesWhileKeepingRefundId() {
         Fixture f = fixture(1, 100);
         UUID refund = UUID.randomUUID();

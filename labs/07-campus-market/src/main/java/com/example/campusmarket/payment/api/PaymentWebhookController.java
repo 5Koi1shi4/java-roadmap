@@ -5,6 +5,7 @@ import com.example.campusmarket.api.ApiErrors;
 import com.example.campusmarket.payment.application.PaymentService;
 import com.example.campusmarket.payment.application.RefundService;
 import com.example.campusmarket.payment.infrastructure.SimulatedPaymentGateway;
+import com.example.campusmarket.dispute.application.ReturnResolutionService;
 import com.example.campusmarket.observability.CampusMetrics;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.http.HttpHeaders;
@@ -16,6 +17,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
+import java.util.UUID;
 import com.example.campusmarket.shared.Money;
 import org.springframework.dao.DataAccessException;
 import org.springframework.web.bind.MissingRequestHeaderException;
@@ -30,19 +32,21 @@ public class PaymentWebhookController {
     private final RefundService refunds;
     private final ObjectMapper mapper;
     private final CampusMetrics metrics;
+    private final ReturnResolutionService returnResolutions;
 
     public PaymentWebhookController(PaymentGateway gateway, PaymentService payments, RefundService refunds, ObjectMapper mapper) {
-        this(gateway, payments, refunds, mapper, null);
+        this(gateway, payments, refunds, mapper, null, null);
     }
 
     @org.springframework.beans.factory.annotation.Autowired
     public PaymentWebhookController(PaymentGateway gateway, PaymentService payments, RefundService refunds, ObjectMapper mapper,
-                                    CampusMetrics metrics) {
+                                    CampusMetrics metrics, ReturnResolutionService returnResolutions) {
         this.gateway = Objects.requireNonNull(gateway, "支付网关不能为空");
         this.payments = Objects.requireNonNull(payments, "支付服务不能为空");
         this.refunds = Objects.requireNonNull(refunds, "退款服务不能为空");
         this.mapper = Objects.requireNonNull(mapper, "JSON序列化器不能为空");
         this.metrics = metrics;
+        this.returnResolutions = returnResolutions;
     }
 
     @PostMapping(path = "/api/payment-webhooks/{provider}", consumes = MediaType.APPLICATION_JSON_VALUE)
@@ -56,6 +60,10 @@ public class PaymentWebhookController {
                 payments.handleCallback(callback, rawBody);
             } else {
                 refunds.handleCallback(callback, rawBody);
+                if ("SUCCEEDED".equals(callback.status()) && returnResolutions != null) {
+                    UUID refundId = refunds.findRefundIdByProviderReference(callback.provider(), callback.providerReference());
+                    if (refundId != null) returnResolutions.reconcileSuccessfulRefund(refundId);
+                }
             }
             return json(200, "{\"status\":\"ok\"}");
         } catch (SimulatedPaymentGateway.InvalidCallbackException e) {

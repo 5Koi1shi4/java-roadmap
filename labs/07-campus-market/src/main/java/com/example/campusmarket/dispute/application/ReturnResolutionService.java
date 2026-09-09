@@ -226,7 +226,7 @@ public class ReturnResolutionService {
         UUID returnId = UUID.nameUUIDFromBytes((caseId + "|" + decision.name()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         UUID confirmer = authority.kind() == ProofAuthority.Kind.PROVIDER ? null : authority.actorId();
         jdbc.update("INSERT INTO return_case (id,dispute_case_id,order_id,listing_id,payment_order_id,unit_price_fen,status,proof_type,proof_reference,confirmed_by,resolution_type,approved_quantity,deadline,created_at,updated_at) "
-                + "VALUES (?,?,?,?,?,?,'CONFIRMED',?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE proof_type=VALUES(proof_type),proof_reference=VALUES(proof_reference),confirmed_by=VALUES(confirmed_by),resolution_type=VALUES(resolution_type),updated_at=VALUES(updated_at)",
+                + "VALUES (?,?,?,?,?,?,'CONFIRMED',?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE id=id",
             returnId.toString(), caseId.toString(), orderId.toString(), listingId.toString(), paymentId.toString(), unitPriceFen,
             proofType.name(), proofReference, confirmer == null ? null : confirmer.toString(), decision.name(), approvedQuantity, TimestampValue.of(now.plusSeconds(14 * 86400L)), TimestampValue.of(now), TimestampValue.of(now));
         jdbc.update("UPDATE dispute_case SET decision=?,approved_quantity=?,proof_type=?,proof_reference=?,status='RESOLVED',resolved_at=?,version=version+1,updated_at=? WHERE id=? AND status IN ('OPEN','SELLER_RESPONDED','UNDER_REVIEW','ESCALATED')",
@@ -236,7 +236,11 @@ public class ReturnResolutionService {
 
     private Resolution finish(CaseFacts facts, DisputeDecision decision, RefundService.RefundResult refund) {
         Instant now = databaseNow();
-        jdbc.update("UPDATE return_case SET refund_id=?,refund_status=?,resolution_type=?,status=CASE WHEN ?='SUCCEEDED' THEN 'CONFIRMED' WHEN ?='FAILED' THEN 'ESCALATED' ELSE 'AWAITING_PROOF' END,refunded_at=CASE WHEN ?='SUCCEEDED' THEN ? ELSE refunded_at END,updated_at=? WHERE dispute_case_id=?",
+        // A crash between prepare and the provider call leaves a durable return_case
+        // with its original proof already committed.  Recovery must only attach the
+        // idempotent refund outcome; a late retry is never allowed to overwrite the
+        // original resolution/proof facts with a different request.
+        jdbc.update("UPDATE return_case SET refund_id=?,refund_status=?,resolution_type=COALESCE(resolution_type,?),status=CASE WHEN ?='SUCCEEDED' THEN 'CONFIRMED' WHEN ?='FAILED' THEN 'ESCALATED' ELSE 'AWAITING_PROOF' END,refunded_at=CASE WHEN ?='SUCCEEDED' THEN ? ELSE refunded_at END,updated_at=? WHERE dispute_case_id=?",
             refund.refundId().toString(), refund.status(), decision.name(), refund.status(), refund.status(), refund.status(), TimestampValue.of(now), TimestampValue.of(now), facts.caseId().toString());
         return new Resolution(facts.caseId(), refund.refundId(), refund.status(), facts.amountFen(), false);
     }
