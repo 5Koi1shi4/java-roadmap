@@ -5,7 +5,13 @@ import java.util.Set;
 
 /** 可由轻量单测审计的恢复演练容器拓扑。 */
 public final class RecoveryDrillResourcePlan {
+    public static final int RABBIT_HTTP_PORT = 18087;
+
     private RecoveryDrillResourcePlan() {}
+
+    public static String rabbitPaymentProviderUrl() {
+        return "http://localhost:" + RABBIT_HTTP_PORT + "/simulated-provider";
+    }
 
     public static List<Stage> stages() {
         return List.of(

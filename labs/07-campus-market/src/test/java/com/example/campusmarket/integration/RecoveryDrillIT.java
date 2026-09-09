@@ -27,6 +27,7 @@ import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.TestPropertySource;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.MySQLContainer;
 import org.testcontainers.containers.Network;
@@ -219,8 +220,12 @@ class RecoveryDrillIT {
 
     @Nested
     @Order(1)
-    @SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+    @SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
     @ActiveProfiles("local")
+    @TestPropertySource(properties = {
+        "server.port=" + RecoveryDrillResourcePlan.RABBIT_HTTP_PORT,
+        "campus.market.payment.provider-url=" + "http://localhost:" + RecoveryDrillResourcePlan.RABBIT_HTTP_PORT + "/simulated-provider"
+    })
     @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
     class RabbitRound extends RabbitContainers {
         @Autowired private JdbcTemplate jdbc;

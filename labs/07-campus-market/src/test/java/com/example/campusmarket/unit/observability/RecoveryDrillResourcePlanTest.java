@@ -7,6 +7,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class RecoveryDrillResourcePlanTest {
     @Test
+    void rabbitPaymentProviderTargetsTheRabbitHttpServer() {
+        assertThat(RecoveryDrillResourcePlan.rabbitPaymentProviderUrl())
+            .isEqualTo("http://localhost:" + RecoveryDrillResourcePlan.RABBIT_HTTP_PORT + "/simulated-provider");
+    }
+
+    @Test
     void heavyDependenciesNeverOverlapWithinARecoveryStage() {
         assertThat(RecoveryDrillResourcePlan.stages()).allSatisfy(stage -> {
             long heavy = stage.resources().stream()
