@@ -69,11 +69,11 @@ PENDING_PAYMENT -> AWAITING_HANDOFF -> AWAITING_RECEIPT
 
 商品变更先写 MySQL 与搜索 Outbox；`SearchProjector` 使用外部版本，删除写 tombstone。在线重建流程是 RR 快照、高水位补放、写入门禁和原子别名切换；重建失败可由意图收敛器继续处理。
 
-`RecoveryDrillIT` 明确执行三轮：RabbitMQ 断连后由生产订单事件处理器恢复 Outbox/Inbox，Elasticsearch 断连后恢复搜索投影，MinIO 断连后恢复清理任务。每轮只核对该故障适用的业务事实：Rabbit 验证订单支付事件状态迁移与 Inbox/Outbox 原子性，Search 验证搜索集合，Storage 验证真实 HTTP 证据 ACL 和清理任务；断连期间断言服务边界 503、尝试次数/积压及 Micrometer 失败指标。支付、退款、结算和库存金额不变量由主旅程及专项 MySQL 测试覆盖，不把静态 fixture 计数当作恢复证明。
+`RecoveryDrillIT` 明确执行三轮：RabbitMQ 断连后恢复 Outbox，并经真实 Rabbit 队列、生产 `ReliableEventConsumer`、Inbox 事务和 ACK 收敛；Elasticsearch 断连后恢复搜索投影；MinIO 断连后恢复故障证据上传实际创建的 `dispute-upload` 清理任务。三轮都核对库存、退款占额、单结算、Outbox/Inbox 租约、真实 HTTP 证据 ACL（管理员不自动绕过）以及 MySQL 与 SmartCN Elasticsearch 在售集合。Search 与 Storage 的同步 HTTP 故障分别返回 503；Rabbit publish 是提交后的异步边界，支付 webhook HTTP 先正常返回 200，随后 Rabbit 断连以持久 Outbox 积压、`attempt_count` 和 `campus.market.retry.total{component=OUTBOX,result=RETRY}` 证明，绝不虚构 Rabbit 对业务 HTTP 的 503。
 
 更多故障症状与边界见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
 
-低内存主机必须串行运行两个最终验收套件，不要并行启动它们。`CampusMarketJourneyIT` 是按序执行的两个嵌套阶段：教材阶段先启动真实 MySQL、Redis、MinIO，通过商品媒体 HTTP 上传后停止 MinIO/Redis，再在固定端口启动 SmartCN Elasticsearch 完成发布、Outbox 投影和搜索；ES 容器设置 768 MiB 内存上限，阶段切换有界等待屏障。质保阶段启动真实 MySQL、Redis、MinIO；每个阶段的 `@AfterAll` 都会停止自己的容器。支付模拟器是应用内 HTTP provider，因此不启动 RabbitMQ、Toxiproxy、SSHD 或 Python。`RecoveryDrillIT` 会依次运行三个嵌套轮次，并在每轮结束时停止容器：Rabbit 轮为 MySQL+Redis+RabbitMQ+Toxiproxy，搜索轮为 MySQL+Redis+Elasticsearch+Toxiproxy，存储轮为 MySQL+Redis+MinIO+Toxiproxy。
+低内存主机必须串行运行两个最终验收套件，不要并行启动它们。`CampusMarketJourneyIT` 是按序执行的两个嵌套阶段：教材阶段先启动真实 MySQL、Redis、MinIO，通过商品媒体 HTTP 上传后停止 MinIO/Redis，再在固定端口启动 SmartCN Elasticsearch 完成发布、Outbox 投影和搜索；ES 容器设置 768 MiB 内存上限，阶段切换有界等待屏障。质保阶段启动真实 MySQL、Redis、MinIO；每个阶段的 `@AfterAll` 都会停止自己的容器。支付模拟器是应用内 HTTP provider，因此不启动 RabbitMQ、Toxiproxy、SSHD 或 Python。为逐轮执行真实 ACL 与搜索集合断言，`RecoveryDrillIT` 每轮均包含 MySQL、MinIO 和 768 MiB 硬上限（JVM 堆 192 MiB）的 SmartCN Elasticsearch；Rabbit 轮额外包含 Redis、RabbitMQ、Toxiproxy，搜索轮额外包含 Elasticsearch Toxiproxy，存储轮额外包含 Redis、MinIO Toxiproxy。低内存主机应按嵌套类逐轮隔离运行，确认容器完全回收后再进入下一轮。
 
 ```powershell
 .\mvnw.cmd -Dit.test=CampusMarketJourneyIT verify

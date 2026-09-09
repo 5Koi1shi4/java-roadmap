@@ -5,10 +5,9 @@ import com.example.campusmarket.identity.application.AuthenticatedUser;
 import com.example.campusmarket.identity.infrastructure.JwtService;
 import com.example.campusmarket.catalog.search.ProductSearchPort;
 import com.example.campusmarket.catalog.search.SearchOutboxDispatcher;
-import com.example.campusmarket.messaging.InboxRepository;
 import com.example.campusmarket.messaging.OutboxDispatcher;
-import com.example.campusmarket.messaging.OrderEventBusinessHandler;
-import com.example.campusmarket.shared.DomainEvent;
+import com.example.campusmarket.messaging.ReliableEventConsumer;
+import com.example.campusmarket.messaging.RabbitTopology;
 import com.example.campusmarket.storage.MinioPrivateObjectStorage;
 import com.example.campusmarket.storage.PrivateObjectStorage;
 import com.example.campusmarket.storage.StorageCleanupScheduler;
@@ -48,12 +47,18 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.time.Instant;
-import java.util.Map;
 import java.util.Set;
+import java.util.List;
+import java.util.HexFormat;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.stream.Stream;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
+import org.springframework.amqp.core.AcknowledgeMode;
+import org.awaitility.Awaitility;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -125,6 +130,21 @@ class RecoveryDrillIT {
                     + "LEFT JOIN dispute_case c ON c.id=e.dispute_case_id "
                     + "WHERE c.id IS NULL", Integer.class))
                 .isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM payment_order WHERE successful_refund_fen<0 "
+                + "OR reserved_refund_fen<0 OR successful_refund_fen+reserved_refund_fen>paid_amount_fen", Integer.class)).isZero();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM (SELECT order_id FROM settlement GROUP BY order_id HAVING COUNT(*)>1) s",
+                Integer.class)).isZero();
+        }
+
+        protected static void assertSearchEqualsMysql(JdbcTemplate jdbc, ProductSearchPort search) {
+            search.refresh();
+            Set<String> indexed = Set.copyOf(search.search(
+                new ProductSearchPort.SearchRequest(null, null, null, null, 0, 100))
+                .items().stream().map(ProductSearchPort.SearchItem::listingId).toList());
+            Set<String> mysqlOnSale = Set.copyOf(jdbc.query(
+                "SELECT id FROM listing WHERE status='ON_SALE' AND available_quantity>0",
+                (rs, n) -> rs.getString(1)));
+            assertThat(indexed).isEqualTo(mysqlOnSale);
         }
 
         protected static BusinessFacts seedBusinessFacts(JdbcTemplate jdbc) {
@@ -140,6 +160,61 @@ class RecoveryDrillIT {
         }
 
         protected record BusinessFacts(UUID buyer, UUID seller, UUID listing, UUID order) {}
+
+        protected static void projectAllOnSale(JdbcTemplate jdbc, SearchOutboxDispatcher dispatcher) {
+            List<String> ids = jdbc.query("SELECT id FROM listing WHERE status='ON_SALE' AND available_quantity>0",
+                (rs, n) -> rs.getString(1));
+            for (String id : ids) {
+                Integer present = jdbc.queryForObject("SELECT COUNT(*) FROM search_outbox WHERE listing_id=? AND status IN ('NEW','PUBLISHING')",
+                    Integer.class, id);
+                if (present != null && present == 0) {
+                    jdbc.update("INSERT INTO search_outbox(id,listing_id,aggregate_version,event_type,payload,status,attempt_count,available_at,created_at) "
+                        + "SELECT UUID(),id,version,'LISTING_PUBLISHED',CAST('{}' AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6) FROM listing WHERE id=?", id);
+                }
+            }
+            dispatcher.dispatchOnce(100, Duration.ofSeconds(30));
+        }
+
+        protected static AclFacts seedEvidenceAcl(JdbcTemplate jdbc, PrivateObjectStorage storage) {
+            UUID buyer = insertUser(jdbc), seller = insertUser(jdbc), other = insertUser(jdbc), admin = insertUser(jdbc);
+            UUID listing = UUID.randomUUID(), order = UUID.randomUUID(), dispute = UUID.randomUUID(), evidence = UUID.randomUUID();
+            String objectKey = "recovery-acl/" + evidence;
+            byte[] body = "recovery-acl-proof".getBytes(StandardCharsets.UTF_8);
+            storage.put(objectKey, new ByteArrayInputStream(body), body.length, "image/png");
+            jdbc.update("INSERT INTO listing(id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?, 'ACL 商品','描述','教材',100,0,'SOLD_OUT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", listing.toString(), seller.toString());
+            jdbc.update("INSERT INTO trade_order(id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,t0,acceptance_deadline,trial_deadline,paid_amount_fen,status,created_at,updated_at) VALUES (?,?,?,?, 'ACL 商品','描述',100,1,100,DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 HOUR),DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 HOUR),DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 167 HOUR),100,'AFTERSALE_WINDOW',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", order.toString(), buyer.toString(), seller.toString(), listing.toString());
+            jdbc.update("INSERT INTO dispute_case(id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,opened_at,created_at,updated_at) VALUES (?,?,?,1,'FUNCTIONAL_DEFECT','OPEN',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", dispute.toString(), order.toString(), buyer.toString());
+            jdbc.update("INSERT INTO dispute_evidence(id,dispute_case_id,submitted_by,object_key,media_type,size_bytes,created_at) VALUES (?,?,?,?, 'image/png',?,CURRENT_TIMESTAMP(6))",
+                evidence.toString(), dispute.toString(), buyer.toString(), objectKey, body.length);
+            return new AclFacts(buyer, seller, other, admin, dispute, evidence);
+        }
+
+        protected static void assertEvidenceAclOverHttp(int port, JwtService jwt, AclFacts facts) {
+            HttpClient client = HttpClient.newHttpClient();
+            try {
+                String path = "/api/disputes/" + facts.dispute() + "/evidence/" + facts.evidence() + "/content";
+                assertThat(get(client, port, path, jwt.issue(new AuthenticatedUser(facts.buyer(), Set.of("ROLE_USER")))).statusCode()).isEqualTo(200);
+                assertThat(get(client, port, path, jwt.issue(new AuthenticatedUser(facts.seller(), Set.of("ROLE_USER")))).statusCode()).isEqualTo(200);
+                assertThat(get(client, port, path, jwt.issue(new AuthenticatedUser(facts.other(), Set.of("ROLE_USER")))).statusCode()).isEqualTo(404);
+                assertThat(get(client, port, path, jwt.issue(new AuthenticatedUser(facts.admin(), Set.of("ROLE_ADMIN")))).statusCode()).isEqualTo(404);
+            } catch (Exception failure) {
+                throw new AssertionError("HTTP evidence ACL drill failed", failure);
+            }
+        }
+
+        private static UUID insertUser(JdbcTemplate jdbc) {
+            UUID id = UUID.randomUUID();
+            jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
+                id.toString(), id + "@stu.example.edu.cn", "hash");
+            return id;
+        }
+
+        private static HttpResponse<String> get(HttpClient client, int port, String path, String bearer) throws Exception {
+            return client.send(HttpRequest.newBuilder(URI.create("http://localhost:" + port + path))
+                .header("Authorization", "Bearer " + bearer).GET().build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+        }
+
+        protected record AclFacts(UUID buyer, UUID seller, UUID other, UUID admin, UUID dispute, UUID evidence) {}
     }
 
     @Nested
@@ -150,14 +225,23 @@ class RecoveryDrillIT {
     class RabbitRound extends RabbitContainers {
         @Autowired private JdbcTemplate jdbc;
         @Autowired private OutboxDispatcher outbox;
-        @Autowired private InboxRepository inbox;
-        @Autowired private OrderEventBusinessHandler orderEvents;
+        @Autowired private RabbitTemplate rabbit;
+        @Autowired private ReliableEventConsumer consumer;
+        @Autowired private MeterRegistry metrics;
+        @Autowired private SearchOutboxDispatcher searchOutbox;
+        @Autowired private ProductSearchPort search;
+        @LocalServerPort private int port;
+        @Autowired private JwtService jwt;
+        @Autowired private PrivateObjectStorage storage;
 
         @Test
         void round1RabbitDisconnectLeavesOutboxAndExpiredInboxThenRecovers() {
             BusinessFacts facts = seedBusinessFacts(jdbc);
-            UUID event = UUID.randomUUID();
-            insertOutbox(event, "ORDER_PAID", facts.order());
+            String reference = "provider-" + UUID.randomUUID();
+            UUID event = triggerSuccessfulPaymentWebhook(facts.order(), reference);
+            UUID payment = jdbc.queryForObject("SELECT id FROM payment_order WHERE order_id=? AND status='SUCCEEDED'",
+                (rs, n) -> UUID.fromString(rs.getString(1)), facts.order().toString());
+            jdbc.update("UPDATE trade_order SET status='PENDING_PAYMENT',handoff_deadline=NULL,version=1 WHERE id=?", facts.order().toString());
             insertExpiredInbox(event);
 
             PROXY.setConnectionCut(true);
@@ -165,6 +249,8 @@ class RecoveryDrillIT {
                 outbox.dispatchOnce(10, Duration.ofSeconds(2));
                 assertThat(status("integration_outbox", event)).isIn("NEW", "PUBLISHING");
                 assertThat(jdbc.queryForObject("SELECT attempt_count FROM integration_outbox WHERE event_id=?", Integer.class, event.toString())).isGreaterThan(0);
+                assertThat(metrics.get("campus.market.retry.total").tag("component", "OUTBOX").tag("result", "RETRY").counter().count())
+                    .isGreaterThan(0.0);
             } finally {
                 PROXY.setConnectionCut(false);
             }
@@ -176,23 +262,57 @@ class RecoveryDrillIT {
             assertThat(outbox.dispatchOnce(10, Duration.ofSeconds(30))).isEqualTo(1);
             assertThat(status("integration_outbox", event)).isEqualTo("PUBLISHED");
 
-            DomainEvent paid = new DomainEvent(event, "ORDER_PAID", facts.order().toString(), 1,
-                Instant.now(), 1, Map.of("orderId", facts.order().toString()));
-            assertThat(inbox.processEvent("recovery-drill", paid, Duration.ofSeconds(30), orderEvents)).isTrue();
-            assertThat(jdbc.queryForObject(
-                "SELECT status FROM consumed_event WHERE consumer_name='recovery-drill' AND event_id=?",
-                String.class, event.toString())).isEqualTo("COMPLETED");
+            SimpleMessageListenerContainer listener = new SimpleMessageListenerContainer(rabbit.getConnectionFactory());
+            listener.setQueueNames(RabbitTopology.EVENT_QUEUE);
+            listener.setAcknowledgeMode(AcknowledgeMode.MANUAL);
+            listener.setMessageListener((org.springframework.amqp.rabbit.listener.api.ChannelAwareMessageListener) consumer::onMessage);
+            listener.start();
+            try {
+                Awaitility.await().atMost(Duration.ofSeconds(20)).untilAsserted(() ->
+                    assertThat(jdbc.queryForObject(
+                        "SELECT status FROM consumed_event WHERE consumer_name='campus-market-order' AND event_id=?",
+                        String.class, event.toString())).isEqualTo("COMPLETED"));
+            } finally {
+                listener.stop();
+            }
+            Integer ready = rabbit.execute(channel -> channel.queueDeclarePassive(RabbitTopology.EVENT_QUEUE).getMessageCount());
+            assertThat(ready).isZero();
             assertThat(jdbc.queryForObject("SELECT status FROM trade_order WHERE id=?", String.class, facts.order().toString())).isEqualTo("AWAITING_HANDOFF");
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE event_type='ORDER_PAID' AND aggregate_id=?", Integer.class, facts.order().toString())).isGreaterThanOrEqualTo(2);
+            assertThat(jdbc.queryForObject("SELECT status FROM payment_order WHERE id=?", String.class, payment.toString())).isEqualTo("SUCCEEDED");
+            assertThat(jdbc.queryForObject("SELECT paid_amount_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(100L);
+            assertEvidenceAclOverHttp(port, jwt, seedEvidenceAcl(jdbc, storage));
+            projectAllOnSale(jdbc, searchOutbox);
+            assertSearchEqualsMysql(jdbc, search);
             assertInvariants(jdbc);
         }
 
-        private void insertOutbox(UUID event, String type, UUID aggregate) {
-            jdbc.update("INSERT INTO integration_outbox "
-                    + "(id,event_id,event_type,aggregate_id,aggregate_version,schema_version,payload,status,"
-                    + "attempt_count,available_at,created_at) VALUES (?,?,?, ?,1,1,CAST(? AS JSON),"
-                    + "'NEW',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-                event.toString(), event.toString(), type, aggregate.toString(), "{}");
+        private UUID triggerSuccessfulPaymentWebhook(UUID orderId, String reference) {
+            try {
+                String providerEvent = "recovery-payment-" + UUID.randomUUID();
+                String body = "{\"providerEventId\":\"" + providerEvent + "\",\"type\":\"PAYMENT\",\"providerReference\":\""
+                    + reference + "\",\"amountFen\":100,\"status\":\"SUCCEEDED\",\"occurredAt\":\""
+                    + java.time.Instant.now() + "\",\"orderId\":\"" + orderId + "\"}";
+                String timestamp = Long.toString(java.time.Instant.now().getEpochSecond());
+                String nonce = UUID.randomUUID().toString();
+                HttpResponse<String> response = HttpClient.newHttpClient().send(HttpRequest.newBuilder(
+                        URI.create("http://localhost:" + port + "/api/payment-webhooks/simulated"))
+                    .header("Content-Type", "application/json; charset=UTF-8")
+                    .header("X-Payment-Timestamp", timestamp).header("X-Payment-Nonce", nonce)
+                    .header("X-Payment-Signature", hmac(timestamp + "\n" + nonce + "\n" + body))
+                    .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8)).build(),
+                    HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                assertThat(response.statusCode()).isEqualTo(200);
+                return UUID.fromString(jdbc.queryForObject("SELECT event_id FROM integration_outbox WHERE event_type='ORDER_PAID' "
+                    + "AND aggregate_id=? ORDER BY created_at DESC LIMIT 1", String.class, orderId.toString()));
+            } catch (Exception failure) {
+                throw new AssertionError("payment webhook trigger failed", failure);
+            }
+        }
+
+        private String hmac(String text) throws Exception {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec("local-only-payment-secret-change-me".getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            return HexFormat.of().formatHex(mac.doFinal(text.getBytes(StandardCharsets.UTF_8)));
         }
 
         private void insertExpiredInbox(UUID event) {
@@ -200,7 +320,7 @@ class RecoveryDrillIT {
                     + "(id,consumer_name,event_id,status,owner_id,claim_token,lease_until,attempt_count,created_at) "
                     + "VALUES (?,?,?,'PROCESSING','old-owner','old-token',"
                     + "DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),1,CURRENT_TIMESTAMP(6))",
-                UUID.randomUUID().toString(), "recovery-drill", event.toString());
+                UUID.randomUUID().toString(), "campus-market-order", event.toString());
         }
 
         private String status(String table, UUID id) {
@@ -221,6 +341,7 @@ class RecoveryDrillIT {
         @Autowired private ProductSearchPort search;
         @Autowired private MeterRegistry metrics;
         @Autowired private JwtService jwt;
+        @Autowired private PrivateObjectStorage storage;
 
         @Test
         void round2ElasticsearchDisconnectLeavesSearchOutboxThenCatchesUp() throws Exception {
@@ -262,14 +383,8 @@ class RecoveryDrillIT {
             assertThat(searchOutbox.dispatchOnce(10, Duration.ofSeconds(30))).isEqualTo(expectedRecovered);
             search.refresh();
             assertThat(status(event)).isEqualTo("PUBLISHED");
-            Set<String> indexed = Set.copyOf(search.search(
-                new ProductSearchPort.SearchRequest(null, null, null, null, 0, 20))
-                .items().stream().map(ProductSearchPort.SearchItem::listingId).toList());
-            assertThat(indexed).contains(listing.toString());
-            Set<String> mysqlOnSale = Set.copyOf(jdbc.query(
-                "SELECT id FROM listing WHERE status='ON_SALE' AND available_quantity>0",
-                (rs, n) -> rs.getString(1)));
-            assertThat(indexed).isEqualTo(mysqlOnSale);
+            assertSearchEqualsMysql(jdbc, search);
+            assertEvidenceAclOverHttp(port, jwt, seedEvidenceAcl(jdbc, storage));
             assertInvariants(jdbc);
         }
 
@@ -300,6 +415,8 @@ class RecoveryDrillIT {
         @Autowired private StorageCleanupScheduler cleanup;
         @Autowired private PrivateObjectStorage storage;
         @Autowired private MeterRegistry metrics;
+        @Autowired private SearchOutboxDispatcher searchOutbox;
+        @Autowired private ProductSearchPort search;
         private final HttpClient client = HttpClient.newHttpClient();
         private UUID evidenceDispute;
         private UUID evidenceBuyer;
@@ -348,12 +465,19 @@ class RecoveryDrillIT {
             }
 
             String businessKey = "listing-upload:" + session;
+            String disputeBusinessKey = jdbc.queryForObject("SELECT cleanup_business_key FROM storage_cleanup_task "
+                + "WHERE cleanup_business_key LIKE 'dispute-upload:%' AND status='PENDING' ORDER BY created_at DESC LIMIT 1", String.class);
             recoverCleanup(businessKey);
+            recoverCleanup(disputeBusinessKey);
             assertThat(jdbc.queryForObject(
                 "SELECT status FROM storage_cleanup_task WHERE cleanup_business_key=?",
                 String.class, businessKey)).isEqualTo("COMPLETED");
+            assertThat(jdbc.queryForObject("SELECT status FROM storage_cleanup_task WHERE cleanup_business_key=?",
+                String.class, disputeBusinessKey)).isEqualTo("COMPLETED");
             assertThatThrownBy(() -> storage.open(objectKey))
                 .isInstanceOf(MinioPrivateObjectStorage.ObjectNotFoundException.class);
+            projectAllOnSale(jdbc, searchOutbox);
+            assertSearchEqualsMysql(jdbc, search);
             assertInvariants(jdbc);
         }
 
@@ -406,7 +530,7 @@ class RecoveryDrillIT {
         }
 
         private void assertEvidenceAclOverHttp() {
-            UUID buyer = insertUser(), seller = insertUser(), other = insertUser(), listing = UUID.randomUUID(), order = UUID.randomUUID(), dispute = UUID.randomUUID();
+            UUID buyer = insertUser(), seller = insertUser(), other = insertUser(), admin = insertAdmin(), listing = UUID.randomUUID(), order = UUID.randomUUID(), dispute = UUID.randomUUID();
             evidenceBuyer = buyer;
             evidenceDispute = dispute;
             jdbc.update("INSERT INTO listing(id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?, '证据商品','描述','教材',100,0,'SOLD_OUT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", listing.toString(), seller.toString());
@@ -420,10 +544,16 @@ class RecoveryDrillIT {
                 assertThat(get("/api/disputes/" + dispute + "/evidence/" + evidenceId + "/content", token(buyer)).statusCode()).isEqualTo(200);
                 assertThat(get("/api/disputes/" + dispute + "/evidence/" + evidenceId + "/content", token(seller)).statusCode()).isEqualTo(200);
                 assertThat(get("/api/disputes/" + dispute + "/evidence/" + evidenceId + "/content", token(other)).statusCode()).isEqualTo(404);
+                assertThat(get("/api/disputes/" + dispute + "/evidence/" + evidenceId + "/content", adminToken(admin)).statusCode()).isEqualTo(404);
             } catch (Exception failure) {
                 throw new AssertionError("HTTP evidence ACL drill failed", failure);
             }
         }
+
+        private UUID insertAdmin() {
+            return insertUser();
+        }
+        private String adminToken(UUID user) { return jwt.issue(new AuthenticatedUser(user, Set.of("ROLE_ADMIN"))); }
 
         private String token(UUID user) { return jwt.issue(new AuthenticatedUser(user, Set.of("ROLE_USER"))); }
         private HttpResponse<String> multipart(String path, String bearer, String filename, String type, byte[] bytes) throws Exception {
@@ -445,6 +575,7 @@ class RecoveryDrillIT {
     }
 
     private abstract static class RabbitContainers extends DrillContainers {
+        private static final long ELASTICSEARCH_MEMORY_BYTES = 768L * 1024L * 1024L;
         protected static final Network NETWORK = Network.newNetwork();
         protected static final MySQLContainer<?> MYSQL = new MySQLContainer<>(DockerImageName.parse("mysql:8.4"))
             .withDatabaseName("campus_market").withUsername("campus_market").withPassword("campus_market_local")
@@ -453,12 +584,15 @@ class RecoveryDrillIT {
             .withNetwork(NETWORK).withNetworkAliases("redis").withExposedPorts(6379);
         protected static final RabbitMQContainer RABBIT = new RabbitMQContainer(DockerImageName.parse("rabbitmq:3.13.7-management"))
             .withNetwork(NETWORK).withNetworkAliases("rabbitmq");
+        protected static final GenericContainer<?> MINIO = minio(NETWORK);
+        private static final ImageFromDockerfile ES_IMAGE = smartCnImage();
+        protected static final ElasticsearchContainer ES = elasticsearch(NETWORK, ES_IMAGE, ELASTICSEARCH_MEMORY_BYTES);
         protected static final ToxiproxyContainer TOXIPROXY = new ToxiproxyContainer(DockerImageName.parse("ghcr.io/shopify/toxiproxy:2.12.0"))
             .withNetwork(NETWORK).withNetworkAliases("toxiproxy");
         protected static ToxiproxyContainer.ContainerProxy PROXY;
 
         static {
-            start(Stream.of(MYSQL, REDIS, RABBIT, TOXIPROXY));
+            start(Stream.of(MYSQL, REDIS, RABBIT, MINIO, ES, TOXIPROXY));
             PROXY = TOXIPROXY.getProxy(RABBIT, 5672);
         }
 
@@ -469,11 +603,13 @@ class RecoveryDrillIT {
             registry.add("spring.rabbitmq.port", PROXY::getProxyPort);
             registry.add("spring.rabbitmq.username", RABBIT::getAdminUsername);
             registry.add("spring.rabbitmq.password", RABBIT::getAdminPassword);
+            registry.add("spring.elasticsearch.uris", () -> "http://" + ES.getHost() + ":" + ES.getMappedPort(9200));
+            registry.add("campus.market.storage.endpoint", () -> "http://" + MINIO.getHost() + ":" + MINIO.getMappedPort(9000));
         }
 
         @AfterAll
         static void stop() {
-            Stream.of(TOXIPROXY, RABBIT, MYSQL, REDIS).forEach(GenericContainer::stop);
+            Stream.of(TOXIPROXY, ES, MINIO, RABBIT, MYSQL, REDIS).forEach(GenericContainer::stop);
             NETWORK.close();
         }
     }
@@ -498,11 +634,12 @@ class RecoveryDrillIT {
             .withNetwork(NETWORK).withNetworkAliases("elasticsearch");
         protected static final ToxiproxyContainer TOXIPROXY = new ToxiproxyContainer(DockerImageName.parse("ghcr.io/shopify/toxiproxy:2.12.0"))
             .withNetwork(NETWORK).withNetworkAliases("toxiproxy");
+        protected static final GenericContainer<?> MINIO = minio(NETWORK);
         protected static ToxiproxyContainer.ContainerProxy PROXY;
 
         static {
             ES.setImage(ES_IMAGE);
-            start(Stream.of(MYSQL, ES, TOXIPROXY));
+            start(Stream.of(MYSQL, ES, MINIO, TOXIPROXY));
             PROXY = TOXIPROXY.getProxy(ES, 9200);
         }
 
@@ -513,16 +650,18 @@ class RecoveryDrillIT {
             common(registry, MYSQL, null);
             registry.add("spring.elasticsearch.uris",
                 () -> "http://" + PROXY.getContainerIpAddress() + ":" + PROXY.getProxyPort());
+            registry.add("campus.market.storage.endpoint", () -> "http://" + MINIO.getHost() + ":" + MINIO.getMappedPort(9000));
         }
 
         @AfterAll
         static void stop() {
-            Stream.of(TOXIPROXY, ES, MYSQL).forEach(GenericContainer::stop);
+            Stream.of(TOXIPROXY, MINIO, ES, MYSQL).forEach(GenericContainer::stop);
             NETWORK.close();
         }
     }
 
     private abstract static class StorageContainers extends DrillContainers {
+        private static final long ELASTICSEARCH_MEMORY_BYTES = 768L * 1024L * 1024L;
         protected static final Network NETWORK = Network.newNetwork();
         protected static final MySQLContainer<?> MYSQL = new MySQLContainer<>(DockerImageName.parse("mysql:8.4"))
             .withDatabaseName("campus_market").withUsername("campus_market").withPassword("campus_market_local")
@@ -537,10 +676,12 @@ class RecoveryDrillIT {
             .waitingFor(Wait.forListeningPort());
         protected static final ToxiproxyContainer TOXIPROXY = new ToxiproxyContainer(DockerImageName.parse("ghcr.io/shopify/toxiproxy:2.12.0"))
             .withNetwork(NETWORK).withNetworkAliases("toxiproxy");
+        private static final ImageFromDockerfile ES_IMAGE = smartCnImage();
+        protected static final ElasticsearchContainer ES = elasticsearch(NETWORK, ES_IMAGE, ELASTICSEARCH_MEMORY_BYTES);
         protected static ToxiproxyContainer.ContainerProxy PROXY;
 
         static {
-            start(Stream.of(MYSQL, REDIS, MINIO, TOXIPROXY));
+            start(Stream.of(MYSQL, REDIS, MINIO, ES, TOXIPROXY));
             PROXY = TOXIPROXY.getProxy(MINIO, 9000);
         }
 
@@ -549,12 +690,35 @@ class RecoveryDrillIT {
             common(registry, MYSQL, REDIS);
             registry.add("campus.market.storage.endpoint",
                 () -> "http://" + PROXY.getContainerIpAddress() + ":" + PROXY.getProxyPort());
+            registry.add("spring.elasticsearch.uris", () -> "http://" + ES.getHost() + ":" + ES.getMappedPort(9200));
         }
 
         @AfterAll
         static void stop() {
-            Stream.of(TOXIPROXY, MINIO, MYSQL, REDIS).forEach(GenericContainer::stop);
+            Stream.of(TOXIPROXY, ES, MINIO, MYSQL, REDIS).forEach(GenericContainer::stop);
             NETWORK.close();
         }
+    }
+
+    private static ImageFromDockerfile smartCnImage() {
+        return new ImageFromDockerfile("campus-market/elasticsearch:8.18.8-smartcn", true)
+            .withDockerfile(Path.of("docker/elasticsearch/Dockerfile"));
+    }
+
+    private static ElasticsearchContainer elasticsearch(Network network, ImageFromDockerfile image, long memoryBytes) {
+        ElasticsearchContainer container = new ElasticsearchContainer(DockerImageName.parse("campus-market/elasticsearch:8.18.8-smartcn")
+            .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8"))
+            .withEnv("xpack.security.enabled", "false").withEnv("ES_JAVA_OPTS", "-Xms128m -Xmx192m")
+            .withCreateContainerCmdModifier(DrillContainers.memoryLimit(memoryBytes)).withNetwork(network).withNetworkAliases("elasticsearch");
+        container.setImage(image);
+        return container;
+    }
+
+    private static GenericContainer<?> minio(Network network) {
+        return new GenericContainer<>(DockerImageName.parse("quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z"))
+            .withCommand("server /data --console-address :9001")
+            .withEnv("MINIO_ROOT_USER", "minioadmin").withEnv("MINIO_ROOT_PASSWORD", "minioadmin-local")
+            .withNetwork(network).withNetworkAliases("minio").withExposedPorts(9000, 9001)
+            .waitingFor(Wait.forListeningPort());
     }
 }

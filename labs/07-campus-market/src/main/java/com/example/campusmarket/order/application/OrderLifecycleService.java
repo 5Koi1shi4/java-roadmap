@@ -70,6 +70,7 @@ public final class OrderLifecycleService {
             if (row == null) throw new OrderNotFoundException();
             if (row.status() == OrderStatus.AWAITING_HANDOFF) return true;
             if (row.status() != OrderStatus.PENDING_PAYMENT) return false;
+            if (!repository.hasMatchingSuccessfulPayment(orderId)) return false;
             Instant now = repository.databaseNow();
             if (row.paymentDeadline() != null && !now.isBefore(row.paymentDeadline())) return false;
             return repository.transition(orderId, OrderStatus.PENDING_PAYMENT, OrderStatus.AWAITING_HANDOFF,

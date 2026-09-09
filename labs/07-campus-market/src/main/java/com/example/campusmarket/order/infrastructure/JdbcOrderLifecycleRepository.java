@@ -49,6 +49,14 @@ public class JdbcOrderLifecycleRepository {
                 instant(rs.getTimestamp("warranty_deadline"))) : null, orderId.toString());
     }
 
+    /** Rabbit 重放只能收敛已由支付聚合确认的成功事实。 */
+    public boolean hasMatchingSuccessfulPayment(UUID orderId) {
+        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM payment_order WHERE order_id=? AND status='SUCCEEDED' "
+            + "AND provider IS NOT NULL AND provider_reference IS NOT NULL AND paid_amount_fen=amount_fen AND amount_fen>0",
+            Integer.class, orderId.toString());
+        return count != null && count > 0;
+    }
+
     public int transition(UUID orderId, OrderStatus from, OrderStatus to, long expectedVersion,
                           Instant databaseNow, String deadlineColumn, boolean requireBeforeDeadline,
                           Instant newT0, Instant newAcceptanceDeadline, Instant newTrialDeadline,
