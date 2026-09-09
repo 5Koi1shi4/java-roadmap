@@ -234,7 +234,7 @@ class RecoveryDrillIT {
         @Test
         void round1RabbitDisconnectLeavesOutboxAndExpiredInboxThenRecovers() {
             BusinessFacts facts = seedBusinessFacts(jdbc);
-            String reference = createPendingPaymentOverHttp(facts.order());
+            String reference = createPendingPaymentOverHttp(facts.order(), facts.buyer());
             UUID event = triggerSuccessfulPaymentWebhook(facts.order(), reference);
             UUID payment = jdbc.queryForObject("SELECT id FROM payment_order WHERE order_id=? AND status='SUCCEEDED'",
                 (rs, n) -> UUID.fromString(rs.getString(1)), facts.order().toString());
@@ -313,11 +313,12 @@ class RecoveryDrillIT {
             }
         }
 
-        private String createPendingPaymentOverHttp(UUID orderId) {
+        private String createPendingPaymentOverHttp(UUID orderId, UUID buyerId) {
             try {
                 String key = "recovery-payment-" + orderId;
                 HttpResponse<String> response = HttpClient.newHttpClient().send(HttpRequest.newBuilder(
                         URI.create("http://localhost:" + port + "/api/orders/" + orderId + "/payments"))
+                    .header("Authorization", "Bearer " + jwt.issue(new AuthenticatedUser(buyerId, Set.of("ROLE_USER"))))
                     .header("Content-Type", "application/json; charset=UTF-8").header("Idempotency-Key", key)
                     .POST(HttpRequest.BodyPublishers.ofString("{}", StandardCharsets.UTF_8)).build(),
                     HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
