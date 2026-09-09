@@ -220,6 +220,7 @@ class RecoveryDrillIT {
         @Autowired private SearchOutboxDispatcher searchOutbox;
         @Autowired private ProductSearchPort search;
         @Autowired private MeterRegistry metrics;
+        @Autowired private JwtService jwt;
 
         @Test
         void round2ElasticsearchDisconnectLeavesSearchOutboxThenCatchesUp() throws Exception {
@@ -241,6 +242,7 @@ class RecoveryDrillIT {
             try {
                 HttpResponse<String> unavailable = HttpClient.newHttpClient().send(
                     HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/search?keyword=%E6%95%85%E9%9A%9C&size=20"))
+                        .header("Authorization", "Bearer " + jwt.issue(new AuthenticatedUser(seller, Set.of("ROLE_USER"))))
                         .GET().build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
                 assertThat(unavailable.statusCode()).isEqualTo(503);
                 searchOutbox.dispatchOnce(10, Duration.ofSeconds(2));
@@ -301,6 +303,8 @@ class RecoveryDrillIT {
 
         private static final int STORAGE_RECOVERY_ATTEMPTS = 8;
         private static final Duration STORAGE_RECOVERY_POLL = Duration.ofMillis(250);
+        private static final byte[] VALID_PNG = java.util.Base64.getDecoder().decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
 
         @Test
         void round3MinioDisconnectLeavesCleanupPendingThenDeletesAfterRecovery() throws Exception {
@@ -324,7 +328,7 @@ class RecoveryDrillIT {
             PROXY.setConnectionCut(true);
             try {
                 HttpResponse<String> unavailable = multipart("/api/disputes/" + evidenceDispute + "/evidence", token(evidenceBuyer),
-                    "during-outage.png", "image/png", new byte[] {1, 2, 3});
+                    "during-outage.png", "image/png", VALID_PNG);
                 assertThat(unavailable.statusCode()).isEqualTo(503);
                 cleanup.runOnce(10);
                 assertThat(jdbc.queryForObject(
