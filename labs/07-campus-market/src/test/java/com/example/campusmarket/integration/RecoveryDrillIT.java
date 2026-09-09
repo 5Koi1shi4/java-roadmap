@@ -251,7 +251,7 @@ class RecoveryDrillIT {
                 outbox.dispatchOnce(10, Duration.ofSeconds(2));
                 assertThat(status("integration_outbox", event)).isIn("NEW", "PUBLISHING");
                 assertThat(jdbc.queryForObject("SELECT attempt_count FROM integration_outbox WHERE event_id=?", Integer.class, event.toString())).isGreaterThan(0);
-                assertThat(metrics.get("campus.market.retry.total").tag("component", "OUTBOX").tag("result", "RETRY").counter().count())
+                assertThat(metrics.get("campus.market.retry.total.OUTBOX").tag("result", "RETRY").counter().count())
                     .isGreaterThan(0.0);
             } finally {
                 PROXY.setConnectionCut(false);

@@ -18,6 +18,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class WarrantyOutboxDispatcherTest {
     @Test
@@ -51,5 +52,26 @@ class WarrantyOutboxDispatcherTest {
         var dispatcher = new OutboxDispatcher(repository, rabbit, new EventEnvelopeCodec(), (key, ignored) -> { }, metrics);
         assertThat(dispatcher.dispatchOnce(10)).isZero();
         assertThat(registry.find("campus.market.outbox.total").tag("status", "PUBLISHED").counter()).isNull();
+    }
+
+    @Test
+    void transientPublishFailureRecordsOutboxRetryMetricAfterDurableRelease() {
+        OutboxRepository repository = mock(OutboxRepository.class);
+        RabbitTemplate rabbit = mock(RabbitTemplate.class);
+        UUID event = UUID.randomUUID();
+        var message = new OutboxRepository.OutboxMessage(UUID.randomUUID(), event, "ORDER_PAID",
+            UUID.randomUUID().toString(), 1, 1, "{}", Instant.now(), "owner", "token",
+            Instant.now().plusSeconds(30), 1, false);
+        when(repository.claimBatch(any(), eq(10), any())).thenReturn(List.of(message));
+        when(repository.releaseForRetry(eq(event), any(), any(), any())).thenReturn(1);
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+
+        var dispatcher = new OutboxDispatcher(repository, rabbit, new EventEnvelopeCodec(),
+            (key, ignored) -> { throw new IllegalStateException("socket closed"); }, new CampusMetrics(registry));
+
+        assertThat(dispatcher.dispatchOnce(10)).isZero();
+        verify(repository).releaseForRetry(eq(event), any(), any(), any());
+        assertThat(registry.get("campus.market.retry.total.OUTBOX").tag("result", "RETRY").counter().count())
+            .isEqualTo(1.0);
     }
 }
