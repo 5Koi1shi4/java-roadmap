@@ -209,14 +209,7 @@ abstract class TextbookContainers extends JourneyHttpSupport {
         registry.add("spring.data.redis.url", () -> "redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379));
         registry.add("spring.elasticsearch.uris", () -> "http://127.0.0.1:" + TEXTBOOK_ELASTICSEARCH_PORT);
         registry.add("campus.market.storage.endpoint", () -> "http://" + MINIO.getHost() + ":" + MINIO.getMappedPort(9000));
-        registerCommonDisabledDependencies(registry);
-    }
-
-    static void registerCommonDisabledDependencies(DynamicPropertyRegistry registry) {
-        registry.add("spring.rabbitmq.host", () -> "127.0.0.1");
-        registry.add("spring.rabbitmq.port", () -> "1");
-        registry.add("spring.rabbitmq.listener.simple.auto-startup", () -> "false");
-        registry.add("spring.rabbitmq.listener.direct.auto-startup", () -> "false");
+        JourneyDependencyProperties.registerCommonDisabledDependencies(registry);
     }
 
     static void stopTextbookContainers() {
@@ -280,7 +273,7 @@ abstract class WarrantyContainers extends JourneyHttpSupport {
         registry.add("spring.data.redis.url", () -> "redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379));
         registry.add("spring.elasticsearch.uris", () -> "http://127.0.0.1:1");
         registry.add("campus.market.storage.endpoint", () -> "http://" + MINIO.getHost() + ":" + MINIO.getMappedPort(9000));
-        TextbookContainers.registerCommonDisabledDependencies(registry);
+        JourneyDependencyProperties.registerCommonDisabledDependencies(registry);
     }
 
     static void stopWarrantyContainers() {
