@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.multipart.MultipartException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import java.nio.charset.StandardCharsets;
 
@@ -25,7 +26,7 @@ public final class ApiExceptionHandler {
         return error(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "请求参数无效");
     }
 
-    @ExceptionHandler(ReviewService.NotFoundException.class)
+    @ExceptionHandler({ReviewService.NotFoundException.class, NoResourceFoundException.class})
     public ResponseEntity<ApiError> notFound(Exception ignored) {
         return error(HttpStatus.NOT_FOUND, "RESOURCE_NOT_FOUND", "资源不存在");
     }
