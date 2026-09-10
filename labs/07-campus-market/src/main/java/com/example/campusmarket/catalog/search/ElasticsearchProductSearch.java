@@ -12,6 +12,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import com.example.campusmarket.observability.CampusMetrics;
 import org.springframework.stereotype.Component;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Profile;
 
 import java.io.IOException;
 import java.sql.Connection;
@@ -27,6 +28,7 @@ import java.util.function.Consumer;
 
 /** Elasticsearch 商品索引实现，所有写入均通过 external_gte 版本保护。 */
 @Component
+@Profile("!test")
 public class ElasticsearchProductSearch implements ProductSearchPort {
     private static final String INITIAL_INDEX = "campus-listing-000001";
     private final ElasticsearchClient client;

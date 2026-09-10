@@ -3,6 +3,7 @@ package com.example.campusmarket.catalog.search;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.context.annotation.Profile;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -14,6 +15,7 @@ import java.util.function.Consumer;
 
 /** 在线重建：同一 RR 快照和序列高水位，之后按序列补放并用 MySQL 门禁切换。 */
 @Service
+@Profile("!test")
 public class SearchRebuildService {
     private final JdbcTemplate jdbc;
     private final SearchProjector projector;

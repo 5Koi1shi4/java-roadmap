@@ -9,12 +9,14 @@ import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.core.QueueBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Profile;
 
 import java.util.ArrayList;
 import java.util.List;
 
 /** 领域事件交换机与 durable quorum 队列。 */
 @Configuration
+@Profile("!test")
 public class RabbitTopology {
     public static final String EVENT_EXCHANGE = "campus.market.events";
     public static final String EVENT_QUEUE = "campus.market.events.order";

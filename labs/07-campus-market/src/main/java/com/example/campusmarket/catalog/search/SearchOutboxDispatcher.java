@@ -5,6 +5,7 @@ import com.example.campusmarket.observability.CampusMetrics;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.context.annotation.Profile;
 import org.springframework.beans.factory.annotation.Autowired;
 
 import java.time.Duration;
@@ -15,6 +16,7 @@ import java.util.UUID;
 
 /** 搜索 outbox 的租约调度器；完成、重试和失败均由 owner+claim token fencing。 */
 @Component
+@Profile("!test")
 public class SearchOutboxDispatcher {
     private final JdbcTemplate jdbc;
     private final SearchProjector projector;

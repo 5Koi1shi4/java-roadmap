@@ -7,6 +7,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.springframework.context.annotation.Profile;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -20,6 +21,7 @@ import java.util.function.Consumer;
 
 /** 使用 MySQL 会话锁串行化跨实例别名操作。 */
 @Component
+@Profile("!test")
 public final class SearchAliasCoordinator {
     static final String LOCK_NAME = "campus-market:search-alias-coordination";
     private static final Logger LOGGER = LoggerFactory.getLogger(SearchAliasCoordinator.class);

@@ -2,6 +2,7 @@ package com.example.campusmarket.order.application;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
+import org.springframework.context.annotation.Profile;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
@@ -13,6 +14,7 @@ import java.util.function.Supplier;
 
 /** 在下单事务中按 actor 锁定并完成幂等命令。 */
 @Service
+@Profile("!test")
 public class IdempotentCommandService {
     private final com.example.campusmarket.order.infrastructure.JdbcOrderRepository repository;
     private final OrderCreationHook hook;

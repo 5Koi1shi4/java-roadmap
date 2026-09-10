@@ -4,12 +4,14 @@ import com.example.campusmarket.shared.DomainEvent;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import org.springframework.context.annotation.Profile;
 
 import java.util.Objects;
 import java.util.UUID;
 
 /** 从 MySQL 商品事实投影到搜索索引；事件只作为变更通知和版本 fencing。 */
 @Component
+@Profile("!test")
 public class SearchProjector {
     private final JdbcTemplate jdbc;
     private final ProductSearchPort search;

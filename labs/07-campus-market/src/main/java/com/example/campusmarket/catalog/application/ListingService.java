@@ -7,6 +7,7 @@ import com.example.campusmarket.storage.ObjectUploadCoordinator;
 import com.example.campusmarket.observability.CampusMetrics;
 import com.example.campusmarket.observability.AfterCommitMetrics;
 import org.springframework.stereotype.Service;
+import org.springframework.context.annotation.Profile;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -16,6 +17,7 @@ import java.time.Instant;
 import java.util.UUID;
 
 @Service
+@Profile("!test")
 public class ListingService {
     private final ListingRepository listings;
     private final ObjectUploadCoordinator uploads;

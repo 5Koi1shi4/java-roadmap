@@ -12,6 +12,7 @@ import io.minio.RemoveObjectArgs;
 import io.minio.errors.ErrorResponseException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import org.springframework.context.annotation.Profile;
 import org.springframework.beans.factory.annotation.Autowired;
 
 import java.io.FilterInputStream;
@@ -22,6 +23,7 @@ import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 @Component
+@Profile("!test")
 public class MinioPrivateObjectStorage implements PrivateObjectStorage, MediaStorage {
     private final MinioClient client;
     private final String bucket;

@@ -2,6 +2,7 @@ package com.example.campusmarket.catalog.search;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.context.annotation.Profile;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -15,6 +16,7 @@ import java.util.UUID;
 
 /** search_rebuild_intent 的短事务和协调锁连接内持久化边界。 */
 @Repository
+@Profile("!test")
 public class SearchRebuildIntentRepository {
     private final JdbcTemplate jdbc;
 

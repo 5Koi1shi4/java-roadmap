@@ -2,6 +2,7 @@ package com.example.campusmarket.catalog.search;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.context.annotation.Profile;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -19,6 +20,7 @@ import java.util.UUID;
 
 /** 短事务领取和 owner/token fencing 的清理状态变更。 */
 @Repository
+@Profile("!test")
 public class SearchIndexCleanupRepository {
     private static final String COMPLETE_SQL = """
         UPDATE search_index_cleanup_task

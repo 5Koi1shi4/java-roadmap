@@ -3,10 +3,12 @@ package com.example.campusmarket.dispute.infrastructure;
 import com.example.campusmarket.dispute.application.EvidenceCaseAccess;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.context.annotation.Profile;
 
 import java.util.UUID;
 
 @Repository
+@Profile("!test")
 public class JdbcEvidenceCaseAccess implements EvidenceCaseAccess {
     private final JdbcTemplate jdbc;
     public JdbcEvidenceCaseAccess(JdbcTemplate jdbc) { this.jdbc = jdbc; }

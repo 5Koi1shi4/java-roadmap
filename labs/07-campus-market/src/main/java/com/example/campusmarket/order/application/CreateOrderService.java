@@ -8,6 +8,7 @@ import com.example.campusmarket.shared.Money;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
+import org.springframework.context.annotation.Profile;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -17,6 +18,7 @@ import java.util.UUID;
 
 /** 编排买家下单的单一 MySQL 事务。 */
 @Service
+@Profile("!test")
 public class CreateOrderService {
     private final com.example.campusmarket.order.infrastructure.JdbcOrderRepository repository;
     private final InventoryPort inventory;

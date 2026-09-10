@@ -3,6 +3,7 @@ package com.example.campusmarket.catalog.search;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.context.annotation.Profile;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -16,6 +17,7 @@ import java.util.UUID;
 
 /** MySQL 协调的跨实例搜索写入门禁和 generation fencing。 */
 @Repository
+@Profile("!test")
 public class SearchGateRepository {
     private static final Duration COORDINATION_TIMEOUT = Duration.ofSeconds(30);
     private final JdbcTemplate jdbc;

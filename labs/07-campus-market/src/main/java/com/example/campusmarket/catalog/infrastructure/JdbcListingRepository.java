@@ -7,6 +7,7 @@ import com.example.campusmarket.catalog.domain.WarrantyTerm;
 import com.example.campusmarket.shared.Money;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.context.annotation.Profile;
 
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -15,6 +16,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 @Repository
+@Profile("!test")
 public class JdbcListingRepository implements ListingRepository {
     private final JdbcTemplate jdbc;
 

@@ -9,6 +9,7 @@ import com.example.campusmarket.identity.application.AuthenticatedUser;
 import com.example.campusmarket.storage.MinioPrivateObjectStorage;
 import com.example.campusmarket.storage.PrivateObjectStorage;
 import org.springframework.core.io.InputStreamResource;
+import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -30,6 +31,7 @@ import java.time.Instant;
 import java.util.UUID;
 
 @RestController
+@Profile("!test")
 @RequestMapping(path = "/api/listings", produces = "application/json; charset=UTF-8")
 public class ListingController {
     private final ListingService service;

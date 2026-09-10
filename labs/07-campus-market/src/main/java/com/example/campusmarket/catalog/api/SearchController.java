@@ -5,6 +5,7 @@ import com.example.campusmarket.catalog.search.ProductSearchPort;
 import com.example.campusmarket.catalog.search.ElasticsearchProductSearch;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.context.annotation.Profile;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -13,6 +14,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 /** 商品搜索 HTTP 薄适配器；MySQL 事实源和 ES 投影仍由搜索端口负责。 */
 @RestController
+@Profile("!test")
 @RequestMapping(path = {"/api/search", "/api/listings/search"}, produces = "application/json; charset=UTF-8")
 public final class SearchController {
     private final ProductSearchPort search;

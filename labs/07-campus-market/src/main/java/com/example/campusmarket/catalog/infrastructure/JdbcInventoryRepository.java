@@ -7,6 +7,7 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.context.annotation.Profile;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.util.UUID;
@@ -14,6 +15,7 @@ import java.util.function.Supplier;
 import java.util.Objects;
 
 @Repository
+@Profile("!test")
 public class JdbcInventoryRepository implements InventoryPort {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;

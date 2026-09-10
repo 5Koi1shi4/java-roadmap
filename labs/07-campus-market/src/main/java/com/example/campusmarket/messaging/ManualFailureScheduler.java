@@ -3,6 +3,7 @@ package com.example.campusmarket.messaging;
 import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.context.annotation.Profile;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.transaction.annotation.Transactional;
@@ -16,6 +17,7 @@ import java.util.UUID;
 
 /** 人工失败副本的有界、可接管补偿调度器。 */
 @Service
+@Profile("!test")
 public class ManualFailureScheduler {
     private final JdbcTemplate jdbc;
     private final ManualFailurePublisher publisher;

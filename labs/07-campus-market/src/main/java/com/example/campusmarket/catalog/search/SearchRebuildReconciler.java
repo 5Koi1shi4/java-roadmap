@@ -3,6 +3,7 @@ package com.example.campusmarket.catalog.search;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.context.annotation.Profile;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
@@ -16,6 +17,7 @@ import java.util.UUID;
 
 /** 在与切换相同的协调锁下修复持久重建状态和别名。 */
 @Component
+@Profile("!test")
 public final class SearchRebuildReconciler {
     private static final Duration COORDINATION_TIMEOUT = Duration.ofSeconds(30);
 

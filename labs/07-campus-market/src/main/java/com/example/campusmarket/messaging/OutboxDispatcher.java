@@ -9,6 +9,7 @@ import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.context.annotation.Profile;
 import org.springframework.beans.factory.annotation.Autowired;
 
 import java.nio.charset.StandardCharsets;
@@ -18,6 +19,7 @@ import java.util.concurrent.TimeUnit;
 
 /** 在数据库领取成功后发布事件，并以 publisher confirm 驱动状态完成。 */
 @Component
+@Profile("!test")
 public class OutboxDispatcher {
     public static final String EXCHANGE = RabbitTopology.EVENT_EXCHANGE;
     private final OutboxRepository repository;

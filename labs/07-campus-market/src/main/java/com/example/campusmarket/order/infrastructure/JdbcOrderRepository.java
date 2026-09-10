@@ -9,6 +9,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.context.annotation.Profile;
 
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -17,6 +18,7 @@ import java.util.Objects;
 import java.util.UUID;
 
 @Repository
+@Profile("!test")
 public class JdbcOrderRepository {
     private final JdbcTemplate jdbc;
 

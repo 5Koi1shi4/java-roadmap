@@ -14,6 +14,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.context.annotation.Profile;
 
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
@@ -22,6 +23,7 @@ import java.util.UUID;
 import java.util.Objects;
 
 @RestController
+@Profile("!test")
 @RequestMapping(path = "/api/orders", produces = "application/json; charset=UTF-8")
 public class OrderController {
     private final CreateOrderService service;

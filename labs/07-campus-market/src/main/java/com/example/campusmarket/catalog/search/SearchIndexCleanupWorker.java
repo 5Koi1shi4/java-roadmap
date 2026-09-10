@@ -2,6 +2,7 @@ package com.example.campusmarket.catalog.search;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.context.annotation.Profile;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -15,6 +16,7 @@ import java.util.function.Consumer;
 
 /** 在调用方事务之外领取清理任务，并与别名切换串行化删除。 */
 @Service
+@Profile("!test")
 public class SearchIndexCleanupWorker {
     private static final Duration COORDINATION_TIMEOUT = Duration.ofSeconds(30);
 

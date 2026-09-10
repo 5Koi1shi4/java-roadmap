@@ -2,6 +2,7 @@ package com.example.campusmarket.catalog.search;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.context.annotation.Profile;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
@@ -12,6 +13,7 @@ import java.util.UUID;
 
 /** 独立代理 bean，确保 FOR UPDATE claim 不被 self-invocation 绕过。 */
 @Service
+@Profile("!test")
 public class SearchOutboxClaimer {
     private final JdbcTemplate jdbc;
     private final SearchGateRepository gate;

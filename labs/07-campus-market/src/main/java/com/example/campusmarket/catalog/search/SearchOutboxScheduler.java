@@ -4,12 +4,14 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.stereotype.Component;
+import org.springframework.context.annotation.Profile;
 
 import java.time.Duration;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** outbox worker 的生产入口；除非显式启用，否则保持禁用。 */
 @Component
+@Profile("!test")
 @EnableScheduling
 @ConditionalOnProperty(prefix = "campus.market.search.dispatcher", name = "enabled", havingValue = "true")
 public final class SearchOutboxScheduler {

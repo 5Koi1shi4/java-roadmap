@@ -2,6 +2,7 @@ package com.example.campusmarket.messaging;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.context.annotation.Profile;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.annotation.Propagation;
 
@@ -14,6 +15,7 @@ import java.util.UUID;
 
 /** integration_outbox 的条件领取与 token fencing。 */
 @Repository
+@Profile("!test")
 public class OutboxRepository {
     private final JdbcTemplate jdbc;
 

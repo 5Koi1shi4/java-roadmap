@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Repository;
+import org.springframework.context.annotation.Profile;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Map;
@@ -14,6 +15,7 @@ import java.util.UUID;
 
 /** 商品事实更新事务内写入的搜索 outbox。 */
 @Repository
+@Profile("!test")
 public class SearchOutboxRepository {
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;

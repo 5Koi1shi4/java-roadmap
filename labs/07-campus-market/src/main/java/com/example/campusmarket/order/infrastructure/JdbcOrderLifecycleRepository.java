@@ -6,6 +6,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.context.annotation.Profile;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.annotation.Propagation;
 
@@ -20,6 +21,7 @@ import java.util.UUID;
 
 /** 订单生命周期的 MySQL 事实源；所有写入均由状态、版本和截止时间条件保护。 */
 @Repository
+@Profile("!test")
 public class JdbcOrderLifecycleRepository {
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;

@@ -3,6 +3,7 @@ package com.example.campusmarket.storage;
 import com.example.campusmarket.catalog.application.ListingRepository;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.context.annotation.Profile;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.io.IOException;
@@ -14,6 +15,7 @@ import java.util.Base64;
 import java.util.UUID;
 
 @Service
+@Profile("!test")
 public class ObjectUploadCoordinator {
     private static final SecureRandom RANDOM = new SecureRandom();
     private final JdbcTemplate jdbc;

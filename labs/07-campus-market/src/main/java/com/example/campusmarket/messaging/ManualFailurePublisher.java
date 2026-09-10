@@ -7,12 +7,14 @@ import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.context.annotation.Profile;
 
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
 /** 在失败记录事务提交后投递人工处理通知。 */
 @Component
+@Profile("!test")
 public class ManualFailurePublisher {
     private final RabbitTemplate rabbitTemplate;
 

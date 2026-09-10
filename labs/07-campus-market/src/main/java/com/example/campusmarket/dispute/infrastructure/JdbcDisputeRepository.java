@@ -7,6 +7,7 @@ import com.example.campusmarket.order.domain.OrderStatus;
 import com.example.campusmarket.order.infrastructure.JdbcOrderLifecycleRepository;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.context.annotation.Profile;
 
 import java.sql.Timestamp;
 import java.time.Duration;
@@ -15,6 +16,7 @@ import java.util.UUID;
 
 /** 普通争议的 MySQL 持久化；调用者负责事务边界。 */
 @Repository
+@Profile("!test")
 public class JdbcDisputeRepository {
     private final JdbcTemplate jdbc;
     private final JdbcOrderLifecycleRepository orders;

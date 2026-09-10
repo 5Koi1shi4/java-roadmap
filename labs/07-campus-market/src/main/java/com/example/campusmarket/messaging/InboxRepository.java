@@ -5,6 +5,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.context.annotation.Profile;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Duration;
@@ -16,6 +17,7 @@ import com.example.campusmarket.shared.DomainEvent;
 
 /** consumed_event 的原子领取与完成记录。 */
 @Repository
+@Profile("!test")
 public class InboxRepository {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactionTemplate;
