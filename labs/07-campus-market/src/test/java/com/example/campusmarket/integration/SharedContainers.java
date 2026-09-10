@@ -42,6 +42,7 @@ public abstract class SharedContainers {
     private static final ImageFromDockerfile ELASTICSEARCH_IMAGE = new ImageFromDockerfile(
         "campus-market/elasticsearch:8.18.8-smartcn", true)
         .withDockerfile(Path.of("docker/elasticsearch/Dockerfile"));
+    private static final long ELASTICSEARCH_MEMORY_BYTES = 768L * 1024L * 1024L;
 
     protected static final ElasticsearchContainer ELASTICSEARCH = elasticsearchContainer();
 
@@ -80,6 +81,8 @@ public abstract class SharedContainers {
             .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8");
         ElasticsearchContainer container = new ElasticsearchContainer(compatibleImage)
             .withEnv("xpack.security.enabled", "false")
+            .withEnv("ES_JAVA_OPTS", "-Xms128m -Xmx192m")
+            .withCreateContainerCmdModifier(cmd -> cmd.getHostConfig().withMemory(ELASTICSEARCH_MEMORY_BYTES))
             .withNetwork(NETWORK)
             .withNetworkAliases("elasticsearch");
         container.setImage(ELASTICSEARCH_IMAGE);
