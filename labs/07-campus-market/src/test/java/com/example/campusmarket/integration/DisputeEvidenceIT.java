@@ -37,8 +37,8 @@ import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.Base64;
+import java.util.List;
 import java.util.Set;
-import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -84,8 +84,11 @@ class DisputeEvidenceIT extends DisputeEvidenceContainers {
         assertThat(denied.statusCode()).isEqualTo(404);
         assertThat(unassignedAdminResponse.statusCode()).isEqualTo(404);
         assertThat(missing.statusCode()).isEqualTo(404);
-        assertThat(denied.body()).isEqualTo(missing.body());
-        assertThat(unassignedAdminResponse.body()).isEqualTo(missing.body());
+        UUID deniedCorrelation = assertNotFoundError(denied);
+        UUID unassignedAdminCorrelation = assertNotFoundError(unassignedAdminResponse);
+        UUID missingCorrelation = assertNotFoundError(missing);
+        assertThat(List.of(deniedCorrelation, unassignedAdminCorrelation, missingCorrelation))
+            .doesNotHaveDuplicates();
         assertThat(upload.body()).doesNotContain("object_key", "dispute-evidence/");
     }
 
@@ -298,6 +301,12 @@ class DisputeEvidenceIT extends DisputeEvidenceContainers {
         Matcher matcher = Pattern.compile("\\\"correlationId\\\":\\\"([^\\\"]+)\\\"").matcher(response.body());
         assertThat(matcher.find()).isTrue();
         assertThat(UUID.fromString(matcher.group(1))).isNotNull();
+    }
+    private static UUID assertNotFoundError(HttpResponse<String> response) {
+        assertJsonUtf8(response);
+        assertThat(response.body()).contains("\"code\":\"RESOURCE_NOT_FOUND\"")
+            .contains("\"message\":\"证据不存在\"").doesNotContain("\"error\"");
+        return UUID.fromString(field(response.body(), "correlationId"));
     }
     private static void assertMediaType(HttpResponse<?> response, String expected) {
         MediaType mediaType = MediaType.parseMediaType(response.headers().firstValue("Content-Type").orElseThrow());
