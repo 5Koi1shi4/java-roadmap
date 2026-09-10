@@ -51,9 +51,11 @@ class SchemaIT extends SharedContainers {
             "handoff_record", "dispute_case", "dispute_evidence", "return_case", "warranty_case",
             "seller_obligation", "trade_review", "audit_event", "integration_outbox", "consumed_event",
             "object_upload_session", "storage_cleanup_task", "manual_failure", "search_rebuild_gate",
-            "search_index_cleanup_task", "search_rebuild_intent");
+            "search_index_cleanup_task", "search_rebuild_intent", "dispute_deadline_claim",
+            "seller_obligation_funding", "settlement_obligation_deduction", "return_proof_attestation",
+            "seller_account_restriction", "warranty_deadline_claim", "seller_withdrawal");
         assertThat(tableNames()).containsExactlyInAnyOrderElementsOf(expected);
-        assertThat(expected).hasSize(31);
+        assertThat(expected).hasSize(38);
     }
 
     @Test

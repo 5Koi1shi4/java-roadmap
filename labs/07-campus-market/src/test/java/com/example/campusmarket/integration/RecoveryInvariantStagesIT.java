@@ -51,8 +51,14 @@ class RecoveryInvariantStagesIT {
             registry.add("spring.data.redis.url", () -> "redis://127.0.0.1:1");
             registry.add("spring.rabbitmq.host", () -> "127.0.0.1");
             registry.add("spring.rabbitmq.port", () -> "1");
+            registry.add("spring.rabbitmq.listener.simple.auto-startup", () -> "false");
+            registry.add("spring.rabbitmq.listener.direct.auto-startup", () -> "false");
             registry.add("campus.market.order.deadline.enabled", () -> "false");
             registry.add("campus.market.search.dispatcher.enabled", () -> "false");
+            registry.add("campus.market.payment.reconciliation.enabled", () -> "false");
+            registry.add("campus.market.dispute.deadline.enabled", () -> "false");
+            registry.add("campus.market.dispute.return-reconciliation.enabled", () -> "false");
+            registry.add("campus.market.warranty.deadline.enabled", () -> "false");
             registry.add("spring.task.scheduling.enabled", () -> "false");
         }
 
@@ -82,17 +88,6 @@ class RecoveryInvariantStagesIT {
     }
 
     private abstract static class AclStage extends Base {
-        static final Network NETWORK = Network.newNetwork();
-        static final MySQLContainer<?> MYSQL = mysql(NETWORK);
-        static final GenericContainer<?> MINIO = minio(NETWORK);
-        static { Startables.deepStart(Stream.of(MYSQL, MINIO)).join(); }
-        @DynamicPropertySource static void properties(DynamicPropertyRegistry r) {
-            common(r, MYSQL);
-            r.add("campus.market.storage.endpoint", () -> "http://" + MINIO.getHost() + ":" + MINIO.getMappedPort(9000));
-            r.add("spring.elasticsearch.uris", () -> "http://127.0.0.1:1");
-        }
-        @AfterAll static void stop() { MINIO.stop(); MYSQL.stop(); NETWORK.close(); }
-
         void verifyAcl(JdbcTemplate jdbc, PrivateObjectStorage storage, JwtService jwt, int port) throws Exception {
             UUID buyer=user(jdbc), seller=user(jdbc), other=user(jdbc), admin=user(jdbc), listing=UUID.randomUUID(), order=UUID.randomUUID(), dispute=UUID.randomUUID(), evidence=UUID.randomUUID();
             String key="recovery-acl/"+evidence; byte[] body="proof".getBytes(StandardCharsets.UTF_8);
@@ -112,21 +107,34 @@ class RecoveryInvariantStagesIT {
     }
 
     private abstract static class SearchStage extends Base {
-        static final Network NETWORK=Network.newNetwork(); static final MySQLContainer<?> MYSQL=mysql(NETWORK);
-        static final ImageFromDockerfile IMAGE=new ImageFromDockerfile("campus-market/elasticsearch:8.18.8-smartcn",true).withDockerfile(Path.of("docker/elasticsearch/Dockerfile"));
-        static final ElasticsearchContainer ES=es(NETWORK,IMAGE);
-        static {Startables.deepStart(Stream.of(MYSQL,ES)).join();}
-        @DynamicPropertySource static void properties(DynamicPropertyRegistry r){common(r,MYSQL);r.add("spring.elasticsearch.uris",()->"http://"+ES.getHost()+":"+ES.getMappedPort(9200));r.add("campus.market.storage.endpoint",()->"http://127.0.0.1:1");}
-        @AfterAll static void stop(){ES.stop();MYSQL.stop();NETWORK.close();}
         void verifySearch(JdbcTemplate jdbc,SearchOutboxDispatcher dispatcher,ProductSearchPort search){seedSale(jdbc);assertThat(dispatcher.dispatchOnce(20,Duration.ofSeconds(30))).isEqualTo(1);search.refresh();Set<String> actual=Set.copyOf(search.search(new ProductSearchPort.SearchRequest(null,null,null,null,0,100)).items().stream().map(ProductSearchPort.SearchItem::listingId).toList());Set<String> expected=Set.copyOf(jdbc.query("SELECT id FROM listing WHERE status='ON_SALE' AND available_quantity>0",(rs,n)->rs.getString(1)));assertThat(actual).isEqualTo(expected);sqlInvariants(jdbc);}
     }
 
-    @Nested @SpringBootTest(classes=CampusMarketApplication.class,webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT) @ActiveProfiles("local") @DirtiesContext class RabbitAcl extends AclStage {@Autowired JdbcTemplate jdbc;@Autowired PrivateObjectStorage storage;@Autowired JwtService jwt;@LocalServerPort int port;@Test void rabbitRoundAcl() throws Exception{verifyAcl(jdbc,storage,jwt,port);}}
-    @Nested @SpringBootTest(classes=CampusMarketApplication.class) @ActiveProfiles("local") @DirtiesContext class RabbitSearch extends SearchStage {@Autowired JdbcTemplate jdbc;@Autowired SearchOutboxDispatcher dispatcher;@Autowired ProductSearchPort search;@Test void rabbitRoundSearch(){verifySearch(jdbc,dispatcher,search);}}
-    @Nested @SpringBootTest(classes=CampusMarketApplication.class,webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT) @ActiveProfiles("local") @DirtiesContext class SearchAcl extends AclStage {@Autowired JdbcTemplate jdbc;@Autowired PrivateObjectStorage storage;@Autowired JwtService jwt;@LocalServerPort int port;@Test void searchRoundAcl() throws Exception{verifyAcl(jdbc,storage,jwt,port);}}
-    @Nested @SpringBootTest(classes=CampusMarketApplication.class) @ActiveProfiles("local") @DirtiesContext class SearchSearch extends SearchStage {@Autowired JdbcTemplate jdbc;@Autowired SearchOutboxDispatcher dispatcher;@Autowired ProductSearchPort search;@Test void searchRoundSearch(){verifySearch(jdbc,dispatcher,search);}}
-    @Nested @SpringBootTest(classes=CampusMarketApplication.class,webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT) @ActiveProfiles("local") @DirtiesContext class StorageAcl extends AclStage {@Autowired JdbcTemplate jdbc;@Autowired PrivateObjectStorage storage;@Autowired JwtService jwt;@LocalServerPort int port;@Test void storageRoundAcl() throws Exception{verifyAcl(jdbc,storage,jwt,port);}}
-    @Nested @SpringBootTest(classes=CampusMarketApplication.class) @ActiveProfiles("local") @DirtiesContext class StorageSearch extends SearchStage {@Autowired JdbcTemplate jdbc;@Autowired SearchOutboxDispatcher dispatcher;@Autowired ProductSearchPort search;@Test void storageRoundSearch(){verifySearch(jdbc,dispatcher,search);}}
+    @Nested @SpringBootTest(classes=CampusMarketApplication.class,webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT) @ActiveProfiles("local") @DirtiesContext class RabbitAcl extends AclStage {static final AclResources RESOURCES=new AclResources();@DynamicPropertySource static void properties(DynamicPropertyRegistry r){RESOURCES.register(r);}@AfterAll static void stop(){RESOURCES.stop();}@Autowired JdbcTemplate jdbc;@Autowired PrivateObjectStorage storage;@Autowired JwtService jwt;@LocalServerPort int port;@Test void rabbitRoundAcl() throws Exception{verifyAcl(jdbc,storage,jwt,port);}}
+    @Nested @SpringBootTest(classes=CampusMarketApplication.class) @ActiveProfiles("local") @DirtiesContext class RabbitSearch extends SearchStage {static final SearchResources RESOURCES=new SearchResources();@DynamicPropertySource static void properties(DynamicPropertyRegistry r){RESOURCES.register(r);}@AfterAll static void stop(){RESOURCES.stop();}@Autowired JdbcTemplate jdbc;@Autowired SearchOutboxDispatcher dispatcher;@Autowired ProductSearchPort search;@Test void rabbitRoundSearch(){verifySearch(jdbc,dispatcher,search);}}
+    @Nested @SpringBootTest(classes=CampusMarketApplication.class,webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT) @ActiveProfiles("local") @DirtiesContext class SearchAcl extends AclStage {static final AclResources RESOURCES=new AclResources();@DynamicPropertySource static void properties(DynamicPropertyRegistry r){RESOURCES.register(r);}@AfterAll static void stop(){RESOURCES.stop();}@Autowired JdbcTemplate jdbc;@Autowired PrivateObjectStorage storage;@Autowired JwtService jwt;@LocalServerPort int port;@Test void searchRoundAcl() throws Exception{verifyAcl(jdbc,storage,jwt,port);}}
+    @Nested @SpringBootTest(classes=CampusMarketApplication.class) @ActiveProfiles("local") @DirtiesContext class SearchSearch extends SearchStage {static final SearchResources RESOURCES=new SearchResources();@DynamicPropertySource static void properties(DynamicPropertyRegistry r){RESOURCES.register(r);}@AfterAll static void stop(){RESOURCES.stop();}@Autowired JdbcTemplate jdbc;@Autowired SearchOutboxDispatcher dispatcher;@Autowired ProductSearchPort search;@Test void searchRoundSearch(){verifySearch(jdbc,dispatcher,search);}}
+    @Nested @SpringBootTest(classes=CampusMarketApplication.class,webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT) @ActiveProfiles("local") @DirtiesContext class StorageAcl extends AclStage {static final AclResources RESOURCES=new AclResources();@DynamicPropertySource static void properties(DynamicPropertyRegistry r){RESOURCES.register(r);}@AfterAll static void stop(){RESOURCES.stop();}@Autowired JdbcTemplate jdbc;@Autowired PrivateObjectStorage storage;@Autowired JwtService jwt;@LocalServerPort int port;@Test void storageRoundAcl() throws Exception{verifyAcl(jdbc,storage,jwt,port);}}
+    @Nested @SpringBootTest(classes=CampusMarketApplication.class) @ActiveProfiles("local") @DirtiesContext class StorageSearch extends SearchStage {static final SearchResources RESOURCES=new SearchResources();@DynamicPropertySource static void properties(DynamicPropertyRegistry r){RESOURCES.register(r);}@AfterAll static void stop(){RESOURCES.stop();}@Autowired JdbcTemplate jdbc;@Autowired SearchOutboxDispatcher dispatcher;@Autowired ProductSearchPort search;@Test void storageRoundSearch(){verifySearch(jdbc,dispatcher,search);}}
+
+    private static final class AclResources {
+        private final Network network=Network.newNetwork();
+        private final MySQLContainer<?> mysql=mysql(network);
+        private final GenericContainer<?> minio=minio(network);
+        private AclResources(){Startables.deepStart(Stream.of(mysql,minio)).join();}
+        private void register(DynamicPropertyRegistry r){Base.common(r,mysql);r.add("campus.market.storage.endpoint",()->"http://"+minio.getHost()+":"+minio.getMappedPort(9000));r.add("spring.elasticsearch.uris",()->"http://127.0.0.1:1");}
+        private void stop(){minio.stop();mysql.stop();network.close();}
+    }
+
+    private static final class SearchResources {
+        private final Network network=Network.newNetwork();
+        private final MySQLContainer<?> mysql=mysql(network);
+        private final ImageFromDockerfile image=new ImageFromDockerfile("campus-market/elasticsearch:8.18.8-smartcn",true).withDockerfile(Path.of("docker/elasticsearch/Dockerfile"));
+        private final ElasticsearchContainer elasticsearch=es(network,image);
+        private SearchResources(){Startables.deepStart(Stream.of(mysql,elasticsearch)).join();}
+        private void register(DynamicPropertyRegistry r){Base.common(r,mysql);r.add("spring.elasticsearch.uris",()->"http://"+elasticsearch.getHost()+":"+elasticsearch.getMappedPort(9200));r.add("campus.market.storage.endpoint",()->"http://127.0.0.1:1");}
+        private void stop(){elasticsearch.stop();mysql.stop();network.close();}
+    }
 
     private static MySQLContainer<?> mysql(Network n){return new MySQLContainer<>(DockerImageName.parse("mysql:8.4")).withDatabaseName("campus_market").withUsername("campus_market").withPassword("campus_market_local").withNetwork(n).withCreateContainerCmdModifier(c->c.getHostConfig().withMemory(512L*1024*1024));}
     private static GenericContainer<?> minio(Network n){return new GenericContainer<>(DockerImageName.parse("quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z")).withCommand("server /data --console-address :9001").withEnv("MINIO_ROOT_USER","minioadmin").withEnv("MINIO_ROOT_PASSWORD","minioadmin-local").withNetwork(n).withExposedPorts(9000).waitingFor(Wait.forListeningPort());}
