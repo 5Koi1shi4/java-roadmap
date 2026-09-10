@@ -34,7 +34,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 @SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("local")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
-class AuthFlowIT extends SharedContainers {
+class AuthFlowIT extends AuthFlowContainers {
     @LocalServerPort
     private int port;
 
