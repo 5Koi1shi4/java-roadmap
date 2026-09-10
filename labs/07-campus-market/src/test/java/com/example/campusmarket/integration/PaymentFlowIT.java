@@ -234,7 +234,8 @@ class PaymentFlowIT extends SharedContainers {
         assertThat(result.status()).isIn("REQUESTED", "PROCESSING", "UNKNOWN");
         assertThat(jdbc.queryForObject("SELECT reserved_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(30L);
         assertThat(jdbc.queryForObject("SELECT successful_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(0L);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id=? AND event_type LIKE 'REFUND_%'", Integer.class, result.refundId().toString())).isEqualTo(0);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id=? AND event_type='REFUND_REQUESTED'", Integer.class, result.refundId().toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id=? AND event_type IN ('REFUND_SUCCEEDED','REFUND_FAILED')", Integer.class, result.refundId().toString())).isEqualTo(0);
     }
 
     @Test
@@ -249,7 +250,8 @@ class PaymentFlowIT extends SharedContainers {
         assertThat(result.status()).isIn("REQUESTED", "PROCESSING", "UNKNOWN");
         assertThat(jdbc.queryForObject("SELECT reserved_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(30L);
         assertThat(jdbc.queryForObject("SELECT successful_refund_fen FROM payment_order WHERE id=?", Long.class, payment.toString())).isEqualTo(0L);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id=? AND event_type LIKE 'REFUND_%'", Integer.class, result.refundId().toString())).isEqualTo(0);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id=? AND event_type='REFUND_REQUESTED'", Integer.class, result.refundId().toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id=? AND event_type IN ('REFUND_SUCCEEDED','REFUND_FAILED')", Integer.class, result.refundId().toString())).isEqualTo(0);
     }
 
     @Test
@@ -277,7 +279,8 @@ class PaymentFlowIT extends SharedContainers {
 
         assertThat(jdbc.queryForObject("SELECT status FROM refund_order WHERE id=?", String.class, refund.toString())).isEqualTo("REQUESTED");
         assertThat(jdbc.queryForObject("SELECT response_utf8 FROM refund_order WHERE id=?", byte[].class, refund.toString())).isNull();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id=? AND event_type LIKE 'REFUND_%'", Integer.class, refund.toString())).isEqualTo(0);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id=? AND event_type='REFUND_REQUESTED'", Integer.class, refund.toString())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM integration_outbox WHERE aggregate_id=? AND event_type IN ('REFUND_SUCCEEDED','REFUND_FAILED')", Integer.class, refund.toString())).isEqualTo(0);
     }
 
     @Test
