@@ -334,6 +334,7 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
     @Test
     void twoDifferentDisputesSameOrderCannotExceedQuantityOrPaidAmount() throws Exception {
         Fixture f = fixture(2, 100);
+        jdbc.update("UPDATE dispute_case SET disputed_quantity=1 WHERE id=?", f.dispute().toString());
         UUID secondDispute = UUID.randomUUID();
         jdbc.update("INSERT INTO dispute_case (id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,hard_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?,1,'QUANTITY','UNDER_REVIEW',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
             secondDispute.toString(), f.order().toString(), f.buyer().toString());
