@@ -97,11 +97,11 @@ public abstract class SharedContainers {
         registry.add("spring.rabbitmq.password", RABBITMQ::getAdminPassword);
         registry.add("spring.elasticsearch.uris", () -> "http://" + ELASTICSEARCH_PROXY.getContainerIpAddress() + ":" + ELASTICSEARCH_PROXY.getProxyPort());
         registry.add("campus.market.storage.endpoint", () -> "http://" + MINIO_PROXY.getContainerIpAddress() + ":" + MINIO_PROXY.getProxyPort());
-        registry.add("campus.market.order.deadline.enabled", () -> "false");
-        registry.add("campus.market.payment.reconciliation.enabled", () -> "false");
-        registry.add("campus.market.dispute.deadline.enabled", () -> "false");
-        registry.add("campus.market.dispute.return-reconciliation.enabled", () -> "false");
-        registry.add("campus.market.warranty.deadline.enabled", () -> "false");
+        registry.add("campus.market.order.deadline.initial-delay-ms", () -> "86400000");
+        registry.add("campus.market.payment.reconciliation.initial-delay-ms", () -> "86400000");
+        registry.add("campus.market.dispute.deadline.initial-delay-ms", () -> "86400000");
+        registry.add("campus.market.dispute.return-reconciliation.initial-delay-ms", () -> "86400000");
+        registry.add("campus.market.warranty.deadline.initial-delay-ms", () -> "86400000");
         registry.add("campus.market.search.dispatcher.enabled", () -> "false");
     }
 }
