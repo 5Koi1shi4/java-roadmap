@@ -27,11 +27,11 @@
 ### Task 1: Capture Preconditions and Recovery References
 
 **Files:**
-- Inspect: `E:/test/work/java-roadmap/.git/` through Git commands only
-- Preserve: `E:/test/work/java-roadmap/labs/02-redis-cache/.env.example`
-- Preserve: `E:/test/work/java-roadmap/.worktrees/redis-cache/`
-- Preserve: `E:/test/work/java-roadmap/.worktrees/seckill-inventory/`
-- Preserve: `E:/test/work/java-roadmap/.worktrees/order-mq-reliable-messaging/`
+- Inspect: `<workspace>/java-roadmap/.git/` through Git commands only
+- Preserve: `<workspace>/java-roadmap/labs/02-redis-cache/.env.example`
+- Preserve: `<workspace>/java-roadmap/.worktrees/redis-cache/`
+- Preserve: `<workspace>/java-roadmap/.worktrees/seckill-inventory/`
+- Preserve: `<workspace>/java-roadmap/.worktrees/order-mq-reliable-messaging/`
 
 **Interfaces:**
 - Consumes: expected refs `origin/main=04e131dabc41e205e9fb8ade50139ba895e4d558`, `learning/redis-cache=e58183befbc54c7e3cf686f526e0a11afd11c0d2`, `learning/seckill-inventory=b1b7ffc25d67d0923ff47e390e5517f7aa3ff406`, `feat/order-mq-reliable-messaging=2ab998bd92f23295b36f6abffede674b8878dfa9`.
@@ -39,21 +39,21 @@
 
 - [ ] **Step 1: Verify exact local and tracked remote heads**
 
-Run from `E:\test\work\java-roadmap`:
+Run from `<workspace>\java-roadmap`:
 
 ```powershell
-git -c safe.directory='E:/test/work/java-roadmap' rev-parse origin/main
-git -c safe.directory='E:/test/work/java-roadmap' rev-parse main
-git -c safe.directory='E:/test/work/java-roadmap' rev-parse learning/redis-cache
-git -c safe.directory='E:/test/work/java-roadmap' rev-parse learning/seckill-inventory
-git -c safe.directory='E:/test/work/java-roadmap' rev-parse feat/order-mq-reliable-messaging
-git -c safe.directory='E:/test/work/java-roadmap' status --short --branch
-git -c safe.directory='E:/test/work/java-roadmap' show-ref --verify --quiet refs/heads/rewrite/security-rbac
+git -c safe.directory='<workspace>/java-roadmap' rev-parse origin/main
+git -c safe.directory='<workspace>/java-roadmap' rev-parse main
+git -c safe.directory='<workspace>/java-roadmap' rev-parse learning/redis-cache
+git -c safe.directory='<workspace>/java-roadmap' rev-parse learning/seckill-inventory
+git -c safe.directory='<workspace>/java-roadmap' rev-parse feat/order-mq-reliable-messaging
+git -c safe.directory='<workspace>/java-roadmap' status --short --branch
+git -c safe.directory='<workspace>/java-roadmap' show-ref --verify --quiet refs/heads/rewrite/security-rbac
 if ($LASTEXITCODE -eq 0) { throw 'Unexpected pre-existing rewrite ref' }
-if (Test-Path -LiteralPath 'E:\test\work\java-roadmap-branch-rewrite') { throw 'Unexpected pre-existing rewrite root' }
-git -c safe.directory='E:/test/work/java-roadmap/.worktrees/redis-cache' -C .worktrees/redis-cache status --short --branch
-git -c safe.directory='E:/test/work/java-roadmap/.worktrees/seckill-inventory' -C .worktrees/seckill-inventory status --short --branch
-git -c safe.directory='E:/test/work/java-roadmap/.worktrees/order-mq-reliable-messaging' -C .worktrees/order-mq-reliable-messaging status --short --branch
+if (Test-Path -LiteralPath '<workspace>\java-roadmap-branch-rewrite') { throw 'Unexpected pre-existing rewrite root' }
+git -c safe.directory='<workspace>/java-roadmap/.worktrees/redis-cache' -C .worktrees/redis-cache status --short --branch
+git -c safe.directory='<workspace>/java-roadmap/.worktrees/seckill-inventory' -C .worktrees/seckill-inventory status --short --branch
+git -c safe.directory='<workspace>/java-roadmap/.worktrees/order-mq-reliable-messaging' -C .worktrees/order-mq-reliable-messaging status --short --branch
 ```
 
 Expected: the four published heads equal the values in **Interfaces**; `main` contains only the known modified `.env.example`; Redis and seckill contain only their already-recorded untracked files; order is clean. Stop if any tracked remote head differs.
@@ -69,11 +69,11 @@ Expected: one SHA-256 value. Store the hash in the task report without file cont
 - [ ] **Step 3: Create local recovery refs**
 
 ```powershell
-git -c safe.directory='E:/test/work/java-roadmap' branch backup/2026-08-23/main-before-isolation main
-git -c safe.directory='E:/test/work/java-roadmap' branch backup/2026-08-23/redis-before-isolation learning/redis-cache
-git -c safe.directory='E:/test/work/java-roadmap' branch backup/2026-08-23/seckill-before-isolation learning/seckill-inventory
-git -c safe.directory='E:/test/work/java-roadmap' branch backup/2026-08-23/order-before-isolation feat/order-mq-reliable-messaging
-git -c safe.directory='E:/test/work/java-roadmap' show-ref --heads | Select-String 'backup/2026-08-23/'
+git -c safe.directory='<workspace>/java-roadmap' branch backup/2026-08-23/main-before-isolation main
+git -c safe.directory='<workspace>/java-roadmap' branch backup/2026-08-23/redis-before-isolation learning/redis-cache
+git -c safe.directory='<workspace>/java-roadmap' branch backup/2026-08-23/seckill-before-isolation learning/seckill-inventory
+git -c safe.directory='<workspace>/java-roadmap' branch backup/2026-08-23/order-before-isolation feat/order-mq-reliable-messaging
+git -c safe.directory='<workspace>/java-roadmap' show-ref --heads | Select-String 'backup/2026-08-23/'
 ```
 
 Expected: four local backup refs point to the original heads. Do not configure upstreams and do not push these refs.
@@ -98,8 +98,8 @@ This task changes refs only. Reviewer confirms that no working-tree file or remo
 - [ ] **Step 1: Stash only the known modified experiment file**
 
 ```powershell
-git -c safe.directory='E:/test/work/java-roadmap' stash push -m 'preserve redis env example before branch isolation' -- labs/02-redis-cache/.env.example
-git -c safe.directory='E:/test/work/java-roadmap' status --short
+git -c safe.directory='<workspace>/java-roadmap' stash push -m 'preserve redis env example before branch isolation' -- labs/02-redis-cache/.env.example
+git -c safe.directory='<workspace>/java-roadmap' status --short
 ```
 
 Expected: main worktree is clean and the stash contains only `labs/02-redis-cache/.env.example`.
@@ -107,9 +107,9 @@ Expected: main worktree is clean and the stash contains only `labs/02-redis-cach
 - [ ] **Step 2: Drop the unpublished `AGENTS.md` commit while replaying later documentation commits**
 
 ```powershell
-git -c safe.directory='E:/test/work/java-roadmap' rebase --onto 1ada79b 594a0af main
-git -c safe.directory='E:/test/work/java-roadmap' log --oneline --decorate origin/main..main
-git -c safe.directory='E:/test/work/java-roadmap' log --format='%H' origin/main..main -- AGENTS.md
+git -c safe.directory='<workspace>/java-roadmap' rebase --onto 1ada79b 594a0af main
+git -c safe.directory='<workspace>/java-roadmap' log --oneline --decorate origin/main..main
+git -c safe.directory='<workspace>/java-roadmap' log --format='%H' origin/main..main -- AGENTS.md
 ```
 
 Expected: order design/plan plus the isolated-branch spec and this plan remain; the final command prints nothing.
@@ -117,10 +117,10 @@ Expected: order design/plan plus the isolated-branch spec and this plan remain; 
 - [ ] **Step 3: Restore `AGENTS.md` as an untracked local file without shell redirection**
 
 ```powershell
-git -c safe.directory='E:/test/work/java-roadmap' checkout backup/2026-08-23/main-before-isolation -- AGENTS.md
-git -c safe.directory='E:/test/work/java-roadmap' reset HEAD -- AGENTS.md
+git -c safe.directory='<workspace>/java-roadmap' checkout backup/2026-08-23/main-before-isolation -- AGENTS.md
+git -c safe.directory='<workspace>/java-roadmap' reset HEAD -- AGENTS.md
 Test-Path -LiteralPath 'AGENTS.md'
-git -c safe.directory='E:/test/work/java-roadmap' status --short -- AGENTS.md
+git -c safe.directory='<workspace>/java-roadmap' status --short -- AGENTS.md
 ```
 
 Expected: `Test-Path` is `True`; status reports `?? AGENTS.md` until the ignore rule is added; the file is not staged.
@@ -128,8 +128,8 @@ Expected: `Test-Path` is `True`; status reports `?? AGENTS.md` until the ignore 
 - [ ] **Step 4: Restore the user's dirty file**
 
 ```powershell
-git -c safe.directory='E:/test/work/java-roadmap' stash pop
-git -c safe.directory='E:/test/work/java-roadmap' status --short
+git -c safe.directory='<workspace>/java-roadmap' stash pop
+git -c safe.directory='<workspace>/java-roadmap' status --short
 ```
 
 Expected: `labs/02-redis-cache/.env.example` is modified exactly as before and `AGENTS.md` is untracked. If stash application conflicts, stop and restore from the Task 1 backup ref; do not resolve by discarding either side.
@@ -162,8 +162,8 @@ Expected: the hash exactly matches Task 1.
 - [ ] **Step 1: Bring accepted experiment-four center documents onto `main`**
 
 ```powershell
-git -c safe.directory='E:/test/work/java-roadmap' checkout backup/2026-08-23/order-before-isolation -- interview/question-bank.md notes/learning-log.md references/README.md
-git -c safe.directory='E:/test/work/java-roadmap' diff --cached --name-status
+git -c safe.directory='<workspace>/java-roadmap' checkout backup/2026-08-23/order-before-isolation -- interview/question-bank.md notes/learning-log.md references/README.md
+git -c safe.directory='<workspace>/java-roadmap' diff --cached --name-status
 ```
 
 Expected: only the three center-document paths are staged.
@@ -203,15 +203,15 @@ First verify the resolved target:
 
 ```powershell
 (Resolve-Path -LiteralPath 'labs').Path
-git -c safe.directory='E:/test/work/java-roadmap' ls-files labs | Measure-Object
+git -c safe.directory='<workspace>/java-roadmap' ls-files labs | Measure-Object
 ```
 
-Expected: resolved path is exactly `E:\test\work\java-roadmap\labs`; the tracked-file count is nonzero.
+Expected: resolved path is exactly `<workspace>\java-roadmap\labs`; the tracked-file count is nonzero.
 
 Then remove only from the index:
 
 ```powershell
-git -c safe.directory='E:/test/work/java-roadmap' rm -r --cached -f -- labs
+git -c safe.directory='<workspace>/java-roadmap' rm -r --cached -f -- labs
 Test-Path -LiteralPath 'labs/01-security-rbac/README.md'
 Test-Path -LiteralPath 'labs/02-redis-cache/.env.example'
 Test-Path -LiteralPath 'labs/03-seckill-inventory/README.md'
@@ -222,9 +222,9 @@ Expected: all three `Test-Path` calls are `True`; Git stages deletions but does 
 - [ ] **Step 5: Verify local-only protection and user data preservation**
 
 ```powershell
-git -c safe.directory='E:/test/work/java-roadmap' check-ignore -v AGENTS.md labs/02-redis-cache/.env.example
+git -c safe.directory='<workspace>/java-roadmap' check-ignore -v AGENTS.md labs/02-redis-cache/.env.example
 Get-FileHash -Algorithm SHA256 -LiteralPath 'labs/02-redis-cache/.env.example' | Select-Object Algorithm, Hash, Path
-git -c safe.directory='E:/test/work/java-roadmap' status --short --ignored
+git -c safe.directory='<workspace>/java-roadmap' status --short --ignored
 ```
 
 Expected: both local paths are ignored, the hash matches Task 1, and neither appears in the staged additions.
@@ -232,9 +232,9 @@ Expected: both local paths are ignored, the hash matches Task 1, and neither app
 - [ ] **Step 6: Validate and commit the documentation center**
 
 ```powershell
-git -c safe.directory='E:/test/work/java-roadmap' diff --cached --check
-git -c safe.directory='E:/test/work/java-roadmap' diff --cached --name-status
-git -c safe.directory='E:/test/work/java-roadmap' grep --cached -n '\](labs/' -- README.md docs notes interview references compose
+git -c safe.directory='<workspace>/java-roadmap' diff --cached --check
+git -c safe.directory='<workspace>/java-roadmap' diff --cached --name-status
+git -c safe.directory='<workspace>/java-roadmap' grep --cached -n '\](labs/' -- README.md docs notes interview references compose
 ```
 
 Expected: diff check has no output and the final command finds no relative Markdown link into the removed `main` `labs/` tree.
@@ -242,7 +242,7 @@ Expected: diff check has no output and the final command finds no relative Markd
 Commit only the staged documentation-center migration:
 
 ```powershell
-git -c safe.directory='E:/test/work/java-roadmap' commit -m "refactor(repo): make main a documentation center"
+git -c safe.directory='<workspace>/java-roadmap' commit -m "refactor(repo): make main a documentation center"
 ```
 
 ---
@@ -250,11 +250,11 @@ git -c safe.directory='E:/test/work/java-roadmap' commit -m "refactor(repo): mak
 ### Task 4: Build Four History-Preserving Candidate Branches
 
 **Files:**
-- Create temporarily: `E:/test/work/java-roadmap-branch-rewrite/keep-path.sh`
-- Create temporarily: `E:/test/work/java-roadmap-branch-rewrite/security/`
-- Create temporarily: `E:/test/work/java-roadmap-branch-rewrite/redis/`
-- Create temporarily: `E:/test/work/java-roadmap-branch-rewrite/seckill/`
-- Create temporarily: `E:/test/work/java-roadmap-branch-rewrite/order/`
+- Create temporarily: `<workspace>/java-roadmap-branch-rewrite/keep-path.sh`
+- Create temporarily: `<workspace>/java-roadmap-branch-rewrite/security/`
+- Create temporarily: `<workspace>/java-roadmap-branch-rewrite/redis/`
+- Create temporarily: `<workspace>/java-roadmap-branch-rewrite/seckill/`
+- Create temporarily: `<workspace>/java-roadmap-branch-rewrite/order/`
 - Create in each candidate branch: `.gitignore`
 
 **Interfaces:**
@@ -268,17 +268,17 @@ git -c safe.directory='E:/test/work/java-roadmap' commit -m "refactor(repo): mak
 - [ ] **Step 1: Verify and create the temporary rewrite root**
 
 ```powershell
-$rewriteRoot = 'E:\test\work\java-roadmap-branch-rewrite'
+$rewriteRoot = '<workspace>\java-roadmap-branch-rewrite'
 if (Test-Path -LiteralPath $rewriteRoot) { throw "Rewrite root already exists: $rewriteRoot" }
 New-Item -ItemType Directory -Path $rewriteRoot
 (Resolve-Path -LiteralPath $rewriteRoot).Path
 ```
 
-Expected: exact resolved path `E:\test\work\java-roadmap-branch-rewrite`. No existing path is overwritten.
+Expected: exact resolved path `<workspace>\java-roadmap-branch-rewrite`. No existing path is overwritten.
 
 - [ ] **Step 2: Create the exact path-filter helper with `apply_patch`**
 
-Create `E:/test/work/java-roadmap-branch-rewrite/keep-path.sh` with:
+Create `<workspace>/java-roadmap-branch-rewrite/keep-path.sh` with:
 
 ```sh
 #!/bin/sh
@@ -294,10 +294,10 @@ This script changes only the temporary clone index used by `git filter-branch`.
 - [ ] **Step 3: Clone the four canonical sources locally**
 
 ```powershell
-git clone --no-local --branch backup/2026-08-23/redis-before-isolation 'E:\test\work\java-roadmap' 'E:\test\work\java-roadmap-branch-rewrite\security'
-git clone --no-local --branch backup/2026-08-23/redis-before-isolation 'E:\test\work\java-roadmap' 'E:\test\work\java-roadmap-branch-rewrite\redis'
-git clone --no-local --branch backup/2026-08-23/seckill-before-isolation 'E:\test\work\java-roadmap' 'E:\test\work\java-roadmap-branch-rewrite\seckill'
-git clone --no-local --branch backup/2026-08-23/order-before-isolation 'E:\test\work\java-roadmap' 'E:\test\work\java-roadmap-branch-rewrite\order'
+git clone --no-local --branch backup/2026-08-23/redis-before-isolation '<workspace>\java-roadmap' '<workspace>\java-roadmap-branch-rewrite\security'
+git clone --no-local --branch backup/2026-08-23/redis-before-isolation '<workspace>\java-roadmap' '<workspace>\java-roadmap-branch-rewrite\redis'
+git clone --no-local --branch backup/2026-08-23/seckill-before-isolation '<workspace>\java-roadmap' '<workspace>\java-roadmap-branch-rewrite\seckill'
+git clone --no-local --branch backup/2026-08-23/order-before-isolation '<workspace>\java-roadmap' '<workspace>\java-roadmap-branch-rewrite\order'
 ```
 
 Expected: four independent clones exist; no remote network access is used.
@@ -307,8 +307,8 @@ Expected: four independent clones exist; no remote network access is used.
 ```powershell
 $env:FILTER_BRANCH_SQUELCH_WARNING = '1'
 $env:KEEP_PATH = 'labs/01-security-rbac'
-git -C 'E:\test\work\java-roadmap-branch-rewrite\security' filter-branch --prune-empty --index-filter 'sh /e/test/work/java-roadmap-branch-rewrite/keep-path.sh' -- backup/2026-08-23/redis-before-isolation
-git -C 'E:\test\work\java-roadmap-branch-rewrite\security' branch -m learning/security-rbac
+git -C '<workspace>\java-roadmap-branch-rewrite\security' filter-branch --prune-empty --index-filter 'sh /e/test/work/java-roadmap-branch-rewrite/keep-path.sh' -- backup/2026-08-23/redis-before-isolation
+git -C '<workspace>\java-roadmap-branch-rewrite\security' branch -m learning/security-rbac
 ```
 
 Expected: active tree contains only `labs/01-security-rbac` before `.gitignore` is added.
@@ -317,8 +317,8 @@ Expected: active tree contains only `labs/01-security-rbac` before `.gitignore` 
 
 ```powershell
 $env:KEEP_PATH = 'labs/02-redis-cache'
-git -C 'E:\test\work\java-roadmap-branch-rewrite\redis' filter-branch --prune-empty --index-filter 'sh /e/test/work/java-roadmap-branch-rewrite/keep-path.sh' -- backup/2026-08-23/redis-before-isolation
-git -C 'E:\test\work\java-roadmap-branch-rewrite\redis' branch -m learning/redis-cache
+git -C '<workspace>\java-roadmap-branch-rewrite\redis' filter-branch --prune-empty --index-filter 'sh /e/test/work/java-roadmap-branch-rewrite/keep-path.sh' -- backup/2026-08-23/redis-before-isolation
+git -C '<workspace>\java-roadmap-branch-rewrite\redis' branch -m learning/redis-cache
 ```
 
 Expected: active tree contains only `labs/02-redis-cache` before `.gitignore` is added.
@@ -327,8 +327,8 @@ Expected: active tree contains only `labs/02-redis-cache` before `.gitignore` is
 
 ```powershell
 $env:KEEP_PATH = 'labs/03-seckill-inventory'
-git -C 'E:\test\work\java-roadmap-branch-rewrite\seckill' filter-branch --prune-empty --index-filter 'sh /e/test/work/java-roadmap-branch-rewrite/keep-path.sh' -- backup/2026-08-23/seckill-before-isolation
-git -C 'E:\test\work\java-roadmap-branch-rewrite\seckill' branch -m learning/seckill-inventory
+git -C '<workspace>\java-roadmap-branch-rewrite\seckill' filter-branch --prune-empty --index-filter 'sh /e/test/work/java-roadmap-branch-rewrite/keep-path.sh' -- backup/2026-08-23/seckill-before-isolation
+git -C '<workspace>\java-roadmap-branch-rewrite\seckill' branch -m learning/seckill-inventory
 ```
 
 Expected: active tree contains only `labs/03-seckill-inventory` before `.gitignore` is added.
@@ -337,8 +337,8 @@ Expected: active tree contains only `labs/03-seckill-inventory` before `.gitigno
 
 ```powershell
 $env:KEEP_PATH = 'labs/04-order-mq'
-git -C 'E:\test\work\java-roadmap-branch-rewrite\order' filter-branch --prune-empty --index-filter 'sh /e/test/work/java-roadmap-branch-rewrite/keep-path.sh' -- backup/2026-08-23/order-before-isolation
-git -C 'E:\test\work\java-roadmap-branch-rewrite\order' branch -m feat/order-mq-reliable-messaging
+git -C '<workspace>\java-roadmap-branch-rewrite\order' filter-branch --prune-empty --index-filter 'sh /e/test/work/java-roadmap-branch-rewrite/keep-path.sh' -- backup/2026-08-23/order-before-isolation
+git -C '<workspace>\java-roadmap-branch-rewrite\order' branch -m feat/order-mq-reliable-messaging
 Remove-Item Env:KEEP_PATH
 Remove-Item Env:FILTER_BRANCH_SQUELCH_WARNING
 ```
@@ -372,14 +372,14 @@ Thumbs.db
 Commit separately in each candidate:
 
 ```powershell
-git -C 'E:\test\work\java-roadmap-branch-rewrite\security' add .gitignore
-git -C 'E:\test\work\java-roadmap-branch-rewrite\security' commit -m 'chore(security-rbac): isolate experiment branch'
-git -C 'E:\test\work\java-roadmap-branch-rewrite\redis' add .gitignore
-git -C 'E:\test\work\java-roadmap-branch-rewrite\redis' commit -m 'chore(redis-cache): isolate experiment branch'
-git -C 'E:\test\work\java-roadmap-branch-rewrite\seckill' add .gitignore
-git -C 'E:\test\work\java-roadmap-branch-rewrite\seckill' commit -m 'chore(seckill): isolate experiment branch'
-git -C 'E:\test\work\java-roadmap-branch-rewrite\order' add .gitignore
-git -C 'E:\test\work\java-roadmap-branch-rewrite\order' commit -m 'chore(order-mq): isolate experiment branch'
+git -C '<workspace>\java-roadmap-branch-rewrite\security' add .gitignore
+git -C '<workspace>\java-roadmap-branch-rewrite\security' commit -m 'chore(security-rbac): isolate experiment branch'
+git -C '<workspace>\java-roadmap-branch-rewrite\redis' add .gitignore
+git -C '<workspace>\java-roadmap-branch-rewrite\redis' commit -m 'chore(redis-cache): isolate experiment branch'
+git -C '<workspace>\java-roadmap-branch-rewrite\seckill' add .gitignore
+git -C '<workspace>\java-roadmap-branch-rewrite\seckill' commit -m 'chore(seckill): isolate experiment branch'
+git -C '<workspace>\java-roadmap-branch-rewrite\order' add .gitignore
+git -C '<workspace>\java-roadmap-branch-rewrite\order' commit -m 'chore(order-mq): isolate experiment branch'
 ```
 
 ---
@@ -399,14 +399,14 @@ git -C 'E:\test\work\java-roadmap-branch-rewrite\order' commit -m 'chore(order-m
 Run the source and candidate `rev-parse` commands in pairs:
 
 ```powershell
-git -c safe.directory='E:/test/work/java-roadmap' rev-parse 'backup/2026-08-23/redis-before-isolation:labs/01-security-rbac'
-git -C 'E:\test\work\java-roadmap-branch-rewrite\security' rev-parse 'learning/security-rbac:labs/01-security-rbac'
-git -c safe.directory='E:/test/work/java-roadmap' rev-parse 'backup/2026-08-23/redis-before-isolation:labs/02-redis-cache'
-git -C 'E:\test\work\java-roadmap-branch-rewrite\redis' rev-parse 'learning/redis-cache:labs/02-redis-cache'
-git -c safe.directory='E:/test/work/java-roadmap' rev-parse 'backup/2026-08-23/seckill-before-isolation:labs/03-seckill-inventory'
-git -C 'E:\test\work\java-roadmap-branch-rewrite\seckill' rev-parse 'learning/seckill-inventory:labs/03-seckill-inventory'
-git -c safe.directory='E:/test/work/java-roadmap' rev-parse 'backup/2026-08-23/order-before-isolation:labs/04-order-mq'
-git -C 'E:\test\work\java-roadmap-branch-rewrite\order' rev-parse 'feat/order-mq-reliable-messaging:labs/04-order-mq'
+git -c safe.directory='<workspace>/java-roadmap' rev-parse 'backup/2026-08-23/redis-before-isolation:labs/01-security-rbac'
+git -C '<workspace>\java-roadmap-branch-rewrite\security' rev-parse 'learning/security-rbac:labs/01-security-rbac'
+git -c safe.directory='<workspace>/java-roadmap' rev-parse 'backup/2026-08-23/redis-before-isolation:labs/02-redis-cache'
+git -C '<workspace>\java-roadmap-branch-rewrite\redis' rev-parse 'learning/redis-cache:labs/02-redis-cache'
+git -c safe.directory='<workspace>/java-roadmap' rev-parse 'backup/2026-08-23/seckill-before-isolation:labs/03-seckill-inventory'
+git -C '<workspace>\java-roadmap-branch-rewrite\seckill' rev-parse 'learning/seckill-inventory:labs/03-seckill-inventory'
+git -c safe.directory='<workspace>/java-roadmap' rev-parse 'backup/2026-08-23/order-before-isolation:labs/04-order-mq'
+git -C '<workspace>\java-roadmap-branch-rewrite\order' rev-parse 'feat/order-mq-reliable-messaging:labs/04-order-mq'
 ```
 
 Expected: each source/candidate pair is identical. Any mismatch blocks import and push.
@@ -441,11 +441,11 @@ Expected: no real credential or personal-information finding. Testcontainers fix
 - [ ] **Step 5: Import candidate objects into primary local refs**
 
 ```powershell
-git -c safe.directory='E:/test/work/java-roadmap' fetch 'E:\test\work\java-roadmap-branch-rewrite\security' learning/security-rbac:refs/heads/rewrite/security-rbac
-git -c safe.directory='E:/test/work/java-roadmap' fetch 'E:\test\work\java-roadmap-branch-rewrite\redis' learning/redis-cache:refs/heads/rewrite/redis-cache
-git -c safe.directory='E:/test/work/java-roadmap' fetch 'E:\test\work\java-roadmap-branch-rewrite\seckill' learning/seckill-inventory:refs/heads/rewrite/seckill-inventory
-git -c safe.directory='E:/test/work/java-roadmap' fetch 'E:\test\work\java-roadmap-branch-rewrite\order' feat/order-mq-reliable-messaging:refs/heads/rewrite/order-mq-reliable-messaging
-git -c safe.directory='E:/test/work/java-roadmap' show-ref --heads | Select-String 'refs/heads/rewrite/'
+git -c safe.directory='<workspace>/java-roadmap' fetch '<workspace>\java-roadmap-branch-rewrite\security' learning/security-rbac:refs/heads/rewrite/security-rbac
+git -c safe.directory='<workspace>/java-roadmap' fetch '<workspace>\java-roadmap-branch-rewrite\redis' learning/redis-cache:refs/heads/rewrite/redis-cache
+git -c safe.directory='<workspace>/java-roadmap' fetch '<workspace>\java-roadmap-branch-rewrite\seckill' learning/seckill-inventory:refs/heads/rewrite/seckill-inventory
+git -c safe.directory='<workspace>/java-roadmap' fetch '<workspace>\java-roadmap-branch-rewrite\order' feat/order-mq-reliable-messaging:refs/heads/rewrite/order-mq-reliable-messaging
+git -c safe.directory='<workspace>/java-roadmap' show-ref --heads | Select-String 'refs/heads/rewrite/'
 ```
 
 Expected: four rewrite refs exist locally and no original branch ref has moved yet.
@@ -470,9 +470,9 @@ Expected: four rewrite refs exist locally and no original branch ref has moved y
 - [ ] **Step 1: Detach legacy experiment worktrees without changing their trees**
 
 ```powershell
-git -c safe.directory='E:/test/work/java-roadmap/.worktrees/redis-cache' -C .worktrees/redis-cache switch --detach e58183befbc54c7e3cf686f526e0a11afd11c0d2
-git -c safe.directory='E:/test/work/java-roadmap/.worktrees/seckill-inventory' -C .worktrees/seckill-inventory switch --detach b1b7ffc25d67d0923ff47e390e5517f7aa3ff406
-git -c safe.directory='E:/test/work/java-roadmap/.worktrees/order-mq-reliable-messaging' -C .worktrees/order-mq-reliable-messaging switch --detach 2ab998bd92f23295b36f6abffede674b8878dfa9
+git -c safe.directory='<workspace>/java-roadmap/.worktrees/redis-cache' -C .worktrees/redis-cache switch --detach e58183befbc54c7e3cf686f526e0a11afd11c0d2
+git -c safe.directory='<workspace>/java-roadmap/.worktrees/seckill-inventory' -C .worktrees/seckill-inventory switch --detach b1b7ffc25d67d0923ff47e390e5517f7aa3ff406
+git -c safe.directory='<workspace>/java-roadmap/.worktrees/order-mq-reliable-messaging' -C .worktrees/order-mq-reliable-messaging switch --detach 2ab998bd92f23295b36f6abffede674b8878dfa9
 ```
 
 Expected: tracked files remain unchanged; Redis and seckill untracked files remain present; each legacy worktree reports detached HEAD at its original SHA.
@@ -480,10 +480,10 @@ Expected: tracked files remain unchanged; Redis and seckill untracked files rema
 - [ ] **Step 2: Move canonical local branch refs to reviewed candidates**
 
 ```powershell
-git -c safe.directory='E:/test/work/java-roadmap' branch learning/security-rbac rewrite/security-rbac
-git -c safe.directory='E:/test/work/java-roadmap' branch -f learning/redis-cache rewrite/redis-cache
-git -c safe.directory='E:/test/work/java-roadmap' branch -f learning/seckill-inventory rewrite/seckill-inventory
-git -c safe.directory='E:/test/work/java-roadmap' branch -f feat/order-mq-reliable-messaging rewrite/order-mq-reliable-messaging
+git -c safe.directory='<workspace>/java-roadmap' branch learning/security-rbac rewrite/security-rbac
+git -c safe.directory='<workspace>/java-roadmap' branch -f learning/redis-cache rewrite/redis-cache
+git -c safe.directory='<workspace>/java-roadmap' branch -f learning/seckill-inventory rewrite/seckill-inventory
+git -c safe.directory='<workspace>/java-roadmap' branch -f feat/order-mq-reliable-messaging rewrite/order-mq-reliable-messaging
 ```
 
 Expected: backup refs still point to original SHAs; canonical local branches now point to isolated heads.
@@ -491,11 +491,11 @@ Expected: backup refs still point to original SHAs; canonical local branches now
 - [ ] **Step 3: Create new isolated worktrees**
 
 ```powershell
-git -c safe.directory='E:/test/work/java-roadmap' worktree add '.worktrees/security-rbac-isolated' learning/security-rbac
-git -c safe.directory='E:/test/work/java-roadmap' worktree add '.worktrees/redis-cache-isolated' learning/redis-cache
-git -c safe.directory='E:/test/work/java-roadmap' worktree add '.worktrees/seckill-inventory-isolated' learning/seckill-inventory
-git -c safe.directory='E:/test/work/java-roadmap' worktree add '.worktrees/order-mq-isolated' feat/order-mq-reliable-messaging
-git -c safe.directory='E:/test/work/java-roadmap' worktree list --porcelain
+git -c safe.directory='<workspace>/java-roadmap' worktree add '.worktrees/security-rbac-isolated' learning/security-rbac
+git -c safe.directory='<workspace>/java-roadmap' worktree add '.worktrees/redis-cache-isolated' learning/redis-cache
+git -c safe.directory='<workspace>/java-roadmap' worktree add '.worktrees/seckill-inventory-isolated' learning/seckill-inventory
+git -c safe.directory='<workspace>/java-roadmap' worktree add '.worktrees/order-mq-isolated' feat/order-mq-reliable-messaging
+git -c safe.directory='<workspace>/java-roadmap' worktree list --porcelain
 ```
 
 Expected: four new worktrees are attached to the four canonical isolated branches; three legacy worktrees remain detached.
@@ -565,13 +565,13 @@ For each branch, a separate Luna-high reviewer checks Maven evidence, clean stat
 Verify:
 
 ```powershell
-git -c safe.directory='E:/test/work/java-roadmap' diff --check origin/main..main
-git -c safe.directory='E:/test/work/java-roadmap' log --format='%H' origin/main..main -- AGENTS.md
-git -c safe.directory='E:/test/work/java-roadmap' ls-tree -r --name-only main
-git -c safe.directory='E:/test/work/java-roadmap' ls-tree -r --name-only learning/security-rbac
-git -c safe.directory='E:/test/work/java-roadmap' ls-tree -r --name-only learning/redis-cache
-git -c safe.directory='E:/test/work/java-roadmap' ls-tree -r --name-only learning/seckill-inventory
-git -c safe.directory='E:/test/work/java-roadmap' ls-tree -r --name-only feat/order-mq-reliable-messaging
+git -c safe.directory='<workspace>/java-roadmap' diff --check origin/main..main
+git -c safe.directory='<workspace>/java-roadmap' log --format='%H' origin/main..main -- AGENTS.md
+git -c safe.directory='<workspace>/java-roadmap' ls-tree -r --name-only main
+git -c safe.directory='<workspace>/java-roadmap' ls-tree -r --name-only learning/security-rbac
+git -c safe.directory='<workspace>/java-roadmap' ls-tree -r --name-only learning/redis-cache
+git -c safe.directory='<workspace>/java-roadmap' ls-tree -r --name-only learning/seckill-inventory
+git -c safe.directory='<workspace>/java-roadmap' ls-tree -r --name-only feat/order-mq-reliable-messaging
 ```
 
 Expected: main has no `labs/` or `AGENTS.md`; each experiment tree meets its allowlist; all histories pass the redacted sensitive-information scan.
@@ -595,7 +595,7 @@ Any difference blocks the push and requires user review.
 - [ ] **Step 3: Atomically update all five remote refs with exact leases**
 
 ```powershell
-git -c safe.directory='E:/test/work/java-roadmap' push --atomic origin `
+git -c safe.directory='<workspace>/java-roadmap' push --atomic origin `
   --force-with-lease=refs/heads/main:04e131dabc41e205e9fb8ade50139ba895e4d558 `
   --force-with-lease=refs/heads/learning/redis-cache:e58183befbc54c7e3cf686f526e0a11afd11c0d2 `
   --force-with-lease=refs/heads/learning/seckill-inventory:b1b7ffc25d67d0923ff47e390e5517f7aa3ff406 `
@@ -612,8 +612,8 @@ Expected: Git reports one atomic successful update; no backup or `rewrite/*` ref
 Set and verify the new security branch upstream after the successful push:
 
 ```powershell
-git -c safe.directory='E:/test/work/java-roadmap' branch --set-upstream-to=origin/learning/security-rbac learning/security-rbac
-git -c safe.directory='E:/test/work/java-roadmap' for-each-ref --format='%(refname:short)|%(upstream:short)|%(objectname)' refs/heads/main refs/heads/learning refs/heads/feat/order-mq-reliable-messaging
+git -c safe.directory='<workspace>/java-roadmap' branch --set-upstream-to=origin/learning/security-rbac learning/security-rbac
+git -c safe.directory='<workspace>/java-roadmap' for-each-ref --format='%(refname:short)|%(upstream:short)|%(objectname)' refs/heads/main refs/heads/learning refs/heads/feat/order-mq-reliable-messaging
 ```
 
 Expected: every canonical branch tracks its matching `origin/*` ref.
@@ -639,7 +639,7 @@ Read all five remote refs and PR #2 through GitHub/Git. Expected:
 ### Task 9: Cleanup Temporary Rewrite Clones and Document Handoff
 
 **Files:**
-- Delete after verification: `E:/test/work/java-roadmap-branch-rewrite/`
+- Delete after verification: `<workspace>/java-roadmap-branch-rewrite/`
 - Keep: all `backup/2026-08-23/*` refs
 - Keep: detached legacy worktrees containing user files
 - Update if required: `notes/learning-log.md`
@@ -651,8 +651,8 @@ Read all five remote refs and PR #2 through GitHub/Git. Expected:
 - [ ] **Step 1: Verify the deletion target before cleanup**
 
 ```powershell
-$rewriteRoot = (Resolve-Path -LiteralPath 'E:\test\work\java-roadmap-branch-rewrite').Path
-if ($rewriteRoot -ne 'E:\test\work\java-roadmap-branch-rewrite') { throw "Unexpected cleanup target: $rewriteRoot" }
+$rewriteRoot = (Resolve-Path -LiteralPath '<workspace>\java-roadmap-branch-rewrite').Path
+if ($rewriteRoot -ne '<workspace>\java-roadmap-branch-rewrite') { throw "Unexpected cleanup target: $rewriteRoot" }
 Get-ChildItem -LiteralPath $rewriteRoot -Force | Select-Object Name, FullName
 ```
 
@@ -661,8 +661,8 @@ Expected: only the helper and four temporary clones are under the exact rewrite 
 - [ ] **Step 2: Remove only the verified temporary rewrite root**
 
 ```powershell
-Remove-Item -LiteralPath 'E:\test\work\java-roadmap-branch-rewrite' -Recurse -Force
-Test-Path -LiteralPath 'E:\test\work\java-roadmap-branch-rewrite'
+Remove-Item -LiteralPath '<workspace>\java-roadmap-branch-rewrite' -Recurse -Force
+Test-Path -LiteralPath '<workspace>\java-roadmap-branch-rewrite'
 ```
 
 Expected: `False`. This deletion is safe only after Task 8 remote verification and must not target any repository worktree.
@@ -670,9 +670,9 @@ Expected: `False`. This deletion is safe only after Task 8 remote verification a
 - [ ] **Step 3: Produce final status evidence**
 
 ```powershell
-git -c safe.directory='E:/test/work/java-roadmap' status --short --branch
-git -c safe.directory='E:/test/work/java-roadmap' worktree list --porcelain
-git -c safe.directory='E:/test/work/java-roadmap' show-ref --heads | Select-String 'backup/2026-08-23/'
+git -c safe.directory='<workspace>/java-roadmap' status --short --branch
+git -c safe.directory='<workspace>/java-roadmap' worktree list --porcelain
+git -c safe.directory='<workspace>/java-roadmap' show-ref --heads | Select-String 'backup/2026-08-23/'
 Get-FileHash -Algorithm SHA256 -LiteralPath 'labs/02-redis-cache/.env.example' | Select-Object Algorithm, Hash, Path
 ```
 

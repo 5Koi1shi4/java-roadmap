@@ -288,8 +288,8 @@ git commit -m "fix(campus): atomically settle one-shot refunds"
 ### Task 4: 结构修正总验收与恢复 Task 8
 
 **Files:**
-- Modify: `E:/test/work/java-roadmap/.superpowers/sdd/2026-08-30-campus-market/task-8-report.md`
-- Modify: `E:/test/work/java-roadmap/.superpowers/sdd/2026-08-30-campus-market/progress.md`
+- Modify: `<workspace>/java-roadmap/.superpowers/sdd/2026-08-30-campus-market/task-8-report.md`
+- Modify: `<workspace>/java-roadmap/.superpowers/sdd/2026-08-30-campus-market/progress.md`
 - Test: `labs/07-campus-market/src/test/java/com/example/campusmarket/integration/PaymentFlowIT.java`
 - Test: `labs/07-campus-market/src/test/java/com/example/campusmarket/integration/PaymentGatewayContractIT.java`
 

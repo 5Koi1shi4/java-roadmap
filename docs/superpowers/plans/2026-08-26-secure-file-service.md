@@ -124,8 +124,8 @@ Expected: FAIL，`FileSchemaIT` 已真实启动 MySQL 8.4，并因 `upload_sessi
 从已验收实验复制同版本 `mvnw.cmd`，并逐字创建 wrapper 属性；复制后用 `Get-FileHash` 对比来源和目标脚本，哈希必须相同：
 
 ```powershell
-Copy-Item -LiteralPath 'E:\test\work\java-roadmap\.worktrees\elasticsearch-search\labs\05-elasticsearch-search\mvnw.cmd' -Destination 'E:\test\work\java-roadmap\.worktrees\secure-file-service\labs\06-file-service\mvnw.cmd'
-Get-FileHash 'E:\test\work\java-roadmap\.worktrees\elasticsearch-search\labs\05-elasticsearch-search\mvnw.cmd','E:\test\work\java-roadmap\.worktrees\secure-file-service\labs\06-file-service\mvnw.cmd'
+Copy-Item -LiteralPath '<workspace>\java-roadmap\.worktrees\elasticsearch-search\labs\05-elasticsearch-search\mvnw.cmd' -Destination '<workspace>\java-roadmap\.worktrees\secure-file-service\labs\06-file-service\mvnw.cmd'
+Get-FileHash '<workspace>\java-roadmap\.worktrees\elasticsearch-search\labs\05-elasticsearch-search\mvnw.cmd','<workspace>\java-roadmap\.worktrees\secure-file-service\labs\06-file-service\mvnw.cmd'
 ```
 
 Wrapper 属性固定为：
