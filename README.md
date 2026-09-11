@@ -78,7 +78,7 @@
 覆盖校园邮箱、JWT、商品与批量库存、幂等一口价订单、模拟支付与对账、当面交付、三天验收/七天试用、部分退货退款、隔离库存、评价和结算后卖家质保。MySQL 保存交易事实，Redis 只负责验证码和限流；RabbitMQ 通过 Outbox/Inbox、publisher confirm、租约和 fencing 实现可恢复消息；SmartCN Elasticsearch 是可重建读模型；MinIO 保存受案件 ACL 保护的私有媒体和证据。三轮故障演练分别覆盖 RabbitMQ、Elasticsearch、MinIO，并复核库存、退款额度、结算、证据 ACL 和搜索集合不变量。
 
 - 入口：[learning/campus-market/labs/07-campus-market](https://github.com/5Koi1shi4/java-roadmap/tree/learning/campus-market/labs/07-campus-market)
-- 验证：实验代码只保存在独立分支 `learning/campus-market`，不合并到 `main`。JDK 17 下 `mvnw.cmd test` 为 137 项；MySQL 8.4、Redis 7.4、RabbitMQ 3.13、SmartCN Elasticsearch 8.18.8、MinIO 与 Toxiproxy 环境中的完整 `mvnw.cmd verify` 为 251 个 Failsafe/Testcontainers 集成测试；均为 0 failures、0 errors、0 skipped（主体状态提交 `17c0399`）。
+- 验证：实验代码只保存在独立分支 `learning/campus-market`，不合并到 `main`。JDK 17 下 `mvnw.cmd test` 为 137 项；MySQL 8.4、Redis 7.4、RabbitMQ 3.13、SmartCN Elasticsearch 8.18.8、MinIO 与 Toxiproxy 环境中的完整 `mvnw.cmd verify` 为 251 个 Failsafe/Testcontainers 集成测试；均为 0 failures、0 errors、0 skipped（当前状态提交 `78a6c1e`）。
 - 状态与边界：主体交易闭环已通过当前测试基线，但扩展未完成，所以实验七保持“进行中”。正式 CAS、真实支付和真实物流尚未接入；设计路线包括 `7.1` 聊天、`7.2` 竞价、`7.3` 跑腿/代取和真实支付适配器，均需独立完成设计、实现和验收后再更新总状态。
 
 ## 目录导航

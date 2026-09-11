@@ -132,7 +132,7 @@
   - 完成支付 15 分钟、交付 72 小时、确认 48 小时、三天验收、七天试用的数据库时间边界；退货退款依赖可信证明，部分退货进入隔离库存，证据冲突在硬期限进入 `ESCALATED`。
   - 订单结算后保持 `SETTLED`，30/90/180/365 天卖家质保独立流转；裁定产生卖家义务，逾期限制发布/提现，主动筹资或未来结算按唯一业务键抵扣并幂等解限。
   - 可靠协作使用事务 Outbox、RabbitMQ publisher confirm、Inbox、数据库租约和 claim-token fencing；Elasticsearch 使用 SmartCN、外部版本、tombstone、高水位补放和原子别名切换；MinIO 对象通过随机 key、实际读取上限、案件 ACL 和持久清理任务保护。
-- 测试证据：实验分支 `learning/campus-market` 的主体状态提交为 `17c0399`。JDK 17 下最新 `mvnw.cmd test` 为 137 tests、0 failures、0 errors、0 skipped；完整 `mvnw.cmd verify` 的 Failsafe/Testcontainers 为 251 tests、0 failures、0 errors、0 skipped。`CampusMarketJourneyIT` 覆盖教材交易与质保旅程；三轮恢复分别断开 RabbitMQ、Elasticsearch、MinIO，并通过补充阶段核对证据 ACL 与 MySQL/SmartCN Elasticsearch 在售集合。这些结果证明当前主体基线，不代表尚未实现的扩展已经验收。
+- 测试证据：实验分支 `learning/campus-market` 的当前状态提交为 `78a6c1e`。JDK 17 下最新 `mvnw.cmd test` 为 137 tests、0 failures、0 errors、0 skipped；完整 `mvnw.cmd verify` 的 Failsafe/Testcontainers 为 251 tests、0 failures、0 errors、0 skipped。`CampusMarketJourneyIT` 覆盖教材交易与质保旅程；三轮恢复分别断开 RabbitMQ、Elasticsearch、MinIO，并通过补充阶段核对证据 ACL 与 MySQL/SmartCN Elasticsearch 在售集合。这些结果证明当前主体基线，不代表尚未实现的扩展已经验收。
 - 本轮排障：完整套件中消息测试曾被前序支付、退款或质保 Outbox 和旧 Spring 上下文调度器污染。通过关闭共享夹具的默认 Rabbit listener/搜索调度器、延后必须保留的截止任务，并用 `PaymentFlowIT,ReliableMessagingIT` 同 JVM 定点组合验证，区分跨类状态泄漏与 Docker OOM。低内存环境按重型依赖拆段串行运行，内存低于 1 GiB 时停止而不是伪造 skipped 通过。
 - 技术选择及取舍：MySQL 作为交易与截止时间事实源，使并发裁决可由行锁、条件更新和受影响行数证明；代价是更多持久状态和恢复任务。异步外部协作允许短暂积压，但通过幂等键、租约、fencing 和指标收敛。案件证据把统一 404 和“管理员不自动绕过 ACL”置于操作便利之上；真实支付、物流与 CAS 在缺少资质和授权时保持端口而不虚假接入。
 - 扩展实验检查：原始设计存在 `7.1` 聊天、`7.2` 竞价、`7.3` 跑腿/代取和真实支付适配器路线；扩展尚无完整实现和验收提交，因此实验七总状态保持“进行中”。扩展必须另行设计、计划、实现和验收，不能用空代码占位。
