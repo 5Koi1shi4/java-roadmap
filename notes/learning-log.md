@@ -120,3 +120,20 @@
 - 审计与可观测性：上传成功、文件访问与拒绝、ACL grant/revoke/delete、下载授权/完成/失败、token 拒绝和链接签发按既有 `AuditAction` 持久化；上传失败由 session 状态/分类和指标记录，cleanup/recovery 当前没有独立 `AuditRecorder` 动作。审计集中丢弃 token、签名 URL、object key、路径、hash、secret 和异常堆栈；内部 correlation ID 随机生成且不接受客户端覆盖。Micrometer 只使用固定枚举的低基数标签，不把 user/file/hash/blob/object/correlation ID 或异常消息作为标签。
 - 故障与验收证据：`StorageRecoveryDrillIT` 通过 Toxiproxy 连续执行 3 轮“断开 MinIO → 观察失败/积压 → 恢复 route → 运行 recovery/cleanup → 验证收敛”。每轮递归核对测试 bucket：`tmp/` 为空，`blobs/` 的对象集合精确等于数据库 `READY` Blob 的 `object_key` 集合；该 exact-set 结论只覆盖测试 bucket 与数据库已知对象，不扩大为任意外部对象的独立盘点证明。实验分支 `learning/secure-file-service` 最终提交为 `18603f1`；fresh `mvnw.cmd clean verify` 的 Surefire 96、Failsafe 80 均为 0 failures、0 errors、0 skipped。
 - 技术取舍：使用短事务、状态机、租约和补偿换取跨 MySQL/对象存储故障后的可恢复性，代价是允许可观测的中间态和最终一致窗口；去重节省存储但必须隔离逻辑授权和接口行为；presigned URL 降低应用流量却牺牲签发后的即时撤权。
+
+## 2026-09-11
+
+- 今日目标：完成实验七校园二手交易平台的全量验收，按前六个实验补齐运行、排障、学习复盘和面试追问，并检查扩展实验状态。
+- 完成内容：
+  - 建立校园邮箱验证码、注册登录和 JWT 链路；校园邮箱只证明邮箱控制权，正式 CAS 仅保留 `ExternalIdentityProvider` 端口。
+  - 完成商品草稿、私有媒体、发布/下架、批量库存与流水；订单只含一个发布项但支持多数量，金额统一使用人民币整数分，库存通过数据库条件更新防止超卖。
+  - 以 `Idempotency-Key + 请求摘要` 实现命令重放；同键同参返回原始 UTF-8 终态响应，同键异参返回 409，失败事务不保留阻塞记录。
+  - 模拟支付适配器覆盖签名回调、nonce 防重放、单次支付尝试、退款额度预占和 `UNKNOWN` 主动对账；不得把未知结果当失败后重新创建请求。
+  - 完成支付 15 分钟、交付 72 小时、确认 48 小时、三天验收、七天试用的数据库时间边界；退货退款依赖可信证明，部分退货进入隔离库存，证据冲突在硬期限进入 `ESCALATED`。
+  - 订单结算后保持 `SETTLED`，30/90/180/365 天卖家质保独立流转；裁定产生卖家义务，逾期限制发布/提现，主动筹资或未来结算按唯一业务键抵扣并幂等解限。
+  - 可靠协作使用事务 Outbox、RabbitMQ publisher confirm、Inbox、数据库租约和 claim-token fencing；Elasticsearch 使用 SmartCN、外部版本、tombstone、高水位补放和原子别名切换；MinIO 对象通过随机 key、实际读取上限、案件 ACL 和持久清理任务保护。
+- 测试证据：实验分支 `learning/campus-market` 的文档验收提交为 `85e1d1f`。JDK 17 下最新 `mvnw.cmd test` 为 137 tests、0 failures、0 errors、0 skipped；完整 `mvnw.cmd verify` 的 Failsafe/Testcontainers 为 251 tests、0 failures、0 errors、0 skipped。`CampusMarketJourneyIT` 覆盖教材交易与质保旅程；三轮恢复分别断开 RabbitMQ、Elasticsearch、MinIO，并通过补充阶段核对证据 ACL 与 MySQL/SmartCN Elasticsearch 在售集合。
+- 本轮排障：完整套件中消息测试曾被前序支付、退款或质保 Outbox 和旧 Spring 上下文调度器污染。通过关闭共享夹具的默认 Rabbit listener/搜索调度器、延后必须保留的截止任务，并用 `PaymentFlowIT,ReliableMessagingIT` 同 JVM 定点组合验证，区分跨类状态泄漏与 Docker OOM。低内存环境按重型依赖拆段串行运行，内存低于 1 GiB 时停止而不是伪造 skipped 通过。
+- 技术选择及取舍：MySQL 作为交易与截止时间事实源，使并发裁决可由行锁、条件更新和受影响行数证明；代价是更多持久状态和恢复任务。异步外部协作允许短暂积压，但通过幂等键、租约、fencing 和指标收敛。案件证据把统一 404 和“管理员不自动绕过 ACL”置于操作便利之上；真实支付、物流与 CAS 在缺少资质和授权时保持端口而不虚假接入。
+- 扩展实验检查：原始设计存在 `7.1` 聊天、`7.2` 竞价、`7.3` 跑腿/代取和真实支付适配器路线；仓库当前没有匹配的独立分支、目录、专项设计/计划或验收提交，因此它们仍是规划，不属于已完成实验七。扩展必须另行设计、计划、分支和验收，不能用空代码占位。
+- 下一步：若继续扩展，先从 `7.1` 聊天、`7.2` 竞价、`7.3` 跑腿/代取或真实支付中明确选择一个，再单独完成需求边界和并发/安全验收设计；否则进入实验八的 Spring Cloud 渐进拆分。
