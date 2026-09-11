@@ -8,6 +8,15 @@
 
 发布必须拿到 publisher confirm；NACK、不可路由和超时会释放租约并按固定批量重试，三次后写入人工失败副本。检查 `integration_outbox.status/lease_until/claim_token`，恢复后运行 `OutboxDispatcher.dispatchOnce`。不要直接把状态改成 `PUBLISHED`，否则会丢失事件。
 
+若 `ReliableMessagingIT` 单独运行通过，但完整 `verify` 中出现认领数量、`attempt_count`、人工失败事实或终态断言成组错位，优先排查共享夹具污染，而不是先判断 Docker OOM：
+
+- 检查 `integration_outbox` 是否残留前序支付、退款或质保事件；无类型过滤的 `claimBatch` 可能先领取这些事件。
+- 检查 `consumed_event`、`manual_failure` 以及主事件队列、人工队列是否在每例前完整清理。
+- 检查默认 Rabbit listener 和业务调度器是否仍在旧 Spring 上下文中运行，与测试的手动 `dispatchOnce/runOnce` 竞争。
+- 用同一 JVM 顺序执行 `PaymentFlowIT,ReliableMessagingIT`；若定点组合失败而两个类单独通过，通常可确认是跨类状态泄漏。
+
+共享测试基类应关闭默认 Rabbit listener 和搜索调度器，并通过较大的 `initial-delay-ms` 延后需要保留 Bean 的截止/对账任务。不要把这些任务统一设为 `enabled=false`：`@DynamicPropertySource` 的优先级高于测试级属性，会导致直接注入调度器的测试无法创建上下文。
+
 ## Redis 验证码
 
 Redis 不可用时验证码接口返回 503，不能绕过验证。检查 Redis URL、Lua 脚本和设备 Cookie；10 分钟发送/失败窗口分别受邮箱、IP、设备上限保护。验证码只在本地模拟邮箱中显示，不写入日志。
@@ -34,6 +43,8 @@ Redis 不可用时验证码接口返回 503，不能绕过验证。检查 Redis 
 
 ```powershell
 .\mvnw.cmd test
+.\mvnw.cmd verify
+.\mvnw.cmd '-Dit.test=PaymentFlowIT,ReliableMessagingIT' verify
 .\mvnw.cmd -Dit.test=CampusMarketJourneyIT verify
 .\mvnw.cmd -Dit.test=RecoveryDrillIT verify
 git diff --check

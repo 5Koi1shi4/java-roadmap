@@ -27,12 +27,14 @@ docker compose down
 
 ```powershell
 .\mvnw.cmd test
-.\mvnw.cmd clean verify
+.\mvnw.cmd verify
 .\mvnw.cmd -Dit.test=CampusMarketJourneyIT verify
 .\mvnw.cmd -Dit.test=RecoveryDrillIT verify
 ```
 
 外部依赖不可用或测试被跳过都不算验收通过。
+
+截至 2026-09-11，JDK 17 下的验收基线为：`test` 137 项、`verify` 的 Failsafe 集成测试 251 项，均为 0 failure、0 error、0 skipped。完整验收前先执行 `docker info`，确认 Docker 引擎可用并关闭无关容器；Windows 可用内存低于 1 GiB 时停止测试，释放资源后再串行重试。
 
 ## API 示例
 
@@ -81,3 +83,5 @@ PENDING_PAYMENT -> AWAITING_HANDOFF -> AWAITING_RECEIPT
 ```
 
 两条命令必须等待上一条完全结束后再执行；若内存门仍触发，先关闭其他 Docker 容器与并行构建进程，再逐条重试。
+
+共享 Testcontainers 测试默认不自动启动 Rabbit listener、搜索调度器和各业务截止任务；需要验证调度逻辑的测试直接调用对应 `runOnce`，需要真实 Rabbit 投递的测试使用自己的监听器容器。这样既保留生产 Bean 和手动驱动契约，也避免同一 Failsafe JVM 中已结束的 Spring 上下文抢占后续测试的 Outbox、队列或租约。
