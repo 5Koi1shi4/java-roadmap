@@ -180,7 +180,7 @@ abstract class TextbookContainers extends JourneyHttpSupport {
     protected static final GenericContainer<?> REDIS = new GenericContainer<>(DockerImageName.parse("redis:7.4.2-alpine"))
         .withNetwork(NETWORK).withNetworkAliases("redis").withExposedPorts(6379);
     private static final ImageFromDockerfile ES_IMAGE = new ImageFromDockerfile(
-        "campus-market/elasticsearch:8.18.8-smartcn", true).withDockerfile(Path.of("docker/elasticsearch/Dockerfile"));
+        "campus-market/elasticsearch:8.18.8-smartcn", true).withDockerfile(Path.of("../docker/elasticsearch/Dockerfile"));
     protected static final ElasticsearchContainer ELASTICSEARCH = new ElasticsearchContainer(
         DockerImageName.parse("campus-market/elasticsearch:8.18.8-smartcn")
             .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8"))

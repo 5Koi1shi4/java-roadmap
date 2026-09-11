@@ -1,6 +1,6 @@
 # 校园二手交易平台实验
 
-这是一个基于 Spring Boot 3、JDK 17 的模块化单体实验，完成校园邮箱注册、批量库存、一口价订单、模拟支付、当面交付、争议与部分退货退款、评价，以及结算后的卖家质保义务。实验重点不是页面功能，而是用数据库事实、幂等命令、租约 fencing、可靠消息和可恢复外部协作证明交易正确性。
+这是一个基于 Spring Boot 3、JDK 17 的 Maven 聚合实验工程。当前可运行的 `legacy-market-service` 保留实验七的模块化单体实现，完成校园邮箱注册、批量库存、一口价订单、模拟支付、当面交付、争议与部分退货退款、评价，以及结算后的卖家质保义务。实验重点不是页面功能，而是用数据库事实、幂等命令、租约 fencing、可靠消息和可恢复外部协作证明交易正确性。
 
 当前总状态为“已验收”：主体交易闭环和完整测试基线已经通过。原计划的 `7.1` 聊天、`7.2` 竞价、`7.3` 跑腿/代取及真实支付适配器因涉及法律与合规问题，暂不开展，也不再作为实验七验收的前置条件。
 
@@ -18,6 +18,8 @@
 - 审计字段过滤、低基数 Micrometer 指标、真实 HTTP 旅程与三轮故障演练。
 
 ## 模块和事实边界
+
+聚合根包含五个 Maven 模块：`legacy-market-service` 是当前可独立启动的兼容服务，承载实验七原有源码、测试和数据库迁移；`platform-test-support`、`discovery-server`、`identity-service`、`api-gateway` 当前仅提供合法的空 JAR 模块，供后续拆分任务接入。Task 2 不迁出身份代码，也不改变现有 HTTP 或数据库行为。
 
 ```text
 身份/邮箱 ──> 商品/库存 ──> 订单 ──> 支付/退款 ──> 交付与争议
@@ -61,8 +63,10 @@ docker compose down
 应用可在依赖健康后启动：
 
 ```powershell
-.\mvnw.cmd spring-boot:run
+.\mvnw.cmd -pl legacy-market-service spring-boot:run
 ```
+
+聚合根命令（例如 `test`、`verify`）在本目录执行；只运行兼容服务时使用 `-pl legacy-market-service`。
 
 测试使用隔离的 Testcontainers，不能用本机历史服务或 skipped 结果代替真实外部协作验证。
 

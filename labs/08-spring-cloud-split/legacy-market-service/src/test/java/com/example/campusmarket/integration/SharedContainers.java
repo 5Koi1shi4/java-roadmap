@@ -41,7 +41,7 @@ public abstract class SharedContainers {
 
     private static final ImageFromDockerfile ELASTICSEARCH_IMAGE = new ImageFromDockerfile(
         "campus-market/elasticsearch:8.18.8-smartcn", true)
-        .withDockerfile(Path.of("docker/elasticsearch/Dockerfile"));
+        .withDockerfile(Path.of("../docker/elasticsearch/Dockerfile"));
     protected static final ElasticsearchContainer ELASTICSEARCH = elasticsearchContainer();
 
     protected static final GenericContainer<?> MINIO = new GenericContainer<>(DockerImageName.parse(

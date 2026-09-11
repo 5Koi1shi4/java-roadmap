@@ -129,7 +129,7 @@ class RecoveryInvariantStagesIT {
     private static final class SearchResources {
         private final Network network=Network.newNetwork();
         private final MySQLContainer<?> mysql=mysql(network);
-        private final ImageFromDockerfile image=new ImageFromDockerfile("campus-market/elasticsearch:8.18.8-smartcn",true).withDockerfile(Path.of("docker/elasticsearch/Dockerfile"));
+        private final ImageFromDockerfile image=new ImageFromDockerfile("campus-market/elasticsearch:8.18.8-smartcn",true).withDockerfile(Path.of("../docker/elasticsearch/Dockerfile"));
         private final ElasticsearchContainer elasticsearch=es(network,image);
         private SearchResources(){Startables.deepStart(Stream.of(mysql,elasticsearch)).join();}
         private void register(DynamicPropertyRegistry r){Base.common(r,mysql);r.add("spring.elasticsearch.uris",()->"http://"+elasticsearch.getHost()+":"+elasticsearch.getMappedPort(9200));r.add("campus.market.storage.endpoint",()->"http://127.0.0.1:1");}

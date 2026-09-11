@@ -648,7 +648,7 @@ class RecoveryDrillIT {
             .withCreateContainerCmdModifier(memoryLimit(MYSQL_MEMORY_BYTES));
         private static final ImageFromDockerfile ES_IMAGE = new ImageFromDockerfile(
             "campus-market/elasticsearch:8.18.8-smartcn", true)
-            .withDockerfile(Path.of("docker/elasticsearch/Dockerfile"));
+            .withDockerfile(Path.of("../docker/elasticsearch/Dockerfile"));
         protected static final ElasticsearchContainer ES = new ElasticsearchContainer(
             DockerImageName.parse("campus-market/elasticsearch:8.18.8-smartcn")
             .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8"))
@@ -720,7 +720,7 @@ class RecoveryDrillIT {
 
     private static ImageFromDockerfile smartCnImage() {
         return new ImageFromDockerfile("campus-market/elasticsearch:8.18.8-smartcn", true)
-            .withDockerfile(Path.of("docker/elasticsearch/Dockerfile"));
+            .withDockerfile(Path.of("../docker/elasticsearch/Dockerfile"));
     }
 
     private static ElasticsearchContainer elasticsearch(Network network, ImageFromDockerfile image, long memoryBytes) {
