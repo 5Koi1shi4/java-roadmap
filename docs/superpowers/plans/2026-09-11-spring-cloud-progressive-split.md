@@ -957,9 +957,9 @@ git commit -m "test(cloud): preserve campus market regression suite"
 - Consumes: 全部实现、测试数、服务端口、镜像版本和真实故障结果。
 - Produces: 从零运行、验证、排障和面试复盘闭环。
 
-- [ ] **Step 1: 写文档验收清单测试**
+- [ ] **Step 1: 建立人工文档验收清单**
 
-在 `api-gateway/src/test/java/com/example/campusmarket/gateway/DocumentationContractTest.java` 通过 `Path.of("..", "README.md")` 断言 README 包含：
+逐项核对 README 明确包含以下运行与边界信息：
 
 ```text
 JDK 17
@@ -976,19 +976,17 @@ Eureka
 不支持生产不停机迁移
 ```
 
-并断言 `.env.example` 只有占位符，不含测试/本地真实密码或 PEM。
+同时人工检查 `.env.example` 只有占位符，不含测试/本地真实密码或 PEM。面向人的文档不添加源码关键词匹配测试；缺失项直接记录在本任务报告中并在下一步补齐。
 
-- [ ] **Step 2: 运行并确认文档尚不完整**
-
-Run: `.\mvnw.cmd -pl api-gateway -Dtest=DocumentationContractTest test`
-
-Expected: FAIL，列出缺失章节。
-
-- [ ] **Step 3: 编写最终文档和最小 Compose**
+- [ ] **Step 2: 编写最终文档和最小 Compose**
 
 README 给出四应用启动顺序、端口、环境变量、Gateway 示例和验收命令。`architecture.md` 记录路由与信任边界；`migration-boundary.md` 明确只支持全新环境，不能冒充线上迁移；TROUBLESHOOTING 记录 Eureka、JWKS、双库权限、Docker 内存和依赖故障判定。
 
 Compose 只声明实验明确依赖，所有服务 `restart: "no"`，不修改 Windows 服务启动类型或 Docker 全局重启策略。`.env.example` 只用 `<replace-me>` 一类占位符。
+
+- [ ] **Step 3: 完成人工文档复核**
+
+按 Step 1 的固定清单逐项阅读 README、架构说明、迁移边界、排障记录、学习日志、面试题库、Compose 和 `.env.example`。在任务报告中记录每项对应文件与章节；发现缺失或矛盾时直接修正文档后重新复核。
 
 - [ ] **Step 4: 完成实验级全量验收**
 
