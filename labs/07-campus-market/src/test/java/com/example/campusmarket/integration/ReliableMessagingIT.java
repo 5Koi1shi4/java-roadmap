@@ -129,11 +129,12 @@ class ReliableMessagingIT extends SharedContainers {
         FAIL_FIRST_DELIVERY.set(false);
         REAL_DELIVERIES.set(0);
         BUSINESS_ATTEMPTS.set(0);
-        jdbc.update("DELETE FROM consumed_event WHERE consumer_name LIKE 'task6-%' OR consumer_name='campus-market-order'");
-        jdbc.update("DELETE FROM integration_outbox WHERE event_type='ORDER_CREATED'");
+        jdbc.update("DELETE FROM consumed_event");
+        jdbc.update("DELETE FROM integration_outbox");
         jdbc.update("DELETE FROM manual_failure");
         rabbitTemplate.execute(channel -> {
             channel.queuePurge("task6.real.delivery");
+            channel.queuePurge(RabbitTopology.EVENT_QUEUE);
             channel.queuePurge(RabbitTopology.MANUAL_QUEUE);
             return null;
         });

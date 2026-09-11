@@ -90,11 +90,18 @@ public abstract class SharedContainers {
         registry.add("spring.datasource.username", MYSQL::getUsername);
         registry.add("spring.datasource.password", MYSQL::getPassword);
         registry.add("spring.data.redis.url", () -> "redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379));
+        registry.add("spring.rabbitmq.listener.simple.auto-startup", () -> "false");
         registry.add("spring.rabbitmq.host", RABBITMQ::getHost);
         registry.add("spring.rabbitmq.port", RABBITMQ::getAmqpPort);
         registry.add("spring.rabbitmq.username", RABBITMQ::getAdminUsername);
         registry.add("spring.rabbitmq.password", RABBITMQ::getAdminPassword);
         registry.add("spring.elasticsearch.uris", () -> "http://" + ELASTICSEARCH_PROXY.getContainerIpAddress() + ":" + ELASTICSEARCH_PROXY.getProxyPort());
         registry.add("campus.market.storage.endpoint", () -> "http://" + MINIO_PROXY.getContainerIpAddress() + ":" + MINIO_PROXY.getProxyPort());
+        registry.add("campus.market.order.deadline.enabled", () -> "false");
+        registry.add("campus.market.payment.reconciliation.enabled", () -> "false");
+        registry.add("campus.market.dispute.deadline.enabled", () -> "false");
+        registry.add("campus.market.dispute.return-reconciliation.enabled", () -> "false");
+        registry.add("campus.market.warranty.deadline.enabled", () -> "false");
+        registry.add("campus.market.search.dispatcher.enabled", () -> "false");
     }
 }
