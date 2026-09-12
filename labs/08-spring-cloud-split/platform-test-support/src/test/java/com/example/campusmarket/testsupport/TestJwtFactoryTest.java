@@ -100,6 +100,12 @@ class TestJwtFactoryTest {
 
         assertThatThrownBy(() -> HttpAssertions.assertJsonUtf8(response("application/json")))
                 .isInstanceOf(AssertionError.class);
+        assertThatThrownBy(() -> HttpAssertions.assertJsonUtf8(response("application/jsonp; charset=UTF-8")))
+                .isInstanceOf(AssertionError.class);
+        assertThatThrownBy(() -> HttpAssertions.assertJsonUtf8(response("application/json; charset=UTF-8x")))
+                .isInstanceOf(AssertionError.class);
+        assertThatThrownBy(() -> HttpAssertions.assertJsonUtf8(response("application/json; charset=ISO-8859-1")))
+                .isInstanceOf(AssertionError.class);
     }
 
     @Test
