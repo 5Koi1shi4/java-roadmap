@@ -87,7 +87,12 @@ public final class AuthController {
             throw new IllegalArgumentException("邮箱不能为空");
         }
         switch (Objects.requireNonNull(purpose, "验证用途不能为空")) {
-            case EMAIL_VERIFICATION -> EmailVerificationService.normalizePurpose(request.purpose());
+            case EMAIL_VERIFICATION -> {
+                if (request.purpose() == null || request.purpose().isBlank()) {
+                    throw new IllegalArgumentException("验证码用途不能为空");
+                }
+                EmailVerificationService.normalizePurpose(request.purpose());
+            }
             case REGISTER -> {
                 validatePassword(request.password());
                 String code = firstNonBlank(request.code(), request.verificationCode());
@@ -168,6 +173,10 @@ public final class AuthController {
         String client,
         String clientId,
         String clientIp) {
+        @Override
+        public String toString() {
+            return "AuthRequest{redacted=true}";
+        }
     }
 
     public record VerificationResponse(String status, String code, long expiresIn) {
@@ -178,5 +187,9 @@ public final class AuthController {
 
     public record LoginResponse(String accessToken, String tokenType, long expiresIn,
                                 String userId, Set<String> roles) {
+        @Override
+        public String toString() {
+            return "LoginResponse{redacted=true}";
+        }
     }
 }

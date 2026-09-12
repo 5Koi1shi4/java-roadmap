@@ -19,7 +19,8 @@ public class SmtpMailConfiguration {
         sender.setPort(properties.port());
         sender.setUsername(properties.username());
         sender.setPassword(properties.password());
-        sender.getJavaMailProperties().put("mail.smtp.auth", String.valueOf(properties.username() != null));
+        boolean authenticated = properties.username() != null && properties.password() != null;
+        sender.getJavaMailProperties().put("mail.smtp.auth", String.valueOf(authenticated));
         sender.getJavaMailProperties().put("mail.smtp.starttls.enable", "true");
         return sender;
     }

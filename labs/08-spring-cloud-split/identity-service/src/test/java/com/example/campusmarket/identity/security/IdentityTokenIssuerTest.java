@@ -2,16 +2,28 @@ package com.example.campusmarket.identity.security;
 
 import com.example.campusmarket.identity.application.AuthenticatedUser;
 import com.example.campusmarket.testsupport.TestRsaKeys;
+import com.nimbusds.jose.JOSEObjectType;
 import com.nimbusds.jose.JWSAlgorithm;
+import com.nimbusds.jose.JWSHeader;
+import com.nimbusds.jose.crypto.RSASSASigner;
+import com.nimbusds.jwt.JWTClaimsSet;
 import com.nimbusds.jwt.SignedJWT;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.FileSystemResource;
 
+import java.math.BigInteger;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
+import java.security.interfaces.RSAPublicKey;
+import java.security.spec.RSAPublicKeySpec;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Base64;
+import java.util.Date;
 import java.util.Set;
 import java.util.UUID;
 
@@ -62,6 +74,41 @@ class IdentityTokenIssuerTest {
     }
 
     @Test
+    void rejectsSameModulusWithWrongPublicExponent() throws Exception {
+        RSAPublicKey matching = TestRsaKeys.publicKey();
+        RSAPublicKey wrongExponent = (RSAPublicKey) KeyFactory.getInstance("RSA")
+            .generatePublic(new RSAPublicKeySpec(matching.getModulus(), BigInteger.valueOf(3)));
+        Path directory = Files.createTempDirectory("identity-wrong-exponent");
+        Path publicKey = directory.resolve("wrong-public-key.pem");
+        Files.writeString(publicKey, pem(wrongExponent.getEncoded(), "PUBLIC KEY"), StandardCharsets.US_ASCII);
+
+        assertThatThrownBy(() -> new RsaKeyProperties("http://gateway.test", "campus-market-api",
+            "identity-key-1", privateKey(), new FileSystemResource(publicKey)))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void rejectsTokenIssuedInTheFuture() throws Exception {
+        Instant now = Instant.parse("2026-01-01T00:00:00Z");
+        IdentityTokenIssuer issuer = new IdentityTokenIssuer(properties(), Clock.fixed(now, java.time.ZoneOffset.UTC));
+        Instant future = now.plusSeconds(30);
+        JWTClaimsSet claims = new JWTClaimsSet.Builder()
+            .issuer("http://gateway.test")
+            .audience("campus-market-api")
+            .subject(UUID.randomUUID().toString())
+            .claim("roles", Set.of("ROLE_USER"))
+            .issueTime(Date.from(future))
+            .expirationTime(Date.from(future.plusSeconds(900)))
+            .build();
+        SignedJWT token = new SignedJWT(new JWSHeader.Builder(JWSAlgorithm.RS256)
+            .keyID("identity-key-1").type(JOSEObjectType.JWT).build(), claims);
+        token.sign(new RSASSASigner(TestRsaKeys.privateKey()));
+
+        assertThatThrownBy(() -> issuer.parse(token.serialize()))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void rejectsEmptyRolesAndUnsupportedRoles() {
         IdentityTokenIssuer issuer = new IdentityTokenIssuer(properties());
         assertThatThrownBy(() -> issuer.issue(new AuthenticatedUser(UUID.randomUUID(), Set.of())))
@@ -94,5 +141,11 @@ class IdentityTokenIssuerTest {
         } catch (Exception ex) {
             throw new AssertionError(ex);
         }
+    }
+
+    private static String pem(byte[] der, String label) {
+        return "-----BEGIN " + label + "-----\n"
+            + Base64.getMimeEncoder(64, new byte[] {'\n'}).encodeToString(der)
+            + "\n-----END " + label + "-----\n";
     }
 }

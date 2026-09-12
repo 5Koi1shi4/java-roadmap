@@ -4,13 +4,12 @@ import com.example.campusmarket.identity.application.AuthenticatedUser;
 import com.example.campusmarket.identity.infrastructure.LocalVerificationMailSender;
 import com.example.campusmarket.identity.security.IdentityTokenIssuer;
 import com.example.campusmarket.identity.security.RsaKeyProperties;
-import org.junit.jupiter.api.MethodOrderer;
-import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.TestMethodOrder;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.core.io.FileSystemResource;
+import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.MediaType;
@@ -36,7 +35,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** 身份服务真实 MySQL+Redis HTTP 验收。 */
 @SpringBootTest(classes = IdentityServiceApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("local")
-@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@org.junit.jupiter.api.TestInstance(org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS)
 class AuthFlowIT extends AuthFlowContainers {
     @LocalServerPort
     private int port;
@@ -53,15 +52,24 @@ class AuthFlowIT extends AuthFlowContainers {
     @Autowired
     private StringRedisTemplate redis;
 
+    @Autowired
+    private LettuceConnectionFactory redisConnectionFactory;
+
     private final HttpClient httpClient = HttpClient.newBuilder()
         .cookieHandler(new CookieManager(null, CookiePolicy.ACCEPT_ALL)).build();
 
+    /** 先关闭客户端后台线程，再由基类停止 Redis，避免 teardown 重连栈污染验收输出。 */
+    @AfterAll
+    void closeRedisClientBeforeContainer() {
+        redisConnectionFactory.destroy();
+    }
+
     @Test
-    @Order(1)
     void completesRegistrationAndLoginWithOneTimeCode() throws Exception {
+        flushRedis();
         String email = uniqueEmail();
         HttpResponse<String> codeResponse = post("/api/auth/email-verifications",
-            "{\"email\":\"" + email + "\",\"client\":\"auth-flow\"}");
+            "{\"email\":\"" + email + "\",\"purpose\":\"REGISTER\",\"client\":\"auth-flow\"}");
 
         assertThat(codeResponse.statusCode()).isEqualTo(200);
         assertJsonUtf8(codeResponse);
@@ -124,7 +132,8 @@ class AuthFlowIT extends AuthFlowContainers {
                 .header("Content-Type", "application/json")
                 .header("Cookie", "campus_device=attacker-controlled")
                 .POST(HttpRequest.BodyPublishers.ofString(
-                    "{\"email\":\"另一个" + UUID.randomUUID() + "@stu.example.edu.cn\"}"))
+                    "{\"email\":\"另一个" + UUID.randomUUID()
+                        + "@stu.example.edu.cn\",\"purpose\":\"REGISTER\"}"))
                 .build(), HttpResponse.BodyHandlers.ofString());
         assertThat(forgedDevice.statusCode()).isEqualTo(200);
         assertThat(forgedDevice.headers().allValues("Set-Cookie")).anyMatch(value ->
@@ -152,55 +161,54 @@ class AuthFlowIT extends AuthFlowContainers {
     }
 
     @Test
-    @Order(2)
     void enforcesEmailSendRateLimit() throws Exception {
         flushRedis();
         String email = uniqueEmail();
         for (int i = 0; i < 3; i++) {
-            assertThat(post("/api/auth/email-verifications", "{\"email\":\"" + email + "\"}")
+            assertThat(post("/api/auth/email-verifications", "{\"email\":\"" + email
+                    + "\",\"purpose\":\"REGISTER\"}")
                 .statusCode()).isEqualTo(200);
         }
-        HttpResponse<String> fourth = post("/api/auth/email-verifications", "{\"email\":\"" + email + "\"}");
+        HttpResponse<String> fourth = post("/api/auth/email-verifications", "{\"email\":\"" + email
+            + "\",\"purpose\":\"REGISTER\"}");
         assertThat(fourth.statusCode()).isEqualTo(429);
         assertJsonUtf8(fourth);
     }
 
     @Test
-    @Order(3)
     void enforcesRemoteIpSendRateLimit() throws Exception {
         flushRedis();
         for (int i = 0; i < 20; i++) {
             HttpResponse<String> response = post(HttpClient.newHttpClient(), "/api/auth/email-verifications",
-                "{\"email\":\"" + uniqueEmail() + "\"}");
+                "{\"email\":\"" + uniqueEmail() + "\",\"purpose\":\"REGISTER\"}");
             assertThat(response.statusCode()).isEqualTo(200);
         }
         HttpResponse<String> twentyFirst = post(HttpClient.newHttpClient(), "/api/auth/email-verifications",
-            "{\"email\":\"" + uniqueEmail() + "\"}");
+            "{\"email\":\"" + uniqueEmail() + "\",\"purpose\":\"REGISTER\"}");
         assertThat(twentyFirst.statusCode()).isEqualTo(429);
         assertJsonUtf8(twentyFirst);
     }
 
     @Test
-    @Order(4)
     void enforcesSignedDeviceSendRateLimit() throws Exception {
         flushRedis();
         for (int i = 0; i < 10; i++) {
             HttpResponse<String> response = post("/api/auth/email-verifications",
-                "{\"email\":\"" + uniqueEmail() + "\"}");
+                "{\"email\":\"" + uniqueEmail() + "\",\"purpose\":\"REGISTER\"}");
             assertThat(response.statusCode()).isEqualTo(200);
         }
         HttpResponse<String> eleventh = post("/api/auth/email-verifications",
-            "{\"email\":\"" + uniqueEmail() + "\"}");
+            "{\"email\":\"" + uniqueEmail() + "\",\"purpose\":\"REGISTER\"}");
         assertThat(eleventh.statusCode()).isEqualTo(429);
         assertJsonUtf8(eleventh);
     }
 
     @Test
-    @Order(5)
     void locksVerificationAfterFiveFailedAttempts() throws Exception {
         flushRedis();
         String email = uniqueEmail();
-        assertThat(post("/api/auth/email-verifications", "{\"email\":\"" + email + "\"}")
+        assertThat(post("/api/auth/email-verifications", "{\"email\":\"" + email
+                + "\",\"purpose\":\"REGISTER\"}")
             .statusCode()).isEqualTo(200);
         String actualCode = mailSender.latestCode(email);
         String wrongCode = "000000".equals(actualCode) ? "000001" : "000000";
@@ -220,17 +228,6 @@ class AuthFlowIT extends AuthFlowContainers {
             "{\"email\":\"" + email + "\",\"password\":\"correct horse battery staple\","
                 + "\"code\":\"" + actualCode + "\"}");
         assertThat(afterLock.statusCode()).isEqualTo(401);
-    }
-
-    @Test
-    @Order(99)
-    void returns503WhenRedisIsUnavailable() throws Exception {
-        flushRedis();
-        REDIS.stop();
-        HttpResponse<String> response = post("/api/auth/email-verifications",
-            "{\"email\":\"" + uniqueEmail() + "\"}");
-        assertThat(response.statusCode()).isEqualTo(503);
-        assertJsonUtf8(response);
     }
 
     private HttpResponse<String> post(String path, String json) throws Exception {

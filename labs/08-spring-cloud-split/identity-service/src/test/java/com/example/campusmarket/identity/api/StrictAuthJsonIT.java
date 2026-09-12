@@ -73,6 +73,13 @@ class StrictAuthJsonIT {
     }
 
     @Test
+    void rejectsMissingVerificationPurpose() throws Exception {
+        mvc.perform(post("/api/auth/email-verifications").contentType(MediaType.APPLICATION_JSON)
+                .content("{\"email\":\"student@stu.example.edu.cn\"}"))
+            .andExpect(status().isBadRequest());
+    }
+
+    @Test
     void rejectsOutOfBoundsPassword() throws Exception {
         String tooLong = "x".repeat(129);
         mvc.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)

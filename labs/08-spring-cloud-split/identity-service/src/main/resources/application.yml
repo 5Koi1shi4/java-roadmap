@@ -13,6 +13,10 @@ spring:
     redis:
       repositories:
         enabled: false
+      connect-timeout: 2s
+      timeout: 2s
+      lettuce:
+        shutdown-timeout: 100ms
   task:
     scheduling:
       enabled: false
@@ -46,7 +50,7 @@ campus:
     mail:
       smtp:
         host: ${CAMPUS_MARKET_SMTP_HOST:}
-        port: ${CAMPUS_MARKET_SMTP_PORT:587}
+        port: ${CAMPUS_MARKET_SMTP_PORT:}
         username: ${CAMPUS_MARKET_SMTP_USERNAME:}
         password: ${CAMPUS_MARKET_SMTP_PASSWORD:}
         from: ${CAMPUS_MARKET_SMTP_FROM:}

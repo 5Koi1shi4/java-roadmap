@@ -136,6 +136,11 @@ public final class RedisVerificationCodeStore {
             requireText(code, "验证码");
             requireText(hmac, "验证码摘要");
         }
+
+        @Override
+        public String toString() {
+            return "IssuedCode{redacted=true}";
+        }
     }
 
     public static final class TooManyVerificationRequestsException extends RuntimeException {

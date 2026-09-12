@@ -8,6 +8,8 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
+import java.security.Signature;
+import java.security.interfaces.RSAPrivateCrtKey;
 import java.security.interfaces.RSAPrivateKey;
 import java.security.interfaces.RSAPublicKey;
 import java.security.spec.PKCS8EncodedKeySpec;
@@ -39,9 +41,7 @@ public record RsaKeyProperties(String issuer, String audience, String keyId,
         Objects.requireNonNull(publicKey, "JWT public key resource is required");
         RSAPrivateKey parsedPrivate = readPrivateKey(privateKey);
         RSAPublicKey parsedPublic = readPublicKey(publicKey);
-        if (!parsedPrivate.getModulus().equals(parsedPublic.getModulus())) {
-            throw new IllegalArgumentException("JWT RSA key pair does not match");
-        }
+        validateKeyPair(parsedPrivate, parsedPublic);
     }
 
     /** 读取并解析 PKCS#8 RSA 私钥。 */
@@ -63,6 +63,36 @@ public record RsaKeyProperties(String issuer, String audience, String keyId,
                 .generatePublic(new X509EncodedKeySpec(encoded));
         } catch (GeneralSecurityException | ClassCastException ex) {
             throw new IllegalArgumentException("JWT public key is not a readable RSA X.509 key", ex);
+        }
+    }
+
+    static void validateKeyPair(RSAPrivateKey privateKey, RSAPublicKey publicKey) {
+        Objects.requireNonNull(privateKey, "JWT private key is required");
+        Objects.requireNonNull(publicKey, "JWT public key is required");
+        if (!privateKey.getModulus().equals(publicKey.getModulus())) {
+            throw new IllegalArgumentException("JWT RSA key pair does not match");
+        }
+        if (privateKey instanceof RSAPrivateCrtKey privateCrt
+            && !privateCrt.getPublicExponent().equals(publicKey.getPublicExponent())) {
+            throw new IllegalArgumentException("JWT RSA public exponent does not match");
+        }
+        if (!(privateKey instanceof RSAPrivateCrtKey) && !signatureMatches(privateKey, publicKey)) {
+            throw new IllegalArgumentException("JWT RSA key pair does not match");
+        }
+    }
+
+    private static boolean signatureMatches(RSAPrivateKey privateKey, RSAPublicKey publicKey) {
+        try {
+            Signature signer = Signature.getInstance("SHA256withRSA");
+            signer.initSign(privateKey);
+            signer.update("campus-market-jwt-key-check".getBytes(StandardCharsets.US_ASCII));
+            byte[] signature = signer.sign();
+            Signature verifier = Signature.getInstance("SHA256withRSA");
+            verifier.initVerify(publicKey);
+            verifier.update("campus-market-jwt-key-check".getBytes(StandardCharsets.US_ASCII));
+            return verifier.verify(signature);
+        } catch (GeneralSecurityException ex) {
+            return false;
         }
     }
 

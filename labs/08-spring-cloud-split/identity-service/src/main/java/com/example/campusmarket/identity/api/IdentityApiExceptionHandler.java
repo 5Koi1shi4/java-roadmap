@@ -6,6 +6,7 @@ import jakarta.validation.ConstraintViolationException;
 import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.mail.MailException;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -41,6 +42,11 @@ public final class IdentityApiExceptionHandler {
     @ExceptionHandler(RedisVerificationCodeStore.TooManyVerificationRequestsException.class)
     public ResponseEntity<ApiError> rateLimited(RuntimeException ignored) {
         return ApiErrors.entity(HttpStatus.TOO_MANY_REQUESTS, "RATE_LIMITED", "验证码请求过于频繁");
+    }
+
+    @ExceptionHandler(MailException.class)
+    public ResponseEntity<ApiError> mailUnavailable(MailException ignored) {
+        return ApiErrors.entity(HttpStatus.SERVICE_UNAVAILABLE, "DEPENDENCY_UNAVAILABLE", "身份服务暂时不可用");
     }
 
     @ExceptionHandler(DataAccessException.class)

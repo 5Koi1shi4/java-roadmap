@@ -14,9 +14,20 @@ public record SmtpMailProperties(String host, Integer port, String username, Str
             throw new IllegalArgumentException("SMTP port is out of range");
         }
         requireText(from, "SMTP sender address");
+        username = optionalText(username);
+        password = optionalText(password);
         if ((username == null) != (password == null)) {
             throw new IllegalArgumentException("SMTP username and password must be configured together");
         }
+    }
+
+    private static String optionalText(String value) {
+        return value == null || value.isBlank() ? null : value;
+    }
+
+    @Override
+    public String toString() {
+        return "SmtpMailProperties{configured=true}";
     }
 
     private static void requireText(String value, String label) {

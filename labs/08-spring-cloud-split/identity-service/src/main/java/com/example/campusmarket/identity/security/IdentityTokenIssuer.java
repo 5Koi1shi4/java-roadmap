@@ -44,9 +44,7 @@ public final class IdentityTokenIssuer {
         this.clock = Objects.requireNonNull(clock, "JWT clock is required");
         this.privateKey = RsaKeyProperties.readPrivateKey(properties.privateKey());
         this.publicKey = RsaKeyProperties.readPublicKey(properties.publicKey());
-        if (!privateKey.getModulus().equals(publicKey.getModulus())) {
-            throw new IllegalArgumentException("JWT RSA key pair does not match");
-        }
+        RsaKeyProperties.validateKeyPair(privateKey, publicKey);
     }
 
     /** 签发固定 15 分钟、带完整身份契约的 RS256 JWT。 */
@@ -161,7 +159,8 @@ public final class IdentityTokenIssuer {
         }
         Instant issuedAt = claims.getIssueTime().toInstant();
         Instant expiresAt = claims.getExpirationTime().toInstant();
-        if (!ACCESS_TTL.equals(Duration.between(issuedAt, expiresAt))
+        if (issuedAt.isAfter(clock.instant())
+            || !ACCESS_TTL.equals(Duration.between(issuedAt, expiresAt))
             || !expiresAt.isAfter(clock.instant())) {
             throw new IllegalArgumentException("JWT lifetime is invalid");
         }

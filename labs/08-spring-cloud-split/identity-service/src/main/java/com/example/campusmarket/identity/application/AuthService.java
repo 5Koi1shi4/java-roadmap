@@ -76,6 +76,11 @@ public class AuthService {
             java.util.Objects.requireNonNull(expiresIn, "令牌有效期不能为空");
             roles = Set.copyOf(java.util.Objects.requireNonNull(roles, "角色不能为空"));
         }
+
+        @Override
+        public String toString() {
+            return "LoginResult{redacted=true}";
+        }
     }
 
     private record UserRow(UUID id, String passwordHash, String status) {
