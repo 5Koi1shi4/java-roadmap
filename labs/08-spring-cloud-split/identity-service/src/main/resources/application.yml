@@ -1,0 +1,72 @@
+spring:
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+    mapper:
+      allow-coercion-of-scalars: false
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+  data:
+    redis:
+      repositories:
+        enabled: false
+  task:
+    scheduling:
+      enabled: false
+
+server:
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+campus:
+  market:
+    identity:
+      allowed-domains: ${CAMPUS_MARKET_IDENTITY_ALLOWED_DOMAINS:stu.example.edu.cn}
+      verification-secret: ${CAMPUS_MARKET_IDENTITY_VERIFICATION_SECRET:local-only-verification-secret-change-me-32}
+      verification-ttl: 10m
+      verification-rate-limit: 60s
+    jwt:
+      issuer: ${CAMPUS_MARKET_JWT_ISSUER:http://gateway.test}
+      audience: ${CAMPUS_MARKET_JWT_AUDIENCE:campus-market-api}
+      key-id: ${CAMPUS_MARKET_JWT_KEY_ID:identity-key-1}
+      private-key: ${CAMPUS_MARKET_JWT_PRIVATE_KEY:}
+      public-key: ${CAMPUS_MARKET_JWT_PUBLIC_KEY:}
+    mail:
+      smtp:
+        host: ${CAMPUS_MARKET_SMTP_HOST:}
+        port: ${CAMPUS_MARKET_SMTP_PORT:587}
+        username: ${CAMPUS_MARKET_SMTP_USERNAME:}
+        password: ${CAMPUS_MARKET_SMTP_PASSWORD:}
+        from: ${CAMPUS_MARKET_SMTP_FROM:}
+
+---
+spring:
+  config:
+    activate:
+      on-profile: test
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration
+      - org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisReactiveAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration
+
+---
+spring:
+  config:
+    activate:
+      on-profile: local
