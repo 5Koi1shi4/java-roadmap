@@ -11,4 +11,40 @@
     </parent>
     <artifactId>platform-test-support</artifactId>
     <packaging>jar</packaging>
+    <name>platform-test-support</name>
+    <description>Shared test fixtures published only as a tests-classifier test-jar</description>
+
+    <dependencies>
+        <!-- 提供 Nimbus JOSE（RSAKey / SignedJWT），版本由 Spring Boot 依赖管理统一管理。 -->
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-oauth2-jose</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- 仅附加 classifier=tests 的测试 JAR，普通 JAR 不含测试夹具。 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>fixtures-test-jar</id>
+                        <goals>
+                            <goal>test-jar</goal>
+                        </goals>
+                        <configuration>
+                            <classifier>tests</classifier>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>
