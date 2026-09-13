@@ -1,6 +1,59 @@
 # 排障手册
 
-本手册按“症状—检查—恢复—不可越过的边界”记录实验七的真实排障路径。先确认失败发生在哪个事实边界，再做恢复；不要通过跳过测试、手工篡改状态或放宽 ACL 获得表面成功。
+本手册保留实验七交易基线的排障路径，并记录实验八身份拆分的边界。先确认失败发生在哪个事实边界，再做恢复；不要通过跳过测试、手工篡改状态或放宽 ACL 获得表面成功。
+
+## 实验八：本地 Compose 启动
+
+Compose 只包含实验八四应用及其最小运行依赖：MySQL、Redis、RabbitMQ、安装 SmartCN 的 Elasticsearch 和 MinIO。Toxiproxy 由故障测试的 Testcontainers 独立创建，不需要也不应该作为本地常驻服务启动。先确认 JDK 17、Docker Engine 和各模块的 `target` JAR 已准备好，再执行：
+
+```powershell
+docker compose --env-file .env config --quiet
+docker compose --env-file .env build
+docker compose --env-file .env up -d
+docker compose --env-file .env ps
+```
+
+`config --quiet` 只验证 Compose 语法，不把展开后的口令打印到终端。查看某个服务的启动错误时使用 `docker compose --env-file .env logs <service>`，不要把 `.env`、JWT 私钥或 Token 粘贴到排障记录。若应用镜像提示 JAR 不存在，先在实验目录执行 `.\mvnw.cmd -DskipTests package`，再重新构建对应镜像；该打包步骤不是测试验收。
+
+Compose 只表达启动依赖顺序，应用自身仍可能需要几秒注册 Eureka。应先看 `docker compose ps` 和各应用日志，确认 `discovery-server` 已监听 8761，再确认 identity/legacy 注册，最后从 Gateway 18080 发起请求。所有服务均为 `restart: "no"`；反复重启只会掩盖首次失败，应该先保存错误边界再处理。
+
+## 实验八：双库初始化失败
+
+MySQL 的 `docker/mysql/01-split-databases.sh` 只在 `mysql-data` 空卷第一次初始化时执行。若日志显示数据库或账号不存在、Flyway 迁移未执行，先检查 MySQL 是否健康以及 `.env` 中五个数据库口令是否已经替换；已有卷不会自动重新运行脚本。确认只需丢弃本地实验数据后，才可执行 `docker compose --env-file .env down -v`，再重新 `up -d`。
+
+identity 使用 `identity_db`/`identity_app`，legacy 使用 `market_db`/`market_app`；两者的 Flyway 分别使用 `identity_migrator`/`market_migrator`。运行账号只有本库 DML，迁移账号才有本库 DDL，不要通过 root、全局授权或跨库读取来绕过 `Access denied`。跨库权限被拒绝是设计边界，需修正服务连接或迁移配置。
+
+## 实验八：密钥文件、JWKS 或 Gateway 路由
+
+identity 启动时会读取 `.env` 指向的仓库外 PKCS#8 私钥和 X.509 公钥，并校验二者匹配。出现 `JWT ... resource is not readable` 或密钥不匹配时，检查宿主机绝对路径、Compose bind mount 和文件格式；不要把密钥内容写入仓库或日志。
+
+固定 JWKS 路径是 `/api/auth/.well-known/jwks.json`。容器间使用 `http://identity-service:8080/api/auth/.well-known/jwks.json`，客户端诊断使用 Gateway 的 `http://localhost:18080/api/auth/.well-known/jwks.json`。Gateway 的 `/api/auth/**` 路由到 `identity-service`，其他 `/api/**` 路由到 `legacy-market-service`；不要把 `lb://` 改成固定下游端口来规避 Eureka 注册问题。核对 Gateway、identity 和 legacy 的 issuer、audience、`kid` 必须一致；不要输出 Token。
+
+## 实验八：基础依赖健康检查
+
+应用启动失败时先按服务边界查看：MySQL 3313、Redis 6383、RabbitMQ 5673/15673、Elasticsearch 9203、MinIO 9010/9011。SmartCN 镜像由 `docker/elasticsearch/Dockerfile` 构建，Elasticsearch 本地 Compose 使用无认证模式，legacy 的 URI 是 `http://elasticsearch:9200`；若插件或健康检查失败，先重建该镜像并检查日志。RabbitMQ 的队列声明和 MinIO bucket 会在应用首次使用时触发，凭据或 endpoint 错误应修正 `.env`/服务名，不要换成本机历史服务。
+
+## 实验八：Eureka 与路由
+
+路由目标不可用时先检查 Eureka 注册表是否包含 `IDENTITY-SERVICE`、`LEGACY-MARKET-SERVICE` 和 `API-GATEWAY`，实例端口是否为当前应用实际端口，以及每个客户端 `EUREKA_DEFAULT_ZONE` 是否指向同一个注册中心。注册中心地址是配置，业务实例地址由发现获得；不要把失败的 `lb://` 路由改成固定业务端口来让旅程通过。
+
+Gateway 只配置身份与业务两条显式路由。依赖故障应返回脱敏中文 UTF-8 503，不传出主机、端口、服务 ID 或下游堆栈。Eureka 停机后短期缓存可用与冷启动无注册信息是不同情形，应分别验证。
+
+## 实验八：JWKS 与身份失败
+
+身份服务实际 JWKS 端点是 `/api/auth/.well-known/jwks.json`。分别检查 Gateway 和 legacy 的 `spring.security.oauth2.resourceserver.jwt.jwk-set-uri`，并核对 issuer、固定 audience、当前 `kid` 与 RS256 公钥。不要输出 Token、私钥或密码做排障记录。
+
+缺失或无效 Token 返回 401，普通用户访问管理员 API 返回 403。身份停机不等于已有 Token 立即失效：已缓存公钥可以验证未过期 Token，但登录仍不可用；冷启动不能跳过验签。未知 `kid` 不做递归认证重试。
+
+## 实验八：双库权限与迁移
+
+身份和交易分别配置本库 DataSource 与 Flyway 迁移账号。运行账号只有必要 DML 权限，迁移账号仅拥有本库 DDL 权限。跨库读取被拒绝是预期边界；不要授予全局权限或恢复跨库外键来解决启动错误。实验只支持全新环境，不能复用实验七单库 Flyway 历史冒充迁移完成。
+
+## 实验八：截止并发与测试发现
+
+拆分后测试无法发现启动配置时显式指定 `LegacyMarketApplication`，保持原集成测试仍由 Failsafe 执行。对截止扫描与筹资的竞争，检查是否出现“候选二级索引 → 主键”和“主键 → 二级索引”的反向锁顺序。候选扫描不加锁，逐 ID 事务按主键锁定，再用数据库时间和当前状态条件更新。
+
+并发回归测试必须关闭上下文的后台截止调度，手动启动被测调度器，并观察目标义务的实际锁等待；不能把 `CannotAcquireLockException` 当成允许的业务终态。2026-09-14 定点 `WarrantyDeadlineRaceIT` 已运行 3 项且无失败、错误或跳过，完整实验验收仍需全套报告。
 
 ## 1. Docker 不可用或宿主机内存不足
 

@@ -1,81 +1,240 @@
 services:
   mysql:
     image: mysql:8.4
+    restart: "no"
     ports:
-      - "3313:3306"
+      - "127.0.0.1:3313:3306"
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: ${MYSQL_DATABASE}
-      MYSQL_USER: ${MYSQL_USER}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD}"
+      IDENTITY_APP_PASSWORD: "${IDENTITY_APP_PASSWORD}"
+      IDENTITY_MIGRATOR_PASSWORD: "${IDENTITY_MIGRATOR_PASSWORD}"
+      MARKET_APP_PASSWORD: "${MARKET_APP_PASSWORD}"
+      MARKET_MIGRATOR_PASSWORD: "${MARKET_MIGRATOR_PASSWORD}"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./docker/mysql/01-split-databases.sh:/docker-entrypoint-initdb.d/01-split-databases.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$${MYSQL_ROOT_PASSWORD}"]
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$${MYSQL_ROOT_PASSWORD}"]
       interval: 5s
       timeout: 5s
-      retries: 20
+      retries: 30
+    networks:
+      - campus-cloud
 
   redis:
     image: redis:7.4.2-alpine
+    restart: "no"
     ports:
-      - "6383:6379"
+      - "127.0.0.1:6383:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 20
+    networks:
+      - campus-cloud
 
   rabbitmq:
     image: rabbitmq:3.13.7-management
+    restart: "no"
     ports:
-      - "5673:5672"
-      - "15673:15672"
+      - "127.0.0.1:5673:5672"
+      - "127.0.0.1:15673:15672"
     environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_DEFAULT_USER}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_DEFAULT_PASS}"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 5s
       timeout: 5s
       retries: 20
+    networks:
+      - campus-cloud
 
   elasticsearch:
     build:
       context: ./docker/elasticsearch
     image: campus-market/elasticsearch:8.18.8-smartcn
+    restart: "no"
     ports:
-      - "9203:9200"
+      - "127.0.0.1:9203:9200"
     environment:
       discovery.type: single-node
-      xpack.security.enabled: "true"
-      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
-      ES_JAVA_OPTS: -Xms512m -Xmx512m
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
     healthcheck:
-      test: ["CMD-SHELL", "curl --fail -u elastic:$${ELASTIC_PASSWORD} http://localhost:9200/_cluster/health"]
+      test: ["CMD-SHELL", "curl --fail http://localhost:9200/_cluster/health?wait_for_status=yellow"]
       interval: 10s
       timeout: 5s
       retries: 30
+    networks:
+      - campus-cloud
 
   minio:
     image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    restart: "no"
     command: server /data --console-address :9001
     ports:
-      - "9010:9000"
-      - "9011:9001"
+      - "127.0.0.1:9010:9000"
+      - "127.0.0.1:9011:9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD}"
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:9000/minio/health/ready"]
       interval: 5s
       timeout: 5s
       retries: 20
+    networks:
+      - campus-cloud
 
-  toxiproxy:
-    image: ghcr.io/shopify/toxiproxy:2.12.0
+  discovery-server:
+    build:
+      context: .
+      dockerfile: docker/apps/Dockerfile
+      args:
+        APP_JAR: discovery-server/target/discovery-server-0.0.1-SNAPSHOT.jar
+    restart: "no"
     ports:
-      - "8475:8474"
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "--quiet", "http://localhost:8474/version"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
+      - "127.0.0.1:8761:8761"
+    environment:
+      SERVER_PORT: "8761"
+      EUREKA_INSTANCE_HOSTNAME: discovery-server
+    networks:
+      - campus-cloud
+
+  identity-service:
+    build:
+      context: .
+      dockerfile: docker/apps/Dockerfile
+      args:
+        APP_JAR: identity-service/target/identity-service-0.0.1-SNAPSHOT.jar
+    restart: "no"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      discovery-server:
+        condition: service_started
+    ports:
+      - "127.0.0.1:18081:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      SERVER_PORT: "8080"
+      SPRING_DATASOURCE_URL: "jdbc:mysql://mysql:3306/identity_db?sslMode=DISABLED&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+      SPRING_DATASOURCE_USERNAME: identity_app
+      SPRING_DATASOURCE_PASSWORD: "${IDENTITY_APP_PASSWORD}"
+      SPRING_FLYWAY_URL: "jdbc:mysql://mysql:3306/identity_db?sslMode=DISABLED&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+      SPRING_FLYWAY_USER: identity_migrator
+      SPRING_FLYWAY_PASSWORD: "${IDENTITY_MIGRATOR_PASSWORD}"
+      SPRING_FLYWAY_LOCATIONS: classpath:db/migration
+      SPRING_DATA_REDIS_URL: redis://redis:6379
+      EUREKA_DEFAULT_ZONE: http://discovery-server:8761/eureka/
+      EUREKA_INSTANCE_HOSTNAME: identity-service
+      CAMPUS_MARKET_IDENTITY_ALLOWED_DOMAINS: stu.example.edu.cn
+      CAMPUS_MARKET_IDENTITY_VERIFICATION_SECRET: "${CAMPUS_MARKET_IDENTITY_VERIFICATION_SECRET}"
+      CAMPUS_MARKET_JWT_ISSUER: "${CAMPUS_MARKET_JWT_ISSUER}"
+      CAMPUS_MARKET_JWT_AUDIENCE: "${CAMPUS_MARKET_JWT_AUDIENCE}"
+      CAMPUS_MARKET_JWT_KEY_ID: identity-key-1
+      CAMPUS_MARKET_JWT_PRIVATE_KEY: "file:/run/secrets/jwt-private-key.pem"
+      CAMPUS_MARKET_JWT_PUBLIC_KEY: "file:/run/secrets/jwt-public-key.pem"
+    volumes:
+      - type: bind
+        source: "${JWT_PRIVATE_KEY_FILE}"
+        target: /run/secrets/jwt-private-key.pem
+        read_only: true
+      - type: bind
+        source: "${JWT_PUBLIC_KEY_FILE}"
+        target: /run/secrets/jwt-public-key.pem
+        read_only: true
+    networks:
+      - campus-cloud
+
+  legacy-market-service:
+    build:
+      context: .
+      dockerfile: docker/apps/Dockerfile
+      args:
+        APP_JAR: legacy-market-service/target/legacy-market-service-0.0.1-SNAPSHOT.jar
+    restart: "no"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      discovery-server:
+        condition: service_started
+      identity-service:
+        condition: service_started
+    ports:
+      - "127.0.0.1:18082:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      SERVER_PORT: "8080"
+      SPRING_DATASOURCE_URL: "jdbc:mysql://mysql:3306/market_db?sslMode=DISABLED&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+      SPRING_DATASOURCE_USERNAME: market_app
+      SPRING_DATASOURCE_PASSWORD: "${MARKET_APP_PASSWORD}"
+      SPRING_FLYWAY_URL: "jdbc:mysql://mysql:3306/market_db?sslMode=DISABLED&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+      SPRING_FLYWAY_USER: market_migrator
+      SPRING_FLYWAY_PASSWORD: "${MARKET_MIGRATOR_PASSWORD}"
+      SPRING_FLYWAY_LOCATIONS: classpath:db/migration
+      SPRING_DATA_REDIS_URL: redis://redis:6379
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: "5672"
+      SPRING_RABBITMQ_USERNAME: "${RABBITMQ_DEFAULT_USER}"
+      SPRING_RABBITMQ_PASSWORD: "${RABBITMQ_DEFAULT_PASS}"
+      SPRING_ELASTICSEARCH_URIS: http://elasticsearch:9200
+      EUREKA_DEFAULT_ZONE: http://discovery-server:8761/eureka/
+      EUREKA_INSTANCE_HOSTNAME: legacy-market-service
+      CAMPUS_MARKET_IDENTITY_JWKS_URI: http://identity-service:8080/api/auth/.well-known/jwks.json
+      CAMPUS_MARKET_JWT_ISSUER: "${CAMPUS_MARKET_JWT_ISSUER}"
+      CAMPUS_MARKET_JWT_AUDIENCE: "${CAMPUS_MARKET_JWT_AUDIENCE}"
+      CAMPUS_MARKET_STORAGE_ENDPOINT: http://minio:9000
+      CAMPUS_MARKET_STORAGE_ACCESS_KEY: "${MINIO_ROOT_USER}"
+      CAMPUS_MARKET_STORAGE_SECRET_KEY: "${MINIO_ROOT_PASSWORD}"
+      CAMPUS_MARKET_STORAGE_BUCKET: campus-market
+      CAMPUS_MARKET_PAYMENT_PROVIDER: simulated
+      CAMPUS_MARKET_PAYMENT_PROVIDER_URL: http://legacy-market-service:8080/simulated-provider
+      CAMPUS_MARKET_PAYMENT_SIGNING_SECRET: "${CAMPUS_MARKET_PAYMENT_SIGNING_SECRET}"
+      CAMPUS_MARKET_PAYMENT_SIMULATION_ENABLED: "true"
+    networks:
+      - campus-cloud
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: docker/apps/Dockerfile
+      args:
+        APP_JAR: api-gateway/target/api-gateway-0.0.1-SNAPSHOT.jar
+    restart: "no"
+    depends_on:
+      discovery-server:
+        condition: service_started
+      identity-service:
+        condition: service_started
+      legacy-market-service:
+        condition: service_started
+    ports:
+      - "127.0.0.1:18080:8080"
+    environment:
+      SERVER_PORT: "8080"
+      EUREKA_DEFAULT_ZONE: http://discovery-server:8761/eureka/
+      EUREKA_INSTANCE_HOSTNAME: api-gateway
+      CAMPUS_MARKET_IDENTITY_JWKS_URI: http://identity-service:8080/api/auth/.well-known/jwks.json
+      CAMPUS_MARKET_JWT_ISSUER: "${CAMPUS_MARKET_JWT_ISSUER}"
+      CAMPUS_MARKET_JWT_AUDIENCE: "${CAMPUS_MARKET_JWT_AUDIENCE}"
+    networks:
+      - campus-cloud
+
+volumes:
+  mysql-data:
+
+networks:
+  campus-cloud:

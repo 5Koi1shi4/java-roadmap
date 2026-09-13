@@ -1,8 +1,23 @@
-# 校园二手交易平台实验
+# 实验八：Spring Cloud 渐进拆分（8.1 身份服务）
 
-这是一个基于 Spring Boot 3、JDK 17 的 Maven 聚合实验工程。当前可运行的 `legacy-market-service` 保留实验七的模块化单体实现，完成校园邮箱注册、批量库存、一口价订单、模拟支付、当面交付、争议与部分退货退款、评价，以及结算后的卖家质保义务。实验重点不是页面功能，而是用数据库事实、幂等命令、租约 fencing、可靠消息和可恢复外部协作证明交易正确性。
+这是基于 JDK 17、Spring Boot 3.5.16、Spring Cloud 2025.0.3 的 Maven 聚合实验。身份服务独立签发 RS256 Token，Gateway 与兼容交易单体分别通过 JWKS 验签，Eureka 提供实例发现。`identity_db` 与 `market_db` 使用独立账号，交易不变量继续由兼容单体维护。
 
-当前总状态为“已验收”：主体交易闭环和完整测试基线已经通过。原计划的 `7.1` 聊天、`7.2` 竞价、`7.3` 跑腿/代取及真实支付适配器因涉及法律与合规问题，暂不开展，也不再作为实验七验收的前置条件。
+当前总状态为“进行中”。实验七的已验收结果仅作为迁入基线，不能替代实验八的四应用旅程、停机恢复及完整 Reactor 验收。原计划的 `7.1` 聊天、`7.2` 竞价、`7.3` 跑腿/代取及真实支付适配器继续暂停。
+
+## 8.1 边界与验收入口
+
+本实验只支持全新环境，不支持生产不停机迁移。请先阅读 [架构](docs/architecture.md)、[迁移边界](docs/migration-boundary.md)、[排障](TROUBLESHOOTING.md)、[学习日志](notes/learning-log.md) 与 [面试追问](interview/question-bank.md)。身份服务实际 JWKS 地址为 `/api/auth/.well-known/jwks.json`；客户端只访问 Gateway 的 `/api/auth/**` 与 `/api/**`，不使用服务实例地址。
+
+在本目录使用 JDK 17 串行执行：
+
+```powershell
+docker info
+.\mvnw.cmd test
+.\mvnw.cmd verify
+git diff --check
+```
+
+必须等 `docker info` 成功再执行完整验收；Docker 不可用或外部测试 skipped 均不算通过。2026-09-14 的质保截止定点回归为 3 项，0 failures、0 errors、0 skipped，完整验收结果尚待补齐。以下交易说明保留实验七业务范围；旧验收数只说明迁入基线。
 
 ## 你将运行到的能力
 
@@ -19,7 +34,7 @@
 
 ## 模块和事实边界
 
-聚合根包含五个 Maven 模块：`legacy-market-service` 是当前可独立启动的兼容服务，承载实验七原有源码、测试和数据库迁移；`platform-test-support`、`discovery-server`、`identity-service`、`api-gateway` 当前仅提供合法的空 JAR 模块，供后续拆分任务接入。Task 2 不迁出身份代码，也不改变现有 HTTP 或数据库行为。
+聚合根包含五个 Maven 模块：`discovery-server`、`identity-service`、`legacy-market-service`、`api-gateway` 是四个独立应用；`platform-test-support` 只提供 test scope 夹具。身份代码和身份表已迁入身份服务；兼容单体仅保留交易事实，不签发 Token，不查询身份库。
 
 ```text
 身份/邮箱 ──> 商品/库存 ──> 订单 ──> 支付/退款 ──> 交付与争议
@@ -51,24 +66,62 @@ MySQL 是订单、库存、金额、截止时间和在售集合的事实源。Re
 - Docker Desktop，Docker Engine 已启动。
 - 完整验收前至少保留 1 GiB 可用内存，并关闭无关容器和并行构建。
 
-复制 `.env.example` 为 `.env`，仅填写本地值，不提交 `.env`。Compose 固定提供 MySQL 8.4、Redis 7.4、RabbitMQ 3.13、安装 SmartCN 的 Elasticsearch 8.18.8、MinIO 和 Toxiproxy：
+复制 `.env.example` 为 `.env`，仅填写本地值，不提交 `.env`。其中数据库口令、RabbitMQ/MinIO 凭据、验证码签名和模拟支付签名必须替换为本机值；JWT 密钥文件放在仓库外，并在 `.env` 中填写两个绝对路径。`CAMPUS_MARKET_JWT_ISSUER` 使用本地约定值 `http://gateway.test`，`CAMPUS_MARKET_JWT_AUDIENCE` 必须填写固定值 `campus-market-api`。示例文件只有占位符，不能直接启动。
+
+本地 Compose 使用 `local` profile 的受控内存邮件适配器保存最近验证码，不公开验证码读取接口，也不会发送真实邮件；因此本地启动不需要可用 SMTP。生产身份服务部署必须按既有 Task5 邮件适配器提供 `CAMPUS_MARKET_SMTP_HOST`、`CAMPUS_MARKET_SMTP_PORT`、`CAMPUS_MARKET_SMTP_USERNAME`、`CAMPUS_MARKET_SMTP_PASSWORD` 和 `CAMPUS_MARKET_SMTP_FROM`，真实邮件测试不属于本地 Compose 验证。
+
+可用 OpenSSL 在仓库外生成一对仅供本地实验的 RSA 密钥。私钥必须是 PKCS#8，公钥必须是 X.509：
+
+```powershell
+$keyDir = Join-Path $env:TEMP 'campus-market-cloud-keys'
+New-Item -ItemType Directory -Force $keyDir | Out-Null
+openssl genrsa -traditional -out (Join-Path $keyDir 'jwt-private-rsa.pem') 2048
+openssl pkcs8 -topk8 -nocrypt -in (Join-Path $keyDir 'jwt-private-rsa.pem') -out (Join-Path $keyDir 'jwt-private-key.pem')
+openssl rsa -in (Join-Path $keyDir 'jwt-private-rsa.pem') -pubout -out (Join-Path $keyDir 'jwt-public-key.pem')
+```
+
+在本目录按以下顺序构建并启动四个独立应用。第一次启动前必须先打包，Compose 只使用各模块的 `target` JAR；不再使用旧的单体 `spring-boot:run` 命令：
 
 ```powershell
 docker info
-docker compose up -d mysql redis rabbitmq elasticsearch minio toxiproxy
-docker compose ps
-docker compose down
+Copy-Item .env.example .env
+# 编辑 .env，填入本机口令和密钥绝对路径
+.\mvnw.cmd -DskipTests package
+docker compose --env-file .env config --quiet
+docker compose --env-file .env build
+docker compose --env-file .env up -d
+docker compose --env-file .env ps
 ```
 
-应用可在依赖健康后启动：
+Compose 的依赖顺序是 discovery（8761）先启动，identity（18081）和 legacy（18082）在双库及其基础设施健康后启动，Gateway（18080）最后启动。宿主机端口如下：
+
+| 服务 | 容器端口 | 宿主机端口 | 用途 |
+|---|---:|---:|---|
+| discovery-server | 8761 | 8761 | Eureka 注册中心 |
+| api-gateway | 8080 | 18080 | 客户端唯一入口 |
+| identity-service | 8080 | 18081 | 身份服务诊断入口 |
+| legacy-market-service | 8080 | 18082 | 兼容交易服务诊断入口 |
+| MySQL | 3306 | 3313 | `identity_db`、`market_db` |
+| Redis | 6379 | 6383 | 验证码和限流 |
+| RabbitMQ | 5672/15672 | 5673/15673 | 事件与管理界面 |
+| Elasticsearch | 9200 | 9203 | SmartCN 搜索读模型 |
+| MinIO | 9000/9001 | 9010/9011 | 私有对象和控制台 |
+
+四个应用的关键环境变量已在 Compose 中显式配置：discovery 使用 `SERVER_PORT`；identity 使用 `SPRING_PROFILES_ACTIVE=local`、本库 `SPRING_DATASOURCE_*`/`SPRING_FLYWAY_*`、`SPRING_DATA_REDIS_URL`、`EUREKA_DEFAULT_ZONE`、`CAMPUS_MARKET_JWT_*` 和密钥 bind mount；legacy 使用本库数据源/Flyway、Redis、`SPRING_RABBITMQ_*`、`SPRING_ELASTICSEARCH_URIS`、MinIO `CAMPUS_MARKET_STORAGE_*`、支付模拟 `CAMPUS_MARKET_PAYMENT_*`、JWKS 和 Eureka；Gateway 使用 `SERVER_PORT`、JWKS、issuer/audience 和 `EUREKA_DEFAULT_ZONE`。所有口令和宿主机密钥路径只从 `.env` 读取。
+
+应用间只使用 Compose 服务名：Eureka 为 `http://discovery-server:8761/eureka/`，identity 的固定 JWKS 为 `http://identity-service:8080/api/auth/.well-known/jwks.json`，legacy 和 Gateway 均通过该地址验签。客户端只访问 Gateway；例如先检查 Gateway 暴露的 JWKS：
 
 ```powershell
-.\mvnw.cmd -pl legacy-market-service spring-boot:run
+Invoke-WebRequest -Uri http://localhost:18080/api/auth/.well-known/jwks.json
 ```
 
-聚合根命令（例如 `test`、`verify`）在本目录执行；只运行兼容服务时使用 `-pl legacy-market-service`。
+停止本地实验：
 
-测试使用隔离的 Testcontainers，不能用本机历史服务或 skipped 结果代替真实外部协作验证。
+```powershell
+docker compose --env-file .env down
+```
+
+MySQL 初始化脚本只在 `mysql-data` 空卷第一次创建数据库和账号。需要丢弃本地实验数据并重新初始化时才使用 `down -v`；该命令会删除这个 Compose 项目的本地数据库卷。Toxiproxy 不属于本地运行 Compose，故障测试由 Testcontainers 按测试需要独立创建。测试使用隔离的 Testcontainers，不能用本机历史服务或 skipped 结果代替真实外部协作验证。
 
 ## 主要 HTTP 接口
 
@@ -170,4 +223,4 @@ git diff --check
 3. `7.3` 跑腿/代取：独立 `ServiceOrder`，不复用商品订单状态机。
 4. 真实支付适配器：取得资质、沙箱/生产账号和批准后，再实现现有 `PaymentGateway` 契约。
 
-上述扩展涉及通信内容与个人信息处理、交易平台责任、竞价与跑腿服务规则、支付资质及资金安全等法律与合规问题。相关设计只作为历史评估材料保留，当前不进入实现、测试或上线流程；如未来重新启动，必须先完成独立法律合规评估和明确授权。实验七主体不依赖这些扩展，当前总状态为“已验收”。更多故障症状和恢复动作见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
+上述扩展涉及通信内容与个人信息处理、交易平台责任、竞价与跑腿服务规则、支付资质及资金安全等法律与合规问题。相关设计只作为历史评估材料保留，当前不进入实现、测试或上线流程；如未来重新启动，必须先完成独立法律合规评估和明确授权。实验七主体不依赖这些扩展，其迁入基线已验收；实验八当前仍为“进行中”。更多故障症状和恢复动作见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
