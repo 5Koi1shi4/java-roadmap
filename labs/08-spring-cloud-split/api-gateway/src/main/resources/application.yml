@@ -1,0 +1,75 @@
+spring:
+  application:
+    name: api-gateway
+  main:
+    web-application-type: reactive
+  cloud:
+    discovery:
+      enabled: true
+    loadbalancer:
+      retry:
+        enabled: false
+    gateway:
+      discovery:
+        locator:
+          enabled: false
+      server:
+        webflux:
+          discovery:
+            locator:
+              enabled: false
+          routes:
+            - id: identity-api
+              uri: lb://identity-service
+              predicates:
+                - Path=/api/auth/**
+            - id: legacy-api
+              uri: lb://legacy-market-service
+              predicates:
+                - Path=/api/**
+          httpclient:
+            connect-timeout: 2000
+            response-timeout: 5s
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: ${CAMPUS_MARKET_IDENTITY_JWKS_URI:http://localhost:18081/api/auth/.well-known/jwks.json}
+          issuer-uri: ${CAMPUS_MARKET_JWT_ISSUER:http://gateway.test}
+
+server:
+  error:
+    include-message: never
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_DEFAULT_ZONE:http://localhost:8761/eureka/}
+
+campus:
+  market:
+    jwt:
+      audience: ${CAMPUS_MARKET_JWT_AUDIENCE:campus-market-api}
+
+---
+spring:
+  config:
+    activate:
+      on-profile: test
+  cloud:
+    discovery:
+      enabled: false
+
+eureka:
+  client:
+    enabled: false
