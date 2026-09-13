@@ -3,8 +3,7 @@ ALTER TABLE warranty_case
     ADD COLUMN seller_response VARCHAR(2000) NULL AFTER seller_deadline,
     ADD COLUMN hard_deadline TIMESTAMP(6) NULL AFTER admin_deadline,
     ADD COLUMN admin_sla_alerted_at TIMESTAMP(6) NULL,
-    ADD KEY idx_warranty_case_deadlines (status, seller_deadline, admin_deadline, hard_deadline),
-    ADD CONSTRAINT fk_warranty_case_admin FOREIGN KEY (assigned_admin_id) REFERENCES campus_user (id);
+    ADD KEY idx_warranty_case_deadlines (status, seller_deadline, admin_deadline, hard_deadline);
 
 CREATE TABLE warranty_deadline_claim (
     id CHAR(36) NOT NULL,
@@ -39,7 +38,6 @@ CREATE TABLE seller_account_restriction (
     KEY idx_seller_restriction_active (seller_id, restriction_type, status),
     CONSTRAINT ck_seller_restriction_type CHECK (restriction_type IN ('PUBLISH','WITHDRAW')),
     CONSTRAINT ck_seller_restriction_status CHECK (status IN ('ACTIVE','CLEARED')),
-    CONSTRAINT fk_seller_restriction_seller FOREIGN KEY (seller_id) REFERENCES campus_user (id),
     CONSTRAINT fk_seller_restriction_obligation FOREIGN KEY (source_obligation_id) REFERENCES seller_obligation (id)
 );
 

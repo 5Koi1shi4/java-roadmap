@@ -1,6 +1,6 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.example.campusmarket.payment.application.PaymentGateway;
 import com.example.campusmarket.payment.infrastructure.SimulatedPaymentGateway;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -23,7 +23,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** 模拟适配器契约：真实 HTTP provider、金额分、查询和回调验签。 */
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("local")
 @TestPropertySource(properties = "server.address=0.0.0.0")
 class PaymentGatewayContractIT extends SharedContainers {

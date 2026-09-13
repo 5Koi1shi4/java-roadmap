@@ -26,7 +26,6 @@ public final class CampusMetricsProductionBinder {
     private static final Set<String> PAYMENT_STATES = Set.of("CREATED", "PENDING", "SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN");
     private static final Set<String> CALLBACK_STATES = Set.of("RECEIVED", "PROCESSING", "COMPLETED", "FAILED");
     private static final Set<String> REFUND_STATES = Set.of("REQUESTED", "PROCESSING", "SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN");
-    private static final Set<String> VERIFICATION_STATES = Set.of("PENDING", "VERIFIED", "EXPIRED", "LOCKED");
     private final JdbcTemplate jdbc;
     private final CampusMetrics metrics;
 
@@ -61,9 +60,6 @@ public final class CampusMetricsProductionBinder {
             count("SELECT COUNT(*) FROM payment_callback_event WHERE status=?", state));
         for (String state : REFUND_STATES) set("campus.market.refund.state.count", "status", state,
             count("SELECT COUNT(*) FROM refund_order WHERE status=?", state));
-        for (String state : VERIFICATION_STATES) set("campus.market.identity.verification.state.count", "status", state,
-            count("SELECT COUNT(*) FROM email_verification WHERE status=?", state));
-
         set("campus.market.outbox.backlog", null, null, count("SELECT COUNT(*) FROM integration_outbox WHERE status IN ('NEW','PUBLISHING','FAILED')"));
         set("campus.market.outbox.oldest.delay", null, null, delay("SELECT TIMESTAMPDIFF(MICROSECOND, MIN(created_at), CURRENT_TIMESTAMP(6))/1000000.0 FROM integration_outbox WHERE status IN ('NEW','PUBLISHING','FAILED')"));
         set("campus.market.inbox.backlog", null, null, count("SELECT COUNT(*) FROM consumed_event WHERE status IN ('PROCESSING','FAILED')"));

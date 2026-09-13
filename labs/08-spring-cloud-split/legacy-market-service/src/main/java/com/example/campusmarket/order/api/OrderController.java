@@ -1,6 +1,6 @@
 package com.example.campusmarket.order.api;
 
-import com.example.campusmarket.identity.application.AuthenticatedUser;
+import com.example.campusmarket.security.AuthenticatedUser;
 import com.example.campusmarket.api.ApiErrors;
 import com.example.campusmarket.order.application.CreateOrderCommand;
 import com.example.campusmarket.order.application.CreateOrderService;

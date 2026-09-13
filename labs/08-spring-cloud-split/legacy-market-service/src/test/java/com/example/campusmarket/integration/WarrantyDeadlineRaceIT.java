@@ -1,6 +1,6 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.example.campusmarket.warranty.application.SellerObligationService;
 import com.example.campusmarket.warranty.application.WarrantyDeadlineScheduler;
 import org.junit.jupiter.api.Test;
@@ -17,7 +17,7 @@ import java.util.concurrent.*;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** 真实 MySQL：质保截止领取 fencing，以及截止时刻最后一笔筹资与过期更新串行化。 */
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
+@SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
 @ActiveProfiles("local")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @TestPropertySource(properties = {
@@ -77,6 +77,6 @@ class WarrantyDeadlineRaceIT extends Task11MySqlContainers {
         jdbc.update("INSERT INTO warranty_case(id,order_id,idempotency_key,buyer_id,seller_id,warranty_days,warranty_scope_snapshot,disputed_quantity,reason,status,seller_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?,?,?,90,'scope',1,'FUNCTIONAL_DEFECT','OPEN',DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",caseId.toString(),order.toString(),"key-"+caseId,buyer.toString(),seller.toString());
         return new UUID[]{buyer,seller,caseId};
     }
-    private UUID user(){UUID id=UUID.randomUUID();jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",id.toString(),id+"@stu.example.edu.cn","hash");return id;}
+    private UUID user(){return UUID.randomUUID();}
     private static void await(CyclicBarrier barrier) { try { barrier.await(20, TimeUnit.SECONDS); } catch (Exception e) { throw new AssertionError("并发屏障失败", e); } }
 }

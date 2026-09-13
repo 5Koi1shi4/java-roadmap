@@ -1,6 +1,6 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Order;
@@ -30,7 +30,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class CampusMarketJourneyIT {
     @Nested
     @Order(1)
-    @SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
+    @SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
     @ActiveProfiles("local")
     @TestPropertySource(properties = {
         "server.port=18082",
@@ -136,7 +136,7 @@ class CampusMarketJourneyIT {
 
     @Nested
     @Order(2)
-    @SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
+    @SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
     @ActiveProfiles("local")
     @TestPropertySource(properties = {
         "server.port=18082",

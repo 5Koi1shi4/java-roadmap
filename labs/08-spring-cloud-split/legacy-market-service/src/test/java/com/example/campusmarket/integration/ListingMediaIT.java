@@ -1,8 +1,6 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
-import com.example.campusmarket.identity.application.AuthenticatedUser;
-import com.example.campusmarket.identity.infrastructure.JwtService;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -31,7 +29,7 @@ import static org.mockito.Mockito.doThrow;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("local")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ListingMediaIT extends SharedContainers {
@@ -45,7 +43,6 @@ class ListingMediaIT extends SharedContainers {
     @LocalServerPort
     private int port;
     @Autowired private JdbcTemplate jdbc;
-    @Autowired private JwtService jwtService;
     @MockBean private UploadBindingHook bindingHook;
     private final HttpClient client = HttpClient.newHttpClient();
 
@@ -183,14 +180,11 @@ class ListingMediaIT extends SharedContainers {
     }
 
     private UUID createUser() {
-        UUID id = UUID.randomUUID();
-        jdbc.update("INSERT INTO campus_user (id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-            id.toString(), id + "@stu.example.edu.cn", "$2a$10$7EqJtq98hPqEX7fNZaFWoO3M8fA5M9j3rQf6Jt2f7hM2yJ0f7vQzK");
-        return id;
+        return UUID.randomUUID();
     }
 
     private String token(UUID user) {
-        return jwtService.issue(new AuthenticatedUser(user, Set.of("ROLE_USER")));
+        return ResourceServerTestSupport.token(user, Set.of("ROLE_USER"));
     }
 
     private HttpResponse<String> request(String method, String path, String token, String body, String contentType) throws Exception {

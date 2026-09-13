@@ -1,6 +1,6 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.example.campusmarket.payment.application.SettlementService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -15,7 +15,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Task11 结算资格矩阵：只使用真实 MySQL，避免启动无关基础设施。 */
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
+@SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
 @ActiveProfiles("local")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @TestPropertySource(properties = {
@@ -114,10 +114,7 @@ class Task11SettlementMatrixIT extends Task11MySqlContainers {
     }
 
     private UUID user() {
-        UUID id = UUID.randomUUID();
-        jdbc.update("INSERT INTO campus_user (id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-            id.toString(), id + "@stu.example.edu.cn", "hash");
-        return id;
+        return UUID.randomUUID();
     }
 
     private record Fixture(UUID buyer, UUID seller, UUID order, UUID payment) {}

@@ -62,18 +62,13 @@ class ProductSearchIT extends SharedContainers {
         jdbc.update("DELETE FROM trade_order");
         jdbc.update("DELETE FROM audit_event");
         jdbc.update("DELETE FROM object_upload_session");
-        jdbc.update("DELETE FROM email_verification");
-        jdbc.update("DELETE FROM external_identity");
         jdbc.update("DELETE FROM listing_media");
         jdbc.update("DELETE FROM search_outbox");
         jdbc.update("DELETE FROM search_rebuild_intent");
         jdbc.update("DELETE FROM search_index_cleanup_task");
         jdbc.update("UPDATE search_rebuild_gate SET mode='OPEN',owner_id=NULL,claim_token=NULL,lease_until=NULL WHERE id=1");
         jdbc.update("DELETE FROM listing");
-        jdbc.update("DELETE FROM campus_user");
         UUID seller = UUID.randomUUID();
-        jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-            seller.toString(), seller + "@stu.example.edu.cn", "hash");
         onSale = insertListing(ON_SALE_ID, seller, "Java 并发编程实战", "并发编程与线程池", "教材", 18900, 3, "ON_SALE", 3);
         secondOnSale = insertListing(SECOND_ON_SALE_ID, seller, "并发编程复习资料", "并发编程练习", "教材", 12000, 2, "ON_SALE", 2);
         offSale = insertListing(OFF_SALE_ID, seller, "并发编程旧版", "Java 并发编程", "教材", 9900, 2, "OFF_SALE", 4);
@@ -130,8 +125,6 @@ class ProductSearchIT extends SharedContainers {
     void outOfOrderTombstoneDoesNotResurrectAnOlderListingEvent() {
         UUID temporarySeller = UUID.randomUUID();
         UUID temporaryListing = UUID.randomUUID();
-        jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-            temporarySeller.toString(), temporarySeller + "@stu.example.edu.cn", "hash");
         insertListing(temporaryListing, temporarySeller, "临时并发编程商品", "并发编程", "教材", 10000, 1, "ON_SALE", 1);
 
         projector.project(new DomainEvent(UUID.randomUUID(), "LISTING_OFF_SALE", temporaryListing.toString(), 2,

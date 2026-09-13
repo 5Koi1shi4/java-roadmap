@@ -9,6 +9,5 @@ CREATE TABLE seller_withdrawal (
     PRIMARY KEY (id),
     UNIQUE KEY uk_seller_withdrawal_idempotency (seller_id, idempotency_key),
     CONSTRAINT ck_seller_withdrawal_amount CHECK (amount_fen > 0),
-    CONSTRAINT ck_seller_withdrawal_status CHECK (status IN ('REQUESTED','COMPLETED','FAILED')),
-    CONSTRAINT fk_seller_withdrawal_seller FOREIGN KEY (seller_id) REFERENCES campus_user (id)
+    CONSTRAINT ck_seller_withdrawal_status CHECK (status IN ('REQUESTED','COMPLETED','FAILED'))
 );

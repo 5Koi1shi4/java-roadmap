@@ -1,6 +1,6 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.example.campusmarket.messaging.InboxRepository;
 import com.example.campusmarket.messaging.OutboxDispatcher;
 import com.example.campusmarket.messaging.OutboxRepository;
@@ -48,7 +48,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("local")
 @Import(ReliableMessagingIT.ListenerFixture.class)
 class ReliableMessagingIT extends SharedContainers {

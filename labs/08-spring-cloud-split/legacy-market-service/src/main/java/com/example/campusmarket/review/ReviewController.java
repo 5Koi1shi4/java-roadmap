@@ -1,6 +1,6 @@
 package com.example.campusmarket.review;
 
-import com.example.campusmarket.identity.application.AuthenticatedUser;
+import com.example.campusmarket.security.AuthenticatedUser;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;

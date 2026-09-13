@@ -45,7 +45,7 @@ class SchemaIT extends SharedContainers {
     @Test
     void createsAllCoreTables() throws SQLException {
         Set<String> expected = Set.of(
-            "campus_user", "email_verification", "external_identity", "listing", "listing_media",
+            "listing", "listing_media",
             "inventory_movement", "search_outbox", "trade_order", "order_command", "order_transition",
             "order_deadline_claim", "payment_order", "payment_callback_event", "refund_order", "settlement",
             "handoff_record", "dispute_case", "dispute_evidence", "return_case", "warranty_case",
@@ -55,7 +55,7 @@ class SchemaIT extends SharedContainers {
             "seller_obligation_funding", "settlement_obligation_deduction", "return_proof_attestation",
             "seller_account_restriction", "warranty_deadline_claim", "seller_withdrawal");
         assertThat(tableNames()).containsExactlyInAnyOrderElementsOf(expected);
-        assertThat(expected).hasSize(38);
+        assertThat(expected).hasSize(35);
     }
 
     @Test
@@ -104,8 +104,9 @@ class SchemaIT extends SharedContainers {
             "version");
         assertThat(indexNames("seller_obligation")).contains("uk_seller_obligation_business_key",
             "uk_seller_obligation_warranty_case");
-        assertThat(foreignKeyNames()).contains("fk_listing_seller", "fk_trade_order_listing", "fk_refund_order_order",
-            "fk_warranty_case_order", "fk_seller_obligation_warranty_case");
+        assertThat(foreignKeyNames()).contains("fk_trade_order_listing", "fk_refund_order_order",
+            "fk_warranty_case_order", "fk_seller_obligation_warranty_case")
+            .doesNotContain("fk_listing_seller");
     }
 
     @Test

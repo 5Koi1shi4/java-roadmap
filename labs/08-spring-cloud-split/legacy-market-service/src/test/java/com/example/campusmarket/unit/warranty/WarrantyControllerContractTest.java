@@ -1,6 +1,6 @@
 package com.example.campusmarket.unit.warranty;
 
-import com.example.campusmarket.identity.application.AuthenticatedUser;
+import com.example.campusmarket.security.AuthenticatedUser;
 import com.example.campusmarket.warranty.api.WarrantyController;
 import com.example.campusmarket.warranty.application.WarrantyService;
 import com.example.campusmarket.warranty.domain.WarrantyDecision;

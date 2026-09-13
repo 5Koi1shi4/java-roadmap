@@ -1,6 +1,6 @@
 package com.example.campusmarket.unit.payment;
 
-import com.example.campusmarket.identity.application.AuthenticatedUser;
+import com.example.campusmarket.security.AuthenticatedUser;
 import com.example.campusmarket.order.application.IdempotentCommandService;
 import com.example.campusmarket.payment.api.SettlementController;
 import com.example.campusmarket.payment.application.SettlementService;

@@ -1,6 +1,6 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.example.campusmarket.catalog.application.ListingService;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
@@ -17,9 +17,9 @@ import java.util.concurrent.*;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** Proves the seller identity row is a real balance mutex and idempotent
- * replay is resolved before a later restriction gate. */
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+/** Proves settled market rows provide the balance mutex and idempotent replay
+ * is resolved before a later restriction gate. */
+@SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("local")
 @TestPropertySource(properties = {
     "campus.market.search.dispatcher.enabled=false", "campus.market.dispute.deadline.enabled=false",
@@ -67,6 +67,6 @@ class SellerWithdrawalConcurrencyIT extends Task11MySqlContainers {
         jdbc.update("INSERT INTO seller_obligation(id,warranty_case_id,seller_id,obligation_business_key,obligation_amount_fen,funding_deadline,restriction_status,status,version,created_at,updated_at) VALUES (?,?,?, ?,100,DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 3 DAY),'RESTRICTED','AWAITING_FUNDING',1,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", obligation.toString(), caseId.toString(), seller.toString(), "withdraw-" + obligation);
         return new Fixture(seller, obligation);
     }
-    private UUID user() { UUID id=UUID.randomUUID(); jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",id.toString(),id+"@withdraw.example.edu.cn","hash"); return id; }
+    private UUID user() { return UUID.randomUUID(); }
     private record Fixture(UUID seller, UUID obligation) {}
 }

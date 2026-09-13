@@ -1,7 +1,7 @@
 package com.example.campusmarket.warranty.api;
 
 import com.example.campusmarket.api.ApiErrors;
-import com.example.campusmarket.identity.application.AuthenticatedUser;
+import com.example.campusmarket.security.AuthenticatedUser;
 import com.example.campusmarket.warranty.application.WarrantyService;
 import com.example.campusmarket.warranty.domain.WarrantyDecision;
 import org.springframework.context.annotation.Profile;

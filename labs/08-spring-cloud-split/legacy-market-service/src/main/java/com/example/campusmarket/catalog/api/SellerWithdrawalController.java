@@ -2,7 +2,7 @@ package com.example.campusmarket.catalog.api;
 
 import com.example.campusmarket.api.ApiErrors;
 import com.example.campusmarket.catalog.application.ListingService;
-import com.example.campusmarket.identity.application.AuthenticatedUser;
+import com.example.campusmarket.security.AuthenticatedUser;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;

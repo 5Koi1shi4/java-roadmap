@@ -1,8 +1,6 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
-import com.example.campusmarket.identity.application.AuthenticatedUser;
-import com.example.campusmarket.identity.infrastructure.JwtService;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -24,7 +22,7 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("local")
 @TestPropertySource(properties = {
     "campus.market.search.dispatcher.enabled=false", "campus.market.dispute.deadline.enabled=false",
@@ -34,7 +32,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class ApiSecurityAndReviewIT extends Task11MySqlContainers {
     @Autowired JdbcTemplate jdbc;
-    @Autowired JwtService jwt;
     @Autowired TestRestTemplate http;
 
     @BeforeAll
@@ -81,10 +78,7 @@ class ApiSecurityAndReviewIT extends Task11MySqlContainers {
     }
 
     private UUID user() {
-        UUID id = UUID.randomUUID();
-        jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-            id.toString(), id + "@review.example.edu.cn", "hash");
-        return id;
+        return UUID.randomUUID();
     }
 
     private UUID settledOrder(UUID buyer, UUID seller) {
@@ -98,7 +92,7 @@ class ApiSecurityAndReviewIT extends Task11MySqlContainers {
 
     private HttpHeaders authHeaders(UUID id) {
         HttpHeaders headers = jsonHeaders();
-        headers.setBearerAuth(jwt.issue(new AuthenticatedUser(id, Set.of("ROLE_USER"))));
+        headers.setBearerAuth(ResourceServerTestSupport.token(id, Set.of("ROLE_USER")));
         return headers;
     }
     private static HttpHeaders jsonHeaders() { HttpHeaders h = new HttpHeaders(); h.setContentType(MediaType.APPLICATION_JSON); return h; }

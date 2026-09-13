@@ -21,6 +21,7 @@ public abstract class Task12RabbitMySqlContainers {
 
     @DynamicPropertySource
     static void register(DynamicPropertyRegistry registry) {
+        ResourceServerTestSupport.register(registry);
         registry.add("spring.datasource.url", MYSQL::getJdbcUrl);
         registry.add("spring.datasource.username", MYSQL::getUsername);
         registry.add("spring.datasource.password", MYSQL::getPassword);

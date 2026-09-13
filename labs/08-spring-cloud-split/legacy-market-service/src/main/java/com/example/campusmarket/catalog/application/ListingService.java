@@ -114,11 +114,15 @@ public class ListingService {
     public UUID withdraw(UUID sellerId, long amountFen, String idempotencyKey) {
         if (sellerId == null || amountFen <= 0 || idempotencyKey == null || idempotencyKey.isBlank()) throw new IllegalArgumentException("提现请求无效");
         if (jdbc == null) throw new IllegalStateException("提现账户存储不可用");
-        // The seller identity row is the durable seller-level mutex. It is
-        // acquired before reading either restrictions or balances, so two
-        // concurrent withdrawals cannot both spend the same settlement.
-        Integer sellerExists=jdbc.queryForObject("SELECT COUNT(*) FROM campus_user WHERE id=? FOR UPDATE",Integer.class,sellerId.toString());
-        if (sellerExists==null || sellerExists!=1) throw new NotFoundException();
+        // Lock the seller's settled trade rows before reading the balance. The
+        // market database owns these rows, so concurrent withdrawals cannot
+        // both spend the same settlement without consulting an identity DB.
+        jdbc.query("SELECT s.id FROM settlement s JOIN trade_order o ON o.id=s.order_id " +
+                "WHERE o.seller_id=? AND s.status='SETTLED' FOR UPDATE",
+            (org.springframework.jdbc.core.ResultSetExtractor<Void>) rs -> {
+                while (rs.next()) { /* acquire every matching settlement lock */ }
+                return null;
+            }, sellerId.toString());
         Withdrawal existing=jdbc.query("SELECT id,amount_fen FROM seller_withdrawal WHERE seller_id=? AND idempotency_key=? FOR UPDATE",rs->rs.next()?new Withdrawal(UUID.fromString(rs.getString(1)),rs.getLong(2)):null,sellerId.toString(),idempotencyKey);
         if(existing!=null){if(existing.amount()!=amountFen) throw new IllegalArgumentException("提现幂等冲突");return existing.id();}
         if (activeRestrictionForUpdate(sellerId, "WITHDRAW")) throw new RestrictionException();

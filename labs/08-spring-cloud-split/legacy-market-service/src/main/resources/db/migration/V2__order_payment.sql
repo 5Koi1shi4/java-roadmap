@@ -35,8 +35,6 @@ CREATE TABLE trade_order (
     CONSTRAINT ck_trade_order_status CHECK (status IN ('PENDING_PAYMENT', 'AWAITING_HANDOFF', 'AWAITING_RECEIPT',
         'AFTERSALE_WINDOW', 'DISPUTED', 'REFUNDING_CANCEL', 'CANCELLED', 'REFUNDED', 'SETTLED')),
     CONSTRAINT ck_trade_order_version CHECK (version >= 0),
-    CONSTRAINT fk_trade_order_buyer FOREIGN KEY (buyer_id) REFERENCES campus_user (id),
-    CONSTRAINT fk_trade_order_seller FOREIGN KEY (seller_id) REFERENCES campus_user (id),
     CONSTRAINT fk_trade_order_listing FOREIGN KEY (listing_id) REFERENCES listing (id)
 );
 
@@ -53,7 +51,6 @@ CREATE TABLE order_command (
     PRIMARY KEY (id),
     UNIQUE KEY uk_order_command_actor_key (actor_id, idempotency_key),
     CONSTRAINT ck_order_command_status CHECK (status IN ('PROCESSING', 'COMPLETED', 'FAILED')),
-    CONSTRAINT fk_order_command_actor FOREIGN KEY (actor_id) REFERENCES campus_user (id),
     CONSTRAINT fk_order_command_order FOREIGN KEY (order_id) REFERENCES trade_order (id)
 );
 
@@ -67,8 +64,7 @@ CREATE TABLE order_transition (
     occurred_at TIMESTAMP(6) NOT NULL,
     PRIMARY KEY (id),
     KEY idx_order_transition_order_time (order_id, occurred_at),
-    CONSTRAINT fk_order_transition_order FOREIGN KEY (order_id) REFERENCES trade_order (id),
-    CONSTRAINT fk_order_transition_actor FOREIGN KEY (actor_id) REFERENCES campus_user (id)
+    CONSTRAINT fk_order_transition_order FOREIGN KEY (order_id) REFERENCES trade_order (id)
 );
 
 CREATE TABLE order_deadline_claim (

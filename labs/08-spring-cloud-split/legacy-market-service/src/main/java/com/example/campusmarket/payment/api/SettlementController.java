@@ -1,7 +1,7 @@
 package com.example.campusmarket.payment.api;
 
 import com.example.campusmarket.api.ApiErrors;
-import com.example.campusmarket.identity.application.AuthenticatedUser;
+import com.example.campusmarket.security.AuthenticatedUser;
 import com.example.campusmarket.payment.application.SettlementService;
 import com.example.campusmarket.order.application.IdempotentCommandService;
 import org.springframework.context.annotation.Profile;

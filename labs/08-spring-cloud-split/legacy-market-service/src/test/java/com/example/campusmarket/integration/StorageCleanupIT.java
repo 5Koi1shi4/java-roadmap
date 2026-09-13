@@ -1,6 +1,6 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.example.campusmarket.storage.PrivateObjectStorage;
 import com.example.campusmarket.storage.StorageCleanupScheduler;
 import org.junit.jupiter.api.BeforeEach;
@@ -20,7 +20,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@SpringBootTest(classes = CampusMarketApplication.class)
+@SpringBootTest(classes = LegacyMarketApplication.class)
 @ActiveProfiles("local")
 class StorageCleanupIT extends SharedContainers {
     @Autowired private JdbcTemplate jdbc;
@@ -70,8 +70,6 @@ class StorageCleanupIT extends SharedContainers {
     @Test
     void expiredUploadSessionCreatesUniqueCleanup() {
         UUID user = UUID.randomUUID();
-        jdbc.update("INSERT INTO campus_user (id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-            user.toString(), user + "@stu.example.edu.cn", "hash");
         String key = "expired-session/" + UUID.randomUUID();
         storage.put(key, new ByteArrayInputStream("temporary".getBytes(StandardCharsets.UTF_8)), 9, "text/plain");
         String sessionId = UUID.randomUUID().toString();

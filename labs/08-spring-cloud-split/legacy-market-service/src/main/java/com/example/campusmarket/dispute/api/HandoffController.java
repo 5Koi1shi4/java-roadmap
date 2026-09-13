@@ -2,7 +2,7 @@ package com.example.campusmarket.dispute.api;
 
 import com.example.campusmarket.dispute.application.HandoffService;
 import com.example.campusmarket.api.ApiErrors;
-import com.example.campusmarket.identity.application.AuthenticatedUser;
+import com.example.campusmarket.security.AuthenticatedUser;
 import com.example.campusmarket.order.application.IdempotentCommandService;
 import com.example.campusmarket.order.application.OrderLifecycleService;
 import org.springframework.context.annotation.Profile;

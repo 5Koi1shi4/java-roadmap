@@ -1,8 +1,6 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
-import com.example.campusmarket.identity.application.AuthenticatedUser;
-import com.example.campusmarket.identity.infrastructure.JwtService;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.example.campusmarket.storage.PrivateObjectStorage;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
@@ -34,7 +32,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /** Real HTTP/ACL contract with MySQL and an in-memory object store. The fake
  * still performs physical byte writes and reads through EvidenceStorage. */
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("local")
 @TestPropertySource(properties = {
     "campus.market.search.dispatcher.enabled=false", "campus.market.dispute.deadline.enabled=false",
@@ -44,7 +42,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 @Import(WarrantyHttpAclIT.FakeStorageConfig.class)
 class WarrantyHttpAclIT extends Task11MySqlContainers {
     @Autowired JdbcTemplate jdbc;
-    @Autowired JwtService jwt;
     @Autowired TestRestTemplate http;
 
     @BeforeAll
@@ -60,7 +57,7 @@ class WarrantyHttpAclIT extends Task11MySqlContainers {
 
         UUID buyer = user();
         HttpHeaders headers = jsonHeaders();
-        headers.setBearerAuth(jwt.issue(new AuthenticatedUser(buyer, Set.of("ROLE_USER"))));
+        headers.setBearerAuth(ResourceServerTestSupport.token(buyer, Set.of("ROLE_USER")));
         ResponseEntity<String> missingKey = http.postForEntity("/api/orders/" + UUID.randomUUID() + "/warranty",
             new HttpEntity<>("{\"quantity\":1,\"reason\":\"FUNCTIONAL_DEFECT\"}", headers), String.class);
         assertThat(missingKey.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
@@ -76,7 +73,7 @@ class WarrantyHttpAclIT extends Task11MySqlContainers {
         jdbc.update("INSERT INTO warranty_case(id,order_id,idempotency_key,buyer_id,seller_id,warranty_days,warranty_scope_snapshot,disputed_quantity,reason,status,seller_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?,?,?,90,'scope',1,'FUNCTIONAL_DEFECT','OPEN',DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
             caseId.toString(), order.toString(), "http-" + caseId, participant.toString(), seller.toString());
         HttpHeaders outsiderHeaders = jsonHeaders();
-        outsiderHeaders.setBearerAuth(jwt.issue(new AuthenticatedUser(outsider, Set.of("ROLE_USER"))));
+        outsiderHeaders.setBearerAuth(ResourceServerTestSupport.token(outsider, Set.of("ROLE_USER")));
         ResponseEntity<String> denied = http.exchange("/api/warranty-cases/" + caseId, HttpMethod.GET,
             new HttpEntity<>(outsiderHeaders), String.class);
         ResponseEntity<String> absent = http.exchange("/api/warranty-cases/" + UUID.randomUUID(), HttpMethod.GET,
@@ -94,7 +91,7 @@ class WarrantyHttpAclIT extends Task11MySqlContainers {
         jdbc.update("INSERT INTO trade_order(id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,paid_amount_fen,warranty_days,warranty_scope_snapshot,status,version,t0,created_at,updated_at) VALUES (?,?,?,?,?,?,100,1,100,100,90,'scope','SETTLED',0,DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 8 DAY),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", order.toString(), buyer.toString(), seller.toString(), listing.toString(), "keyboard", "desc");
         jdbc.update("INSERT INTO warranty_case(id,order_id,idempotency_key,buyer_id,seller_id,warranty_days,warranty_scope_snapshot,disputed_quantity,reason,status,seller_deadline,version,opened_at,created_at,updated_at) VALUES (?,?,?,?,?,90,'scope',1,'FUNCTIONAL_DEFECT','OPEN',DATE_ADD(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", caseId.toString(), order.toString(), "evidence-" + caseId, buyer.toString(), seller.toString());
         HttpHeaders headers = new HttpHeaders();
-        headers.setBearerAuth(jwt.issue(new AuthenticatedUser(buyer, Set.of("ROLE_USER"))));
+        headers.setBearerAuth(ResourceServerTestSupport.token(buyer, Set.of("ROLE_USER")));
         headers.set("X-Evidence-Purpose", "REPAIR_QUOTE");
         LinkedMultiValueMap<String, Object> form = new LinkedMultiValueMap<>();
         form.add("file", new ByteArrayResource("%PDF-1.4\nproof\n%%EOF".getBytes(java.nio.charset.StandardCharsets.US_ASCII)) {
@@ -110,7 +107,7 @@ class WarrantyHttpAclIT extends Task11MySqlContainers {
         assertThat(read.getBody()).containsExactly("%PDF-1.4\nproof\n%%EOF".getBytes(java.nio.charset.StandardCharsets.US_ASCII));
 
         HttpHeaders malformedHeaders = new HttpHeaders();
-        malformedHeaders.setBearerAuth(jwt.issue(new AuthenticatedUser(buyer, Set.of("ROLE_USER"))));
+        malformedHeaders.setBearerAuth(ResourceServerTestSupport.token(buyer, Set.of("ROLE_USER")));
         malformedHeaders.setContentType(MediaType.parseMediaType("multipart/form-data"));
         ResponseEntity<String> malformed = http.postForEntity("/api/warranty-cases/" + caseId + "/evidence",
             new HttpEntity<>("not-a-multipart-body", malformedHeaders), String.class);
@@ -119,10 +116,7 @@ class WarrantyHttpAclIT extends Task11MySqlContainers {
     }
 
     private UUID user() {
-        UUID id = UUID.randomUUID();
-        jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-            id.toString(), id + "@http.example.edu.cn", "hash");
-        return id;
+        return UUID.randomUUID();
     }
     private static HttpHeaders jsonHeaders() { HttpHeaders h = new HttpHeaders(); h.setContentType(MediaType.APPLICATION_JSON); return h; }
 

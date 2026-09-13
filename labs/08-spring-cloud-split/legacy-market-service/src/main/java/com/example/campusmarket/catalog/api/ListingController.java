@@ -5,7 +5,7 @@ import com.example.campusmarket.catalog.application.ListingService;
 import com.example.campusmarket.catalog.domain.Listing;
 import com.example.campusmarket.api.ApiError;
 import com.example.campusmarket.api.ApiErrors;
-import com.example.campusmarket.identity.application.AuthenticatedUser;
+import com.example.campusmarket.security.AuthenticatedUser;
 import com.example.campusmarket.storage.MinioPrivateObjectStorage;
 import com.example.campusmarket.storage.PrivateObjectStorage;
 import org.springframework.core.io.InputStreamResource;

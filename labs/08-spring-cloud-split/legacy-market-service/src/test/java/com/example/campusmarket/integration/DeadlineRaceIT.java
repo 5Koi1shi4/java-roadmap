@@ -1,6 +1,6 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.example.campusmarket.order.application.DeadlineScheduler;
 import com.example.campusmarket.order.application.OrderLifecycleService;
 import com.example.campusmarket.order.infrastructure.JdbcOrderLifecycleRepository;
@@ -19,7 +19,7 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** MySQL 截止时间条件与库存/退款事件原子性的真实集成测试。 */
-@SpringBootTest(classes = CampusMarketApplication.class)
+@SpringBootTest(classes = LegacyMarketApplication.class)
 @ActiveProfiles("local")
 @TestPropertySource(properties = {"campus.market.order.deadline.initial-delay-ms=86400000"})
 class DeadlineRaceIT extends SharedContainers {
@@ -241,9 +241,6 @@ class DeadlineRaceIT extends SharedContainers {
     }
 
     private UUID user() {
-        UUID id = UUID.randomUUID();
-        jdbc.update("INSERT INTO campus_user (id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-            id.toString(), id + "@stu.example.edu.cn", "hash");
-        return id;
+        return UUID.randomUUID();
     }
 }

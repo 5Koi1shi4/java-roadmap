@@ -1,6 +1,6 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.example.campusmarket.catalog.application.InventoryPort;
 import com.example.campusmarket.dispute.application.ReturnResolutionService;
 import com.example.campusmarket.dispute.application.ProofAuthority;
@@ -34,7 +34,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 
 /** 真实 MySQL：三件退一件只隔离一件，剩余金额可在七天后净结算。 */
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
+@SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
 @ActiveProfiles("local")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @TestPropertySource(properties = {"server.port=18082", "campus.market.payment.provider-url=http://localhost:18082/simulated-provider",
@@ -471,8 +471,6 @@ class PartialReturnRefundIT extends Task11MySqlContainers {
     private record Fixture(UUID listing, UUID order, UUID payment, UUID dispute, UUID seller, UUID buyer) {}
 
     private UUID user() {
-        UUID id = UUID.randomUUID();
-        jdbc.update("INSERT INTO campus_user (id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", id.toString(), id + "@stu.example.edu.cn", "hash");
-        return id;
+        return UUID.randomUUID();
     }
 }

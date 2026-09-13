@@ -1,6 +1,6 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.example.campusmarket.warranty.application.SellerObligationService;
 import com.example.campusmarket.warranty.application.WarrantyService;
 import com.example.campusmarket.warranty.domain.WarrantyDecision;
@@ -22,7 +22,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** 真实 MySQL：结算后质保义务、退款额度、限制与抵扣的幂等协作。 */
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
+@SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
 @ActiveProfiles("local")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @TestPropertySource(properties = {
@@ -137,7 +137,7 @@ class WarrantyObligationIT extends Task11MySqlContainers {
         jdbc.update("INSERT INTO payment_order(id,order_id,provider,idempotency_key,amount_fen,paid_amount_fen,provider_reference,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,'SUCCEEDED',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", payment.toString(), order.toString(), "simulated", "pay-" + payment, paid, paid, "sim-pay-" + payment);
         return new Fixture(buyer, seller, order, listing);
     }
-    private UUID user() { UUID id=UUID.randomUUID(); jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",id.toString(),id+"@stu.example.edu.cn","hash"); return id; }
+    private UUID user() { return UUID.randomUUID(); }
     private UUID evidence(UUID caseId, UUID actor) { return evidence(caseId,actor,"REPAIR_QUOTE"); }
     private UUID evidence(UUID caseId, UUID actor, String purpose) { UUID id=UUID.randomUUID(); jdbc.update("INSERT INTO dispute_evidence(id,dispute_case_id,warranty_case_id,case_type,purpose,verification_status,submitted_by,object_key,media_type,size_bytes,created_at) VALUES (?,NULL,?,'WARRANTY',?,'VERIFIED',?,'fixture-proof-"+caseId+"-"+id+"','application/pdf',4,CURRENT_TIMESTAMP(6))",id.toString(),caseId.toString(),purpose,actor.toString()); return id; }
     private record Fixture(UUID buyer, UUID seller, UUID order, UUID listing) {}

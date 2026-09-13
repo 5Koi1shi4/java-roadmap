@@ -1,8 +1,6 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
-import com.example.campusmarket.identity.application.AuthenticatedUser;
-import com.example.campusmarket.identity.infrastructure.JwtService;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -38,7 +36,7 @@ import static org.awaitility.Awaitility.await;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.reset;
 
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("local")
 class ConcurrentOrderIT extends SharedContainers {
     @LocalServerPort private int port;
@@ -46,7 +44,6 @@ class ConcurrentOrderIT extends SharedContainers {
     /** Performance Schema 是服务端诊断表，业务用户不可读；仅在本测试使用容器配置的 root 观测连接。 */
     private final JdbcTemplate lockObserver = new JdbcTemplate(
         new DriverManagerDataSource(MYSQL.getJdbcUrl(), "root", MYSQL.getPassword()));
-    @Autowired private JwtService jwtService;
     @Autowired private ObjectMapper objectMapper;
     @MockBean private com.example.campusmarket.order.application.OrderCreationHook orderCreationHook;
     private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
@@ -252,10 +249,7 @@ class ConcurrentOrderIT extends SharedContainers {
     }
 
     private UUID user() {
-        UUID id = UUID.randomUUID();
-        jdbc.update("INSERT INTO campus_user (id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-            id.toString(), id + "@stu.example.edu.cn", "hash");
-        return id;
+        return UUID.randomUUID();
     }
 
     private UUID listing(UUID seller, int quantity, long unitPrice, Integer warrantyDays) {
@@ -273,7 +267,7 @@ class ConcurrentOrderIT extends SharedContainers {
     }
 
     private String token(UUID user) {
-        return jwtService.issue(new AuthenticatedUser(user, Set.of("ROLE_USER")));
+        return ResourceServerTestSupport.token(user, Set.of("ROLE_USER"));
     }
 
     private static void assertJsonUtf8(HttpResponse<?> response) {

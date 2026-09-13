@@ -7,8 +7,7 @@ CREATE TABLE handoff_record (
     created_at TIMESTAMP(6) NOT NULL,
     PRIMARY KEY (id),
     UNIQUE KEY uk_handoff_record_order (order_id),
-    CONSTRAINT fk_handoff_record_order FOREIGN KEY (order_id) REFERENCES trade_order (id),
-    CONSTRAINT fk_handoff_record_actor FOREIGN KEY (actor_id) REFERENCES campus_user (id)
+    CONSTRAINT fk_handoff_record_order FOREIGN KEY (order_id) REFERENCES trade_order (id)
 );
 
 CREATE TABLE dispute_case (
@@ -33,8 +32,7 @@ CREATE TABLE dispute_case (
     CONSTRAINT ck_dispute_case_approved_quantity CHECK (approved_quantity IS NULL OR approved_quantity > 0),
     CONSTRAINT ck_dispute_case_status CHECK (status IN ('OPEN', 'SELLER_RESPONDED', 'UNDER_REVIEW', 'ESCALATED', 'RESOLVED', 'REJECTED')),
     CONSTRAINT ck_dispute_case_version CHECK (version >= 0),
-    CONSTRAINT fk_dispute_case_order FOREIGN KEY (order_id) REFERENCES trade_order (id),
-    CONSTRAINT fk_dispute_case_initiator FOREIGN KEY (initiator_id) REFERENCES campus_user (id)
+    CONSTRAINT fk_dispute_case_order FOREIGN KEY (order_id) REFERENCES trade_order (id)
 );
 
 CREATE TABLE dispute_evidence (
@@ -52,8 +50,7 @@ CREATE TABLE dispute_evidence (
     CONSTRAINT ck_dispute_evidence_case CHECK ((case_type = 'DISPUTE' AND dispute_case_id IS NOT NULL AND warranty_case_id IS NULL)
         OR (case_type = 'WARRANTY' AND dispute_case_id IS NULL AND warranty_case_id IS NOT NULL)),
     CONSTRAINT ck_dispute_evidence_size CHECK (size_bytes >= 0),
-    CONSTRAINT fk_dispute_evidence_dispute FOREIGN KEY (dispute_case_id) REFERENCES dispute_case (id),
-    CONSTRAINT fk_dispute_evidence_submitter FOREIGN KEY (submitted_by) REFERENCES campus_user (id)
+    CONSTRAINT fk_dispute_evidence_dispute FOREIGN KEY (dispute_case_id) REFERENCES dispute_case (id)
 );
 
 CREATE TABLE return_case (
@@ -71,8 +68,7 @@ CREATE TABLE return_case (
     UNIQUE KEY uk_return_case_dispute (dispute_case_id),
     CONSTRAINT ck_return_case_quantity CHECK (approved_quantity > 0),
     CONSTRAINT ck_return_case_status CHECK (status IN ('REQUESTED', 'AWAITING_PROOF', 'CONFIRMED', 'REJECTED', 'EXPIRED')),
-    CONSTRAINT fk_return_case_dispute FOREIGN KEY (dispute_case_id) REFERENCES dispute_case (id),
-    CONSTRAINT fk_return_case_confirmer FOREIGN KEY (confirmed_by) REFERENCES campus_user (id)
+    CONSTRAINT fk_return_case_dispute FOREIGN KEY (dispute_case_id) REFERENCES dispute_case (id)
 );
 
 CREATE TABLE warranty_case (
@@ -104,9 +100,7 @@ CREATE TABLE warranty_case (
     CONSTRAINT ck_warranty_case_compensation CHECK (compensation_amount_fen >= 0),
     CONSTRAINT ck_warranty_case_status CHECK (status IN ('OPEN', 'SELLER_RESPONDED', 'UNDER_REVIEW', 'ESCALATED', 'RESOLVED', 'REJECTED')),
     CONSTRAINT ck_warranty_case_version CHECK (version >= 0),
-    CONSTRAINT fk_warranty_case_order FOREIGN KEY (order_id) REFERENCES trade_order (id),
-    CONSTRAINT fk_warranty_case_buyer FOREIGN KEY (buyer_id) REFERENCES campus_user (id),
-    CONSTRAINT fk_warranty_case_seller FOREIGN KEY (seller_id) REFERENCES campus_user (id)
+    CONSTRAINT fk_warranty_case_order FOREIGN KEY (order_id) REFERENCES trade_order (id)
 );
 
 ALTER TABLE dispute_evidence
@@ -139,6 +133,5 @@ CREATE TABLE seller_obligation (
     CONSTRAINT ck_seller_obligation_status CHECK (status IN ('AWAITING_FUNDING', 'PARTIALLY_FUNDED', 'FUNDED', 'CANCELLED')),
     CONSTRAINT ck_seller_obligation_restriction CHECK (restriction_status IN ('NONE', 'RESTRICTED')),
     CONSTRAINT ck_seller_obligation_version CHECK (version >= 0),
-    CONSTRAINT fk_seller_obligation_warranty_case FOREIGN KEY (warranty_case_id) REFERENCES warranty_case (id),
-    CONSTRAINT fk_seller_obligation_seller FOREIGN KEY (seller_id) REFERENCES campus_user (id)
+    CONSTRAINT fk_seller_obligation_warranty_case FOREIGN KEY (warranty_case_id) REFERENCES warranty_case (id)
 );

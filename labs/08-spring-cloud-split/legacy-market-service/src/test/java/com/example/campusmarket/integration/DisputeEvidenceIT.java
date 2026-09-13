@@ -1,8 +1,6 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
-import com.example.campusmarket.identity.application.AuthenticatedUser;
-import com.example.campusmarket.identity.infrastructure.JwtService;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.example.campusmarket.dispute.application.EvidenceStorage;
 import com.example.campusmarket.dispute.infrastructure.JdbcDisputeRepository;
 import com.example.campusmarket.storage.PrivateObjectStorage;
@@ -43,7 +41,7 @@ import java.util.Set;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("local")
 class DisputeEvidenceIT extends DisputeEvidenceContainers {
     private static final byte[] PNG = Base64.getDecoder().decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
@@ -57,7 +55,6 @@ class DisputeEvidenceIT extends DisputeEvidenceContainers {
     private final HttpClient client = HttpClient.newHttpClient();
     @LocalServerPort private int port;
     @Autowired private JdbcTemplate jdbc;
-    @Autowired private JwtService jwt;
     @Autowired private JdbcDisputeRepository disputeRepository;
     @Autowired private EvidenceStorage evidenceStorage;
     @Autowired private PrivateObjectStorage objectStorage;
@@ -279,12 +276,12 @@ class DisputeEvidenceIT extends DisputeEvidenceContainers {
         assertThat(jdbc.queryForObject("SELECT status FROM dispute_case WHERE id=?", String.class, firstCase.toString())).isEqualTo("RESOLVED");
     }
 
-    private UUID user(String name) { UUID id=UUID.randomUUID(); jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", id.toString(), id+"@"+name+".stu.example.edu.cn", "hash"); return id; }
+    private UUID user(String name) { return UUID.randomUUID(); }
     private UUID listing(UUID seller) { UUID id=UUID.randomUUID(); jdbc.update("INSERT INTO listing(id,seller_id,title,description,category,unit_price_fen,available_quantity,status,created_at,updated_at) VALUES (?,?, '键盘','二手','电子',100,0,'SOLD_OUT',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", id.toString(), seller.toString()); return id; }
     private UUID order(UUID listing, UUID buyer, UUID seller) { UUID id=UUID.randomUUID(); jdbc.update("INSERT INTO trade_order(id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,t0,acceptance_deadline,trial_deadline,paid_amount_fen,status,created_at,updated_at) VALUES (?,?,?,?, '键盘','二手',100,1,100,DATE_SUB(CURRENT_TIMESTAMP(6), INTERVAL 1 HOUR),DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 71 HOUR),DATE_ADD(CURRENT_TIMESTAMP(6), INTERVAL 167 HOUR),100,'AFTERSALE_WINDOW',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", id.toString(), buyer.toString(), seller.toString(), listing.toString()); return id; }
     private UUID dispute(UUID order, UUID buyer) { UUID id=UUID.randomUUID(); jdbc.update("INSERT INTO dispute_case(id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,opened_at,created_at,updated_at) VALUES (?,?,?,1,'FUNCTIONAL_DEFECT','OPEN',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", id.toString(), order.toString(), buyer.toString()); return id; }
-    private String token(UUID user) { return jwt.issue(new AuthenticatedUser(user, Set.of("ROLE_USER"))); }
-    private String tokenWithRole(UUID user, String role) { return jwt.issue(new AuthenticatedUser(user, Set.of(role))); }
+    private String token(UUID user) { return ResourceServerTestSupport.token(user, Set.of("ROLE_USER")); }
+    private String tokenWithRole(UUID user, String role) { return ResourceServerTestSupport.token(user, Set.of(role)); }
     private HttpResponse<String> get(String path, String token) throws Exception { return client.send(HttpRequest.newBuilder(URI.create("http://localhost:"+port+path)).header("Authorization","Bearer "+token).GET().build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)); }
     private HttpResponse<byte[]> getBytes(String path, String token) throws Exception { return client.send(HttpRequest.newBuilder(URI.create("http://localhost:"+port+path)).header("Authorization","Bearer "+token).GET().build(), HttpResponse.BodyHandlers.ofByteArray()); }
     private HttpResponse<String> jsonPost(String path, String token, String key, String body) throws Exception { return client.send(HttpRequest.newBuilder(URI.create("http://localhost:"+port+path)).header("Authorization","Bearer "+token).header("Idempotency-Key", key).header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8)).build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8)); }

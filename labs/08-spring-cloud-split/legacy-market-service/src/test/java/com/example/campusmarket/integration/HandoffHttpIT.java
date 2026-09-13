@@ -1,8 +1,6 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
-import com.example.campusmarket.identity.application.AuthenticatedUser;
-import com.example.campusmarket.identity.infrastructure.JwtService;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -23,7 +21,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** 交付 API 的真实 HTTP 状态码、私有资源边界和 UTF-8 响应测试。 */
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("local")
 @TestPropertySource(properties = {
     "campus.market.search.dispatcher.enabled=false",
@@ -39,7 +37,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 class HandoffHttpIT extends Task11MySqlContainers {
     @LocalServerPort private int port;
     @Autowired private JdbcTemplate jdbc;
-    @Autowired private JwtService jwtService;
 
     @Test
     void missingIdempotencyKeyIs400WithUtf8Json() throws Exception {
@@ -87,7 +84,7 @@ class HandoffHttpIT extends Task11MySqlContainers {
 
     private HttpResponse<byte[]> requestPath(String path, UUID order, UUID actor, String key, String body) throws Exception {
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/orders/" + order + path))
-            .header("Authorization", "Bearer " + jwtService.issue(new AuthenticatedUser(actor, Set.of("ROLE_USER"))))
+            .header("Authorization", "Bearer " + ResourceServerTestSupport.token(actor, Set.of("ROLE_USER")))
             .header("Content-Type", "application/json; charset=UTF-8");
         if (key != null) builder.header("Idempotency-Key", key);
         return HttpClient.newHttpClient().send(builder.POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8)).build(),
@@ -105,9 +102,6 @@ class HandoffHttpIT extends Task11MySqlContainers {
     }
 
     private UUID user() {
-        UUID id = UUID.randomUUID();
-        jdbc.update("INSERT INTO campus_user (id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-            id.toString(), id + "@stu.example.edu.cn", "hash");
-        return id;
+        return UUID.randomUUID();
     }
 }

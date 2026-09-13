@@ -1,10 +1,8 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.example.campusmarket.catalog.search.ProductSearchPort;
 import com.example.campusmarket.catalog.search.SearchOutboxDispatcher;
-import com.example.campusmarket.identity.application.AuthenticatedUser;
-import com.example.campusmarket.identity.infrastructure.JwtService;
 import com.example.campusmarket.storage.PrivateObjectStorage;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Nested;
@@ -71,10 +69,7 @@ class RecoveryInvariantStagesIT {
         }
 
         static UUID user(JdbcTemplate jdbc) {
-            UUID id = UUID.randomUUID();
-            jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-                id.toString(), id + "@stu.example.edu.cn", "hash");
-            return id;
+            return UUID.randomUUID();
         }
 
         static void sqlInvariants(JdbcTemplate jdbc) {
@@ -88,7 +83,7 @@ class RecoveryInvariantStagesIT {
     }
 
     private abstract static class AclStage extends Base {
-        void verifyAcl(JdbcTemplate jdbc, PrivateObjectStorage storage, JwtService jwt, int port) throws Exception {
+        void verifyAcl(JdbcTemplate jdbc, PrivateObjectStorage storage, int port) throws Exception {
             UUID buyer=user(jdbc), seller=user(jdbc), other=user(jdbc), admin=user(jdbc), listing=UUID.randomUUID(), order=UUID.randomUUID(), dispute=UUID.randomUUID(), evidence=UUID.randomUUID();
             String key="recovery-acl/"+evidence; byte[] body="proof".getBytes(StandardCharsets.UTF_8);
             storage.put(key,new ByteArrayInputStream(body),body.length,"image/png");
@@ -97,10 +92,10 @@ class RecoveryInvariantStagesIT {
             jdbc.update("INSERT INTO dispute_case(id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,opened_at,created_at,updated_at) VALUES (?,?,?,1,'FUNCTIONAL_DEFECT','OPEN',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",dispute.toString(),order.toString(),buyer.toString());
             jdbc.update("INSERT INTO dispute_evidence(id,dispute_case_id,warranty_case_id,case_type,submitted_by,object_key,media_type,size_bytes,created_at) VALUES (?,?,NULL,'DISPUTE',?,?, 'image/png',?,CURRENT_TIMESTAMP(6))",evidence.toString(),dispute.toString(),buyer.toString(),key,body.length);
             String path="/api/disputes/"+dispute+"/evidence/"+evidence+"/content";
-            assertThat(get(port,path,jwt.issue(new AuthenticatedUser(buyer,Set.of("ROLE_USER"))))).isEqualTo(200);
-            assertThat(get(port,path,jwt.issue(new AuthenticatedUser(seller,Set.of("ROLE_USER"))))).isEqualTo(200);
-            assertThat(get(port,path,jwt.issue(new AuthenticatedUser(other,Set.of("ROLE_USER"))))).isEqualTo(404);
-            assertThat(get(port,path,jwt.issue(new AuthenticatedUser(admin,Set.of("ROLE_ADMIN"))))).isEqualTo(404);
+            assertThat(get(port,path,ResourceServerTestSupport.token(buyer,Set.of("ROLE_USER")))).isEqualTo(200);
+            assertThat(get(port,path,ResourceServerTestSupport.token(seller,Set.of("ROLE_USER")))).isEqualTo(200);
+            assertThat(get(port,path,ResourceServerTestSupport.token(other,Set.of("ROLE_USER")))).isEqualTo(404);
+            assertThat(get(port,path,ResourceServerTestSupport.token(admin,Set.of("ROLE_ADMIN")))).isEqualTo(404);
             sqlInvariants(jdbc);
         }
         private int get(int port,String path,String token)throws Exception{return HttpClient.newHttpClient().send(HttpRequest.newBuilder(URI.create("http://localhost:"+port+path)).header("Authorization","Bearer "+token).GET().build(),HttpResponse.BodyHandlers.discarding()).statusCode();}
@@ -110,12 +105,12 @@ class RecoveryInvariantStagesIT {
         void verifySearch(JdbcTemplate jdbc,SearchOutboxDispatcher dispatcher,ProductSearchPort search){seedSale(jdbc);assertThat(dispatcher.dispatchOnce(20,Duration.ofSeconds(30))).isEqualTo(1);search.refresh();Set<String> actual=Set.copyOf(search.search(new ProductSearchPort.SearchRequest(null,null,null,null,0,100)).items().stream().map(ProductSearchPort.SearchItem::listingId).toList());Set<String> expected=Set.copyOf(jdbc.query("SELECT id FROM listing WHERE status='ON_SALE' AND available_quantity>0",(rs,n)->rs.getString(1)));assertThat(actual).isEqualTo(expected);sqlInvariants(jdbc);}
     }
 
-    @Nested @SpringBootTest(classes=CampusMarketApplication.class,webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT) @ActiveProfiles("local") @DirtiesContext class RabbitAcl extends AclStage {static final AclResources RESOURCES=new AclResources();@DynamicPropertySource static void properties(DynamicPropertyRegistry r){RESOURCES.register(r);}@AfterAll static void stop(){RESOURCES.stop();}@Autowired JdbcTemplate jdbc;@Autowired PrivateObjectStorage storage;@Autowired JwtService jwt;@LocalServerPort int port;@Test void rabbitRoundAcl() throws Exception{verifyAcl(jdbc,storage,jwt,port);}}
-    @Nested @SpringBootTest(classes=CampusMarketApplication.class) @ActiveProfiles("local") @DirtiesContext class RabbitSearch extends SearchStage {static final SearchResources RESOURCES=new SearchResources();@DynamicPropertySource static void properties(DynamicPropertyRegistry r){RESOURCES.register(r);}@AfterAll static void stop(){RESOURCES.stop();}@Autowired JdbcTemplate jdbc;@Autowired SearchOutboxDispatcher dispatcher;@Autowired ProductSearchPort search;@Test void rabbitRoundSearch(){verifySearch(jdbc,dispatcher,search);}}
-    @Nested @SpringBootTest(classes=CampusMarketApplication.class,webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT) @ActiveProfiles("local") @DirtiesContext class SearchAcl extends AclStage {static final AclResources RESOURCES=new AclResources();@DynamicPropertySource static void properties(DynamicPropertyRegistry r){RESOURCES.register(r);}@AfterAll static void stop(){RESOURCES.stop();}@Autowired JdbcTemplate jdbc;@Autowired PrivateObjectStorage storage;@Autowired JwtService jwt;@LocalServerPort int port;@Test void searchRoundAcl() throws Exception{verifyAcl(jdbc,storage,jwt,port);}}
-    @Nested @SpringBootTest(classes=CampusMarketApplication.class) @ActiveProfiles("local") @DirtiesContext class SearchSearch extends SearchStage {static final SearchResources RESOURCES=new SearchResources();@DynamicPropertySource static void properties(DynamicPropertyRegistry r){RESOURCES.register(r);}@AfterAll static void stop(){RESOURCES.stop();}@Autowired JdbcTemplate jdbc;@Autowired SearchOutboxDispatcher dispatcher;@Autowired ProductSearchPort search;@Test void searchRoundSearch(){verifySearch(jdbc,dispatcher,search);}}
-    @Nested @SpringBootTest(classes=CampusMarketApplication.class,webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT) @ActiveProfiles("local") @DirtiesContext class StorageAcl extends AclStage {static final AclResources RESOURCES=new AclResources();@DynamicPropertySource static void properties(DynamicPropertyRegistry r){RESOURCES.register(r);}@AfterAll static void stop(){RESOURCES.stop();}@Autowired JdbcTemplate jdbc;@Autowired PrivateObjectStorage storage;@Autowired JwtService jwt;@LocalServerPort int port;@Test void storageRoundAcl() throws Exception{verifyAcl(jdbc,storage,jwt,port);}}
-    @Nested @SpringBootTest(classes=CampusMarketApplication.class) @ActiveProfiles("local") @DirtiesContext class StorageSearch extends SearchStage {static final SearchResources RESOURCES=new SearchResources();@DynamicPropertySource static void properties(DynamicPropertyRegistry r){RESOURCES.register(r);}@AfterAll static void stop(){RESOURCES.stop();}@Autowired JdbcTemplate jdbc;@Autowired SearchOutboxDispatcher dispatcher;@Autowired ProductSearchPort search;@Test void storageRoundSearch(){verifySearch(jdbc,dispatcher,search);}}
+    @Nested @SpringBootTest(classes=LegacyMarketApplication.class,webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT) @ActiveProfiles("local") @DirtiesContext class RabbitAcl extends AclStage {static final AclResources RESOURCES=new AclResources();@DynamicPropertySource static void properties(DynamicPropertyRegistry r){RESOURCES.register(r);}@AfterAll static void stop(){RESOURCES.stop();}@Autowired JdbcTemplate jdbc;@Autowired PrivateObjectStorage storage;@LocalServerPort int port;@Test void rabbitRoundAcl() throws Exception{verifyAcl(jdbc,storage,port);}}
+    @Nested @SpringBootTest(classes=LegacyMarketApplication.class) @ActiveProfiles("local") @DirtiesContext class RabbitSearch extends SearchStage {static final SearchResources RESOURCES=new SearchResources();@DynamicPropertySource static void properties(DynamicPropertyRegistry r){RESOURCES.register(r);}@AfterAll static void stop(){RESOURCES.stop();}@Autowired JdbcTemplate jdbc;@Autowired SearchOutboxDispatcher dispatcher;@Autowired ProductSearchPort search;@Test void rabbitRoundSearch(){verifySearch(jdbc,dispatcher,search);}}
+    @Nested @SpringBootTest(classes=LegacyMarketApplication.class,webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT) @ActiveProfiles("local") @DirtiesContext class SearchAcl extends AclStage {static final AclResources RESOURCES=new AclResources();@DynamicPropertySource static void properties(DynamicPropertyRegistry r){RESOURCES.register(r);}@AfterAll static void stop(){RESOURCES.stop();}@Autowired JdbcTemplate jdbc;@Autowired PrivateObjectStorage storage;@LocalServerPort int port;@Test void searchRoundAcl() throws Exception{verifyAcl(jdbc,storage,port);}}
+    @Nested @SpringBootTest(classes=LegacyMarketApplication.class) @ActiveProfiles("local") @DirtiesContext class SearchSearch extends SearchStage {static final SearchResources RESOURCES=new SearchResources();@DynamicPropertySource static void properties(DynamicPropertyRegistry r){RESOURCES.register(r);}@AfterAll static void stop(){RESOURCES.stop();}@Autowired JdbcTemplate jdbc;@Autowired SearchOutboxDispatcher dispatcher;@Autowired ProductSearchPort search;@Test void searchRoundSearch(){verifySearch(jdbc,dispatcher,search);}}
+    @Nested @SpringBootTest(classes=LegacyMarketApplication.class,webEnvironment=SpringBootTest.WebEnvironment.RANDOM_PORT) @ActiveProfiles("local") @DirtiesContext class StorageAcl extends AclStage {static final AclResources RESOURCES=new AclResources();@DynamicPropertySource static void properties(DynamicPropertyRegistry r){RESOURCES.register(r);}@AfterAll static void stop(){RESOURCES.stop();}@Autowired JdbcTemplate jdbc;@Autowired PrivateObjectStorage storage;@LocalServerPort int port;@Test void storageRoundAcl() throws Exception{verifyAcl(jdbc,storage,port);}}
+    @Nested @SpringBootTest(classes=LegacyMarketApplication.class) @ActiveProfiles("local") @DirtiesContext class StorageSearch extends SearchStage {static final SearchResources RESOURCES=new SearchResources();@DynamicPropertySource static void properties(DynamicPropertyRegistry r){RESOURCES.register(r);}@AfterAll static void stop(){RESOURCES.stop();}@Autowired JdbcTemplate jdbc;@Autowired SearchOutboxDispatcher dispatcher;@Autowired ProductSearchPort search;@Test void storageRoundSearch(){verifySearch(jdbc,dispatcher,search);}}
 
     private static final class AclResources {
         private final Network network=Network.newNetwork();

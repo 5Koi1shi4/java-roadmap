@@ -1,6 +1,6 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.example.campusmarket.catalog.application.InventoryPort;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -17,7 +17,7 @@ import java.util.concurrent.TimeUnit;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-@SpringBootTest(classes = CampusMarketApplication.class)
+@SpringBootTest(classes = LegacyMarketApplication.class)
 @ActiveProfiles("local")
 class InventoryIT extends SharedContainers {
     @Autowired private JdbcTemplate jdbc;
@@ -27,8 +27,6 @@ class InventoryIT extends SharedContainers {
     void quarantineAddsIsolatedStockAndIdempotencyBindsReason() {
         UUID seller = UUID.randomUUID();
         UUID listing = UUID.randomUUID();
-        jdbc.update("INSERT INTO campus_user (id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-            seller.toString(), seller + "@stu.example.edu.cn", "hash");
         jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,quarantined_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,'ON_SALE',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
             listing.toString(), seller.toString(), "教材", "描述", "教材", 100, 5, 0);
 
@@ -44,8 +42,6 @@ class InventoryIT extends SharedContainers {
     void concurrentDeductNeverCreatesNegativeInventory() throws Exception {
         UUID seller = UUID.randomUUID();
         UUID listing = UUID.randomUUID();
-        jdbc.update("INSERT INTO campus_user (id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-            seller.toString(), seller + "@stu.example.edu.cn", "hash");
         jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,quarantined_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,'ON_SALE',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
             listing.toString(), seller.toString(), "教材", "描述", "教材", 100, 5, 0);
         ExecutorService pool = Executors.newFixedThreadPool(10);
@@ -67,8 +63,6 @@ class InventoryIT extends SharedContainers {
     void insufficientDeductLeavesNoMovement() {
         UUID seller = UUID.randomUUID();
         UUID listing = UUID.randomUUID();
-        jdbc.update("INSERT INTO campus_user (id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-            seller.toString(), seller + "@stu.example.edu.cn", "hash");
         jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,quarantined_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,'ON_SALE',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
             listing.toString(), seller.toString(), "教材", "描述", "教材", 100, 1, 0);
         assertThat(inventory.deduct(listing, 2, "too-many")).isFalse();
@@ -169,8 +163,6 @@ class InventoryIT extends SharedContainers {
     }
 
     private void insertUser(UUID user) {
-        jdbc.update("INSERT INTO campus_user (id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",
-            user.toString(), user + "@stu.example.edu.cn", "hash");
     }
 
     private void insertOrder(UUID buyer, UUID seller, UUID listing, UUID order) {

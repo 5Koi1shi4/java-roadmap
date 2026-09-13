@@ -1,8 +1,6 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
-import com.example.campusmarket.identity.application.AuthenticatedUser;
-import com.example.campusmarket.identity.infrastructure.JwtService;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.example.campusmarket.catalog.search.ProductSearchPort;
 import com.example.campusmarket.catalog.search.SearchOutboxDispatcher;
 import com.example.campusmarket.messaging.OutboxDispatcher;
@@ -83,6 +81,7 @@ class RecoveryDrillIT {
         protected static void common(DynamicPropertyRegistry registry,
                                      MySQLContainer<?> mysql,
                                      GenericContainer<?> redis) {
+            ResourceServerTestSupport.register(registry);
             registry.add("spring.datasource.url", mysql::getJdbcUrl);
             registry.add("spring.datasource.username", mysql::getUsername);
             registry.add("spring.datasource.password", mysql::getPassword);
@@ -151,8 +150,6 @@ class RecoveryDrillIT {
         protected static BusinessFacts seedBusinessFacts(JdbcTemplate jdbc) {
             UUID buyer = UUID.randomUUID(), seller = UUID.randomUUID(), listing = UUID.randomUUID();
             UUID order = UUID.randomUUID();
-            jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6)),(?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-                buyer.toString(), buyer + "@stu.example.edu.cn", "hash", seller.toString(), seller + "@stu.example.edu.cn", "hash");
             jdbc.update("INSERT INTO listing(id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?,?,'恢复演练','教材',100,1,'ON_SALE',1,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
                 listing.toString(), seller.toString(), "恢复演练商品");
             jdbc.update("INSERT INTO trade_order(id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,warranty_days,warranty_scope_snapshot,paid_amount_fen,status,version,t0,created_at,updated_at) VALUES (?,?,?,?,?,?,100,1,100,NULL,NULL,100,'PENDING_PAYMENT',1,NULL,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
@@ -190,24 +187,21 @@ class RecoveryDrillIT {
             return new AclFacts(buyer, seller, other, admin, dispute, evidence);
         }
 
-        protected static void assertEvidenceAclOverHttp(int port, JwtService jwt, AclFacts facts) {
+        protected static void assertEvidenceAclOverHttp(int port, AclFacts facts) {
             HttpClient client = HttpClient.newHttpClient();
             try {
                 String path = "/api/disputes/" + facts.dispute() + "/evidence/" + facts.evidence() + "/content";
-                assertThat(get(client, port, path, jwt.issue(new AuthenticatedUser(facts.buyer(), Set.of("ROLE_USER")))).statusCode()).isEqualTo(200);
-                assertThat(get(client, port, path, jwt.issue(new AuthenticatedUser(facts.seller(), Set.of("ROLE_USER")))).statusCode()).isEqualTo(200);
-                assertThat(get(client, port, path, jwt.issue(new AuthenticatedUser(facts.other(), Set.of("ROLE_USER")))).statusCode()).isEqualTo(404);
-                assertThat(get(client, port, path, jwt.issue(new AuthenticatedUser(facts.admin(), Set.of("ROLE_ADMIN")))).statusCode()).isEqualTo(404);
+                assertThat(get(client, port, path, ResourceServerTestSupport.token(facts.buyer(), Set.of("ROLE_USER"))).statusCode()).isEqualTo(200);
+                assertThat(get(client, port, path, ResourceServerTestSupport.token(facts.seller(), Set.of("ROLE_USER"))).statusCode()).isEqualTo(200);
+                assertThat(get(client, port, path, ResourceServerTestSupport.token(facts.other(), Set.of("ROLE_USER"))).statusCode()).isEqualTo(404);
+                assertThat(get(client, port, path, ResourceServerTestSupport.token(facts.admin(), Set.of("ROLE_ADMIN"))).statusCode()).isEqualTo(404);
             } catch (Exception failure) {
                 throw new AssertionError("HTTP evidence ACL drill failed", failure);
             }
         }
 
         private static UUID insertUser(JdbcTemplate jdbc) {
-            UUID id = UUID.randomUUID();
-            jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-                id.toString(), id + "@stu.example.edu.cn", "hash");
-            return id;
+            return UUID.randomUUID();
         }
 
         private static HttpResponse<String> get(HttpClient client, int port, String path, String bearer) throws Exception {
@@ -220,7 +214,7 @@ class RecoveryDrillIT {
 
     @Nested
     @Order(1)
-    @SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
+    @SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
     @ActiveProfiles("local")
     @TestPropertySource(properties = {
         "server.port=" + RecoveryDrillResourcePlan.RABBIT_HTTP_PORT,
@@ -233,7 +227,6 @@ class RecoveryDrillIT {
         @Autowired private RabbitTemplate rabbit;
         @Autowired private ReliableEventConsumer consumer;
         @Autowired private MeterRegistry metrics;
-        @Autowired private JwtService jwt;
         @LocalServerPort private int port;
 
         @Test
@@ -332,7 +325,7 @@ class RecoveryDrillIT {
                 String key = "recovery-payment-" + orderId;
                 HttpResponse<String> response = HttpClient.newHttpClient().send(HttpRequest.newBuilder(
                         URI.create("http://localhost:" + port + "/api/orders/" + orderId + "/payments"))
-                    .header("Authorization", "Bearer " + jwt.issue(new AuthenticatedUser(buyerId, Set.of("ROLE_USER"))))
+                    .header("Authorization", "Bearer " + ResourceServerTestSupport.token(buyerId, Set.of("ROLE_USER")))
                     .header("Content-Type", "application/json; charset=UTF-8").header("Idempotency-Key", key)
                     .POST(HttpRequest.BodyPublishers.ofString("{}", StandardCharsets.UTF_8)).build(),
                     HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
@@ -367,7 +360,7 @@ class RecoveryDrillIT {
 
     @Nested
     @Order(2)
-    @SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+    @SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
     @ActiveProfiles("local")
     @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
     class SearchRound extends SearchContainers {
@@ -376,7 +369,6 @@ class RecoveryDrillIT {
         @Autowired private SearchOutboxDispatcher searchOutbox;
         @Autowired private ProductSearchPort search;
         @Autowired private MeterRegistry metrics;
-        @Autowired private JwtService jwt;
 
         @Test
         void round2ElasticsearchDisconnectLeavesSearchOutboxThenCatchesUp() throws Exception {
@@ -398,7 +390,7 @@ class RecoveryDrillIT {
             try {
                 HttpResponse<String> unavailable = HttpClient.newHttpClient().send(
                     HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/search?keyword=%E6%95%85%E9%9A%9C&size=20"))
-                        .header("Authorization", "Bearer " + jwt.issue(new AuthenticatedUser(seller, Set.of("ROLE_USER"))))
+                        .header("Authorization", "Bearer " + ResourceServerTestSupport.token(seller, Set.of("ROLE_USER")))
                         .GET().build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
                 assertThat(unavailable.statusCode()).isEqualTo(503);
                 searchOutbox.dispatchOnce(10, Duration.ofSeconds(2));
@@ -423,12 +415,7 @@ class RecoveryDrillIT {
         }
 
         private UUID insertUser() {
-            UUID id = UUID.randomUUID();
-            jdbc.update("INSERT INTO campus_user "
-                    + "(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',"
-                    + "CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-                id.toString(), id + "@stu.example.edu.cn", "hash");
-            return id;
+            return UUID.randomUUID();
         }
 
         private String status(UUID id) {
@@ -439,13 +426,12 @@ class RecoveryDrillIT {
 
     @Nested
     @Order(3)
-    @SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+    @SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
     @ActiveProfiles("local")
     @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
     class StorageRound extends StorageContainers {
         @LocalServerPort private int port;
         @Autowired private JdbcTemplate jdbc;
-        @Autowired private JwtService jwt;
         @Autowired private StorageCleanupScheduler cleanup;
         @Autowired private PrivateObjectStorage storage;
         @Autowired private MeterRegistry metrics;
@@ -551,12 +537,7 @@ class RecoveryDrillIT {
         }
 
         private UUID insertUser() {
-            UUID id = UUID.randomUUID();
-            jdbc.update("INSERT INTO campus_user "
-                    + "(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',"
-                    + "CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-                id.toString(), id + "@stu.example.edu.cn", "hash");
-            return id;
+            return UUID.randomUUID();
         }
 
         private void assertEvidenceAclOverHttp() {
@@ -583,9 +564,9 @@ class RecoveryDrillIT {
         private UUID insertAdmin() {
             return insertUser();
         }
-        private String adminToken(UUID user) { return jwt.issue(new AuthenticatedUser(user, Set.of("ROLE_ADMIN"))); }
+        private String adminToken(UUID user) { return ResourceServerTestSupport.token(user, Set.of("ROLE_ADMIN")); }
 
-        private String token(UUID user) { return jwt.issue(new AuthenticatedUser(user, Set.of("ROLE_USER"))); }
+        private String token(UUID user) { return ResourceServerTestSupport.token(user, Set.of("ROLE_USER")); }
         private HttpResponse<String> multipart(String path, String bearer, String filename, String type, byte[] bytes) throws Exception {
             String boundary = "----recovery" + UUID.randomUUID();
             byte[] prefix = ("--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"" + filename + "\"\r\nContent-Type: " + type + "\r\n\r\n").getBytes(StandardCharsets.UTF_8);

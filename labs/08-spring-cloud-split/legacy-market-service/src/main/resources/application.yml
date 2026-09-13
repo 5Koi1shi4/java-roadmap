@@ -19,7 +19,12 @@ spring:
         auto-startup: false
       direct:
         auto-startup: false
-
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: ${CAMPUS_MARKET_IDENTITY_JWKS_URI:http://localhost:18081/.well-known/jwks.json}
+          issuer-uri: ${CAMPUS_MARKET_JWT_ISSUER:http://gateway.test}
 server:
   servlet:
     encoding:
@@ -35,16 +40,8 @@ management:
 
 campus:
   market:
-    identity:
-      allowed-domains: stu.example.edu.cn
-      verification-secret: local-only-verification-secret-change-me-32
-      verification-ttl: 10m
-      verification-rate-limit: 60s
     jwt:
-      secret: local-only-jwt-secret-change-me-32-bytes
-      ttl: 15m
-    mail:
-      simulation-enabled: false
+      audience: ${CAMPUS_MARKET_JWT_AUDIENCE:campus-market-api}
     search:
       dispatcher:
         enabled: false
@@ -77,7 +74,5 @@ spring:
 
 campus:
   market:
-    mail:
-      simulation-enabled: true
     payment:
       simulation-enabled: true

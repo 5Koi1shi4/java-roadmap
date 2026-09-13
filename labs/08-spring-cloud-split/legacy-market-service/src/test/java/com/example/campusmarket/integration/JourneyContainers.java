@@ -2,9 +2,6 @@ package com.example.campusmarket.integration;
 
 import com.example.campusmarket.catalog.search.ProductSearchPort;
 import com.example.campusmarket.catalog.search.SearchOutboxDispatcher;
-import com.example.campusmarket.identity.application.AuthenticatedUser;
-import com.example.campusmarket.identity.infrastructure.JwtService;
-import com.example.campusmarket.identity.infrastructure.LocalVerificationMailSender;
 import com.example.campusmarket.payment.infrastructure.SimulatedPaymentProviderController;
 import com.example.campusmarket.warranty.application.SellerObligationService;
 import com.example.campusmarket.warranty.application.WarrantyService;
@@ -49,7 +46,6 @@ abstract class JourneyHttpSupport {
     protected static final String PAYMENT_SECRET = "local-only-payment-secret-change-me";
 
     @Autowired protected TestRestTemplate http;
-    @Autowired protected LocalVerificationMailSender mail;
     @Autowired protected ObjectMapper mapper;
     @Autowired protected JdbcTemplate jdbc;
     @Autowired protected SearchOutboxDispatcher searchOutbox;
@@ -57,36 +53,20 @@ abstract class JourneyHttpSupport {
     @Autowired protected SimulatedPaymentProviderController provider;
     @Autowired protected WarrantyService warranties;
     @Autowired protected SellerObligationService obligations;
-    @Autowired protected JwtService jwt;
 
     @BeforeEach
     void verifyDatabaseIsReady() {
         assertThat(jdbc.queryForObject("SELECT 1", Integer.class)).isEqualTo(1);
     }
 
-    protected User register(String email) throws Exception {
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        assertThat(http.postForEntity("/api/auth/email-verifications",
-            entity("{\"email\":\"" + email + "\"}", headers), String.class).getStatusCode())
-            .isEqualTo(org.springframework.http.HttpStatus.OK);
-        String code = mail.latestCode(email);
-        assertThat(code).isNotBlank();
-        assertThat(http.postForEntity("/api/auth/register",
-            entity("{\"email\":\"" + email + "\",\"password\":\"Campus123!\",\"code\":\"" + code + "\"}", headers), String.class).getStatusCode())
-            .isEqualTo(org.springframework.http.HttpStatus.CREATED);
-        ResponseEntity<String> loginResponse = http.postForEntity("/api/auth/login",
-            entity("{\"email\":\"" + email + "\",\"password\":\"Campus123!\"}", headers), String.class);
-        assertThat(loginResponse.getStatusCode()).isEqualTo(org.springframework.http.HttpStatus.OK);
-        JsonNode login = mapper.readTree(loginResponse.getBody());
-        return new User(UUID.fromString(login.get("userId").asText()), login.get("accessToken").asText(), headers);
+    protected User register(String email) {
+        UUID id = UUID.randomUUID();
+        return new User(id, ResourceServerTestSupport.token(id, java.util.Set.of("ROLE_USER")), null);
     }
 
     protected User seededAdmin() {
         UUID id = UUID.randomUUID();
-        jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-            id.toString(), id + "@admin.example.edu.cn", "hash");
-        return new User(id, jwt.issue(new AuthenticatedUser(id, java.util.Set.of("ROLE_ADMIN"))), null);
+        return new User(id, ResourceServerTestSupport.token(id, java.util.Set.of("ROLE_ADMIN")), null);
     }
 
     protected HttpHeaders bearer(String token) {
@@ -203,6 +183,7 @@ abstract class TextbookContainers extends JourneyHttpSupport {
 
     @DynamicPropertySource
     static void registerTextbookProperties(DynamicPropertyRegistry registry) {
+        ResourceServerTestSupport.register(registry);
         registry.add("spring.datasource.url", MYSQL::getJdbcUrl);
         registry.add("spring.datasource.username", MYSQL::getUsername);
         registry.add("spring.datasource.password", MYSQL::getPassword);
@@ -267,6 +248,7 @@ abstract class WarrantyContainers extends JourneyHttpSupport {
 
     @DynamicPropertySource
     static void registerWarrantyProperties(DynamicPropertyRegistry registry) {
+        ResourceServerTestSupport.register(registry);
         registry.add("spring.datasource.url", MYSQL::getJdbcUrl);
         registry.add("spring.datasource.username", MYSQL::getUsername);
         registry.add("spring.datasource.password", MYSQL::getPassword);

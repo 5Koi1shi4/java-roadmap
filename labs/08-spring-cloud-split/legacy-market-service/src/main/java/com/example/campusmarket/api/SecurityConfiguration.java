@@ -8,7 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.UUID;
 
-/** 统一安全错误响应工具；安全链仍由 identity 模块装配，避免重复 SecurityFilterChain Bean。 */
+/** 统一安全错误响应工具；资源服务器安全链在 security 包中装配。 */
 public final class SecurityConfiguration {
     private static final SecureRandom RANDOM = new SecureRandom();
 

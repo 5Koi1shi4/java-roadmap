@@ -1,6 +1,6 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.example.campusmarket.messaging.OutboxDispatcher;
 import com.example.campusmarket.messaging.RabbitTopology;
 import com.example.campusmarket.messaging.EventEnvelopeCodec;
@@ -32,7 +32,7 @@ import static org.mockito.Mockito.verify;
 
 /** Low-memory end-to-end messaging proof: MySQL outbox, real Rabbit confirm/
  * binding, listener Inbox transaction and replay fencing. */
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("local")
 @TestPropertySource(properties = {
     "spring.rabbitmq.listener.simple.auto-startup=true",

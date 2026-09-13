@@ -1,14 +1,12 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.example.campusmarket.payment.application.PaymentGateway;
 import com.example.campusmarket.payment.application.PaymentService;
 import com.example.campusmarket.payment.application.RefundService;
 import com.example.campusmarket.payment.infrastructure.JdbcPaymentRepository;
 import com.example.campusmarket.payment.infrastructure.SimulatedPaymentProviderController;
 import com.example.campusmarket.payment.application.PaymentReconciliationScheduler;
-import com.example.campusmarket.identity.application.AuthenticatedUser;
-import com.example.campusmarket.identity.infrastructure.JwtService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.web.server.LocalServerPort;
@@ -34,7 +32,7 @@ import java.net.http.HttpResponse;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** 支付成功推进订单、退款额度预占和重复回调幂等的真实 MySQL 流程测试。 */
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
+@SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.DEFINED_PORT)
 @ActiveProfiles("local")
 @TestPropertySource(properties = {"server.port=18081", "campus.market.payment.provider-url=http://localhost:18081/simulated-provider",
     "campus.market.payment.reconciliation.enabled=true", "campus.market.payment.reconciliation.initial-delay-ms=86400000",
@@ -46,7 +44,6 @@ class PaymentFlowIT extends SharedContainers {
     @Autowired private RefundService refunds;
     @Autowired private JdbcPaymentRepository repository;
     @Autowired private PaymentReconciliationScheduler reconciliation;
-    @Autowired private JwtService jwtService;
     @Autowired private SimulatedPaymentProviderController provider;
 
     @Test
@@ -615,7 +612,7 @@ class PaymentFlowIT extends SharedContainers {
     void specialJsonEscapesArePartOfPaymentRequestFingerprint() throws Exception {
         UUID order = pendingOrder();
         UUID userId = UUID.fromString(jdbc.queryForObject("SELECT buyer_id FROM trade_order WHERE id=?", String.class, order.toString()));
-        String bearer = "Bearer " + jwtService.issue(new AuthenticatedUser(userId, Set.of("ROLE_USER")));
+        String bearer = "Bearer " + ResourceServerTestSupport.token(userId, Set.of("ROLE_USER"));
         String key = "special-json-" + order;
         String firstBody = "{\"note\":\"引号\\\" 反斜杠\\\\ 雪☃\"}";
         String escapedBody = "{\"note\":\"引号\\\" 反斜杠\\\\ 雪\\u2603\"}";
@@ -722,7 +719,7 @@ class PaymentFlowIT extends SharedContainers {
     @Test
     void paymentAndRefundApisRejectMissingBodyAndBlankKeyAsUtf8BadRequest() throws Exception {
         UUID userId = user();
-        String bearer = "Bearer " + jwtService.issue(new AuthenticatedUser(userId, Set.of("ROLE_USER")));
+        String bearer = "Bearer " + ResourceServerTestSupport.token(userId, Set.of("ROLE_USER"));
         UUID order = UUID.randomUUID(); UUID seller = user(); UUID listing = UUID.randomUUID();
         jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,?,100,0,'SOLD_OUT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", listing.toString(), seller.toString(), "教材", "描述", "教材");
         jdbc.update("INSERT INTO trade_order (id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,paid_amount_fen,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,100,1,100,0,'PENDING_PAYMENT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", order.toString(), userId.toString(), seller.toString(), listing.toString(), "教材", "描述");
@@ -747,7 +744,7 @@ class PaymentFlowIT extends SharedContainers {
     @Test
     void paymentAndRefundApisReplayPersistedUtf8BytesAndRejectDifferentRefundBody() throws Exception {
         UUID userId = user();
-        String bearer = "Bearer " + jwtService.issue(new AuthenticatedUser(userId, Set.of("ROLE_USER")));
+        String bearer = "Bearer " + ResourceServerTestSupport.token(userId, Set.of("ROLE_USER"));
         UUID order = UUID.randomUUID();
         UUID seller = user(); UUID listing = UUID.randomUUID();
         jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,?,100,0,'SOLD_OUT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", listing.toString(), seller.toString(), "教材", "描述", "教材");
@@ -944,8 +941,6 @@ class PaymentFlowIT extends SharedContainers {
     }
 
     private UUID user() {
-        UUID id = UUID.randomUUID();
-        jdbc.update("INSERT INTO campus_user (id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", id.toString(), id + "@stu.example.edu.cn", "hash");
-        return id;
+        return UUID.randomUUID();
     }
 }

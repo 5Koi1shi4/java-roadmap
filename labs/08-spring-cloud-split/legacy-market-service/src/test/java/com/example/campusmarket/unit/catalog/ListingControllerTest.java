@@ -2,7 +2,7 @@ package com.example.campusmarket.unit.catalog;
 
 import com.example.campusmarket.catalog.api.ListingController;
 import com.example.campusmarket.catalog.application.ListingService;
-import com.example.campusmarket.identity.application.AuthenticatedUser;
+import com.example.campusmarket.security.AuthenticatedUser;
 import com.example.campusmarket.storage.PrivateObjectStorage;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

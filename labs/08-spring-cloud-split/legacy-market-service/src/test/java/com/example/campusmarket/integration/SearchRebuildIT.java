@@ -99,17 +99,12 @@ class SearchRebuildIT extends SharedContainers {
         jdbc.update("DELETE FROM trade_order");
         jdbc.update("DELETE FROM audit_event");
         jdbc.update("DELETE FROM object_upload_session");
-        jdbc.update("DELETE FROM email_verification");
-        jdbc.update("DELETE FROM external_identity");
         jdbc.update("DELETE FROM listing_media");
         jdbc.update("DELETE FROM search_outbox");
         jdbc.update("DELETE FROM search_rebuild_intent");
         jdbc.update("DELETE FROM search_index_cleanup_task");
         jdbc.update("DELETE FROM listing");
-        jdbc.update("DELETE FROM campus_user");
         UUID seller = UUID.randomUUID();
-        jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-            seller.toString(), seller + "@stu.example.edu.cn", "hash");
         UUID listing = UUID.randomUUID();
         jdbc.update("INSERT INTO listing(id,seller_id,title,description,category,unit_price_fen,available_quantity,quarantined_quantity,warranty_days,warranty_scope,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,0,NULL,NULL,'ON_SALE',?,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
             listing.toString(), seller.toString(), "重建并发商品", "在线重建", "教材", 2000L, 4, 1L);

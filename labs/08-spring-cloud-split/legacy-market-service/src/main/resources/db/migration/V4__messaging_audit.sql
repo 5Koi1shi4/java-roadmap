@@ -9,9 +9,7 @@ CREATE TABLE trade_review (
     PRIMARY KEY (id),
     UNIQUE KEY uk_trade_review_order_reviewer (order_id, reviewer_id),
     CONSTRAINT ck_trade_review_rating CHECK (rating BETWEEN 1 AND 5),
-    CONSTRAINT fk_trade_review_order FOREIGN KEY (order_id) REFERENCES trade_order (id),
-    CONSTRAINT fk_trade_review_reviewer FOREIGN KEY (reviewer_id) REFERENCES campus_user (id),
-    CONSTRAINT fk_trade_review_reviewee FOREIGN KEY (reviewee_id) REFERENCES campus_user (id)
+    CONSTRAINT fk_trade_review_order FOREIGN KEY (order_id) REFERENCES trade_order (id)
 );
 
 CREATE TABLE audit_event (
@@ -27,8 +25,7 @@ CREATE TABLE audit_event (
     PRIMARY KEY (id),
     KEY idx_audit_event_resource (resource_type, resource_id, occurred_at),
     CONSTRAINT ck_audit_event_result CHECK (result IN ('SUCCESS', 'FAILURE')),
-    CONSTRAINT ck_audit_event_failure CHECK (failure_class IS NULL OR failure_class IN ('VALIDATION', 'AUTHENTICATION', 'AUTHORIZATION', 'CONFLICT', 'DEPENDENCY', 'INTERNAL')),
-    CONSTRAINT fk_audit_event_actor FOREIGN KEY (actor_id) REFERENCES campus_user (id)
+    CONSTRAINT ck_audit_event_failure CHECK (failure_class IS NULL OR failure_class IN ('VALIDATION', 'AUTHENTICATION', 'AUTHORIZATION', 'CONFLICT', 'DEPENDENCY', 'INTERNAL'))
 );
 
 CREATE TABLE integration_outbox (
@@ -92,8 +89,7 @@ CREATE TABLE object_upload_session (
     KEY idx_object_upload_lease (status, lease_until),
     CONSTRAINT ck_object_upload_purpose CHECK (purpose IN ('LISTING_MEDIA', 'DISPUTE_EVIDENCE', 'WARRANTY_EVIDENCE')),
     CONSTRAINT ck_object_upload_status CHECK (status IN ('OPEN', 'COMPLETED', 'ABORTED', 'EXPIRED')),
-    CONSTRAINT ck_object_upload_attempt_count CHECK (attempt_count >= 0),
-    CONSTRAINT fk_object_upload_submitter FOREIGN KEY (submitted_by) REFERENCES campus_user (id)
+    CONSTRAINT ck_object_upload_attempt_count CHECK (attempt_count >= 0)
 );
 
 CREATE TABLE storage_cleanup_task (

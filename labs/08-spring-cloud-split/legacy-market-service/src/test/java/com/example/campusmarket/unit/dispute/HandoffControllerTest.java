@@ -2,7 +2,7 @@ package com.example.campusmarket.unit.dispute;
 
 import com.example.campusmarket.dispute.api.HandoffController;
 import com.example.campusmarket.dispute.application.HandoffService;
-import com.example.campusmarket.identity.application.AuthenticatedUser;
+import com.example.campusmarket.security.AuthenticatedUser;
 import com.example.campusmarket.order.application.IdempotentCommandService;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;

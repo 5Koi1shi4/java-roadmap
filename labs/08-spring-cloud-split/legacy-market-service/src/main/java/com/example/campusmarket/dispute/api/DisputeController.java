@@ -5,7 +5,7 @@ import com.example.campusmarket.api.ApiErrors;
 import com.example.campusmarket.dispute.application.EvidenceStorage;
 import com.example.campusmarket.dispute.application.ReturnResolutionService;
 import com.example.campusmarket.dispute.domain.DisputeDecision;
-import com.example.campusmarket.identity.application.AuthenticatedUser;
+import com.example.campusmarket.security.AuthenticatedUser;
 import com.example.campusmarket.order.application.IdempotentCommandService;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.context.annotation.Profile;

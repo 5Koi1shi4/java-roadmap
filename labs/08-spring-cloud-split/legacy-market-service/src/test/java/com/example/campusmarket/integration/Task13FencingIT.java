@@ -1,6 +1,6 @@
 package com.example.campusmarket.integration;
 
-import com.example.campusmarket.CampusMarketApplication;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.example.campusmarket.messaging.OutboxRepository;
 import com.example.campusmarket.observability.CampusMetrics;
 import com.example.campusmarket.storage.StorageCleanupScheduler;
@@ -29,7 +29,7 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** Task 13 的轻量 MySQL 边界证据；执行 verify 时只启动 MySQL。 */
-@SpringBootTest(classes = CampusMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.NONE)
+@SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.NONE)
 @Import(Task13FencingIT.PasswordEncoderTestConfiguration.class)
 @ActiveProfiles("local")
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
@@ -76,7 +76,6 @@ class Task13FencingIT extends Task11MySqlContainers {
         jdbc.update("DELETE FROM warranty_case WHERE idempotency_key LIKE 'task13-fence-%'");
         jdbc.update("DELETE FROM trade_order WHERE listing_id IN (SELECT id FROM listing WHERE title LIKE 'task13-fence-%')");
         jdbc.update("DELETE FROM listing WHERE title LIKE 'task13-fence-%'");
-        jdbc.update("DELETE FROM campus_user WHERE email LIKE 'task13-fence-%@stu.example.edu.cn'");
     }
 
     @Test
@@ -155,8 +154,6 @@ class Task13FencingIT extends Task11MySqlContainers {
 
     private UUID insertWarrantyCase(String status) {
         UUID buyer = user(), seller = user(), listing = UUID.randomUUID(), order = UUID.randomUUID(), caseId = UUID.randomUUID();
-        jdbc.update("UPDATE campus_user SET email=? WHERE id=?", "task13-fence-" + buyer + "@stu.example.edu.cn", buyer.toString());
-        jdbc.update("UPDATE campus_user SET email=? WHERE id=?", "task13-fence-" + seller + "@stu.example.edu.cn", seller.toString());
         jdbc.update("INSERT INTO listing(id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?,?,'desc','cat',100,0,'SOLD_OUT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
             listing.toString(), seller.toString(), "task13-fence-" + listing);
         jdbc.update("INSERT INTO trade_order(id,buyer_id,seller_id,listing_id,listing_title_snapshot,listing_description_snapshot,unit_price_fen,quantity,total_amount_fen,paid_amount_fen,warranty_days,status,version,t0,created_at,updated_at) VALUES (?,?,?,?,?,?,100,1,100,100,90,'SETTLED',0,DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 DAY),CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
@@ -167,10 +164,7 @@ class Task13FencingIT extends Task11MySqlContainers {
     }
 
     private UUID user() {
-        UUID id = UUID.randomUUID();
-        jdbc.update("INSERT INTO campus_user(id,email,password_hash,status,created_at,updated_at) VALUES (?,?,?,'ACTIVE',CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
-            id.toString(), "task13-fence-pending-" + id + "@stu.example.edu.cn", "hash");
-        return id;
+        return UUID.randomUUID();
     }
 
     private Object cleanupTask(String id, String objectKey, String owner, String token) throws Exception {
