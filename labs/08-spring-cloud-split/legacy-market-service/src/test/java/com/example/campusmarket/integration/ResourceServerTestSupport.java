@@ -26,6 +26,7 @@ public final class ResourceServerTestSupport {
     }
 
     public static void register(DynamicPropertyRegistry registry) {
+        registry.add("eureka.client.enabled", () -> "false");
         registry.add("spring.security.oauth2.resourceserver.jwt.jwk-set-uri",
             () -> "http://127.0.0.1:" + JWKS_SERVER.getAddress().getPort() + "/jwks");
         registry.add("spring.security.oauth2.resourceserver.jwt.issuer-uri", () -> ISSUER);

@@ -1,6 +1,7 @@
 package com.example.campusmarket.integration;
 
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.example.campusmarket.catalog.search.ProductSearchPort;
 import com.example.campusmarket.catalog.search.ElasticsearchProductSearch;
 import com.example.campusmarket.catalog.search.SearchRebuildService;
@@ -18,6 +19,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -55,6 +57,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.awaitility.Awaitility.await;
 
+@SpringBootTest(classes = LegacyMarketApplication.class)
 @ActiveProfiles("local")
 class SearchRebuildIT extends SharedContainers {
     @Autowired JdbcTemplate jdbc;

@@ -49,6 +49,7 @@ class RedisFailureDeadlineIT {
 
     @DynamicPropertySource
     static void containers(DynamicPropertyRegistry registry) {
+        registry.add("eureka.client.enabled", () -> "false");
         registry.add("spring.datasource.url", MYSQL::getJdbcUrl);
         registry.add("spring.datasource.username", MYSQL::getUsername);
         registry.add("spring.datasource.password", MYSQL::getPassword);

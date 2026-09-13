@@ -19,10 +19,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.fail;
 
-/**
- * Keeps the experiment-seven integration suites visible to Maven Failsafe after
- * the service is split into modules.
- */
+/** 模块拆分后仍确保实验七集成套件可被 Maven Failsafe 发现并实际执行。 */
 class ExperimentSevenCoverageTest {
 
     private static final String INTEGRATION_PACKAGE = "com.example.campusmarket.integration.";
