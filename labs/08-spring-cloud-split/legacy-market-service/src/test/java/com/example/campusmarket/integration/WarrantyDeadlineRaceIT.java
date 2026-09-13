@@ -3,10 +3,12 @@ package com.example.campusmarket.integration;
 import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.example.campusmarket.warranty.application.SellerObligationService;
 import com.example.campusmarket.warranty.application.WarrantyDeadlineScheduler;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.annotation.DirtiesContext;
@@ -29,14 +31,20 @@ import static org.assertj.core.api.Assertions.assertThat;
 @TestPropertySource(properties = {
     "server.port=18086", "campus.market.payment.provider-url=http://localhost:18086/simulated-provider",
     "campus.market.search.dispatcher.enabled=false", "campus.market.dispute.deadline.enabled=false",
-    "campus.market.dispute.return-reconciliation.enabled=false", "campus.market.warranty.deadline.enabled=true",
+    "campus.market.dispute.return-reconciliation.enabled=false", "campus.market.warranty.deadline.enabled=false",
     "spring.rabbitmq.listener.simple.auto-startup=false", "spring.rabbitmq.listener.direct.auto-startup=false"
 })
 class WarrantyDeadlineRaceIT extends Task11MySqlContainers {
     @Autowired JdbcTemplate jdbc;
     @Autowired DataSource dataSource;
-    @Autowired WarrantyDeadlineScheduler deadlines;
+    @Autowired PlatformTransactionManager transactionManager;
     @Autowired SellerObligationService obligations;
+    private WarrantyDeadlineScheduler deadlines;
+
+    @BeforeEach
+    void createManualDeadlineScheduler() {
+        deadlines = new WarrantyDeadlineScheduler(jdbc, transactionManager);
+    }
 
     @Test
     void expiredSellerClaimIsTakenOverWithFreshTokenAndAdminDeadlinesUseDatabaseTime() {
@@ -97,18 +105,22 @@ class WarrantyDeadlineRaceIT extends Task11MySqlContainers {
             }
 
             expiry = pool.submit(() -> deadlines.runOnce(100));
-            assertThat(awaitSellerObligationLockWait(diagnostics, Duration.ofSeconds(10)))
+            assertThat(awaitSellerObligationLockWait(diagnostics, obligation, expiry, Duration.ofSeconds(10)))
                 .as("截止候选事务必须进入 seller_obligation 锁等待")
                 .isTrue();
-            boolean fundingIndexLock = hasGrantedFundingIndexLock(diagnostics);
+            assertThat(expiry.isDone())
+                .as("观察到目标义务锁等待时，截止 Future 必须仍在执行")
+                .isFalse();
+            boolean fundingIndexLock = hasGrantedFundingIndexLock(diagnostics, obligation);
 
             SQLException fundingFailure = null;
-            try (PreparedStatement update = funding.prepareStatement("UPDATE seller_obligation SET funded_amount_fen=?,status='FUNDED',restriction_status='NONE',version=version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND seller_id=? AND funded_amount_fen=?")) {
+            try (PreparedStatement update = funding.prepareStatement("UPDATE seller_obligation SET funded_amount_fen=?,status='FUNDED',restriction_status='NONE',version=version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND seller_id=? AND funded_amount_fen=? AND status IN ('AWAITING_FUNDING','PARTIALLY_FUNDED')")) {
                 update.setLong(1, 1000L);
                 update.setString(2, obligation.toString());
                 update.setString(3, f[1].toString());
                 update.setLong(4, 0L);
-                update.executeUpdate();
+                int changed = update.executeUpdate();
+                assertThat(changed).as("筹资更新必须命中仍处于筹资中的目标义务").isEqualTo(1);
                 funding.commit();
             } catch (SQLException e) {
                 fundingFailure = e;
@@ -148,13 +160,15 @@ class WarrantyDeadlineRaceIT extends Task11MySqlContainers {
     private UUID user(){return UUID.randomUUID();}
     private static void await(CyclicBarrier barrier) { try { barrier.await(20, TimeUnit.SECONDS); } catch (Exception e) { throw new AssertionError("并发屏障失败", e); } }
 
-    private boolean awaitSellerObligationLockWait(Connection diagnostics, Duration timeout) throws Exception {
+    private boolean awaitSellerObligationLockWait(Connection diagnostics, UUID obligation, Future<?> expiry, Duration timeout) throws Exception {
         long deadline = System.nanoTime() + timeout.toNanos();
         while (System.nanoTime() < deadline) {
-            try (PreparedStatement statement = diagnostics.prepareStatement("SELECT COUNT(*) FROM performance_schema.data_lock_waits waits JOIN performance_schema.data_locks requesting ON requesting.ENGINE_LOCK_ID=waits.REQUESTING_ENGINE_LOCK_ID WHERE requesting.OBJECT_SCHEMA=DATABASE() AND requesting.OBJECT_NAME='seller_obligation'")) {
+            try (PreparedStatement statement = diagnostics.prepareStatement("SELECT COUNT(*) FROM performance_schema.data_lock_waits waits JOIN performance_schema.data_locks requesting ON requesting.ENGINE_LOCK_ID=waits.REQUESTING_ENGINE_LOCK_ID JOIN performance_schema.data_locks blocking ON blocking.ENGINE_LOCK_ID=waits.BLOCKING_ENGINE_LOCK_ID WHERE requesting.OBJECT_SCHEMA=DATABASE() AND requesting.OBJECT_NAME='seller_obligation' AND blocking.OBJECT_SCHEMA=DATABASE() AND blocking.OBJECT_NAME='seller_obligation' AND COALESCE(requesting.LOCK_DATA,'') LIKE ? AND COALESCE(blocking.LOCK_DATA,'') LIKE ?")) {
+                statement.setString(1, "%" + obligation + "%");
+                statement.setString(2, "%" + obligation + "%");
                 try (var rows = statement.executeQuery()) {
                     rows.next();
-                    if (rows.getInt(1) > 0) return true;
+                    if (rows.getInt(1) > 0) return !expiry.isDone();
                 }
             }
             Thread.sleep(25L);
@@ -162,8 +176,9 @@ class WarrantyDeadlineRaceIT extends Task11MySqlContainers {
         return false;
     }
 
-    private boolean hasGrantedFundingIndexLock(Connection diagnostics) throws SQLException {
-        try (PreparedStatement statement = diagnostics.prepareStatement("SELECT COUNT(*) FROM performance_schema.data_locks WHERE OBJECT_SCHEMA=DATABASE() AND OBJECT_NAME='seller_obligation' AND INDEX_NAME='idx_seller_obligation_funding' AND LOCK_STATUS='GRANTED'")) {
+    private boolean hasGrantedFundingIndexLock(Connection diagnostics, UUID obligation) throws SQLException {
+        try (PreparedStatement statement = diagnostics.prepareStatement("SELECT COUNT(*) FROM performance_schema.data_locks WHERE OBJECT_SCHEMA=DATABASE() AND OBJECT_NAME='seller_obligation' AND INDEX_NAME='idx_seller_obligation_funding' AND LOCK_STATUS='GRANTED' AND COALESCE(LOCK_DATA,'') LIKE ?")) {
+            statement.setString(1, "%" + obligation + "%");
             try (var rows = statement.executeQuery()) {
                 rows.next();
                 return rows.getInt(1) > 0;
