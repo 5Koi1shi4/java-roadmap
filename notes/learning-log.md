@@ -144,5 +144,14 @@
 - 当前进度：本地分支 `learning/spring-cloud-split` 已建立聚合工程、独立身份库、RS256/JWKS 身份服务、兼容单体独立验签和 Eureka。Eureka 的真实 HTTP 中文 JSON 与显式 UTF-8 修正在 `277dded` 完成并通过任务复核；Gateway 实现在 `cd697d0` 提交，正在进行独立规格与代码质量复核。
 - 阶段测试证据：提交 `5949ccd` 前的 JDK 17 Reactor `mvnw.cmd test` 为 platform-test-support 6、discovery 4、identity 24、legacy 135、Gateway 21，合计 190 项，均为 0 failures、0 errors、0 skipped。legacy 数量包含尚未提交的本地 Dockerfile 路径守卫；此前沟通中的 170 为加总错误。以上是阶段测试，不代表实验级完整验收。
 - 本轮排障：Eureka 原健康响应缺少显式 charset，使用实际生效的 `server.servlet.encoding` 并以真实 HTTP 中文 JSON 验证；Gateway 的 issuer 校验曾直接比较 String 与 URL，导致有效 Token 被拒绝，改为精确比较字符串表示；路由断开和下游 5xx 使用稳定中文 UTF-8 503，并丢弃下游异常体。
+- 恢复后的验证：Gateway 任务规格与质量审查通过，五项 Minor 留待最终复核。完整 legacy 回归暴露两个搜索套件无法发现启动配置，显式指定 `LegacyMarketApplication` 后定点 40 项通过；后续完整运行 264 项为 1 failure、0 errors、0 skipped，唯一失败为质保筹资与过期处理竞争时的 MySQL 死锁。当前正在验证候选范围锁与主键行锁的顺序风险，尚未完成修正或重新验收；四应用旅程及停机恢复尚未开始。
 - 待完成：四应用真实 Eureka/HTTP 旅程、JWKS 缓存与服务停机恢复、实验七完整业务回归、运行与复盘文档，以及 Reactor 完整 `verify`。覆盖清单守卫已提交 `5949ccd`，完整 legacy 验证与 Gateway 审查已恢复；实验八保持“进行中”，远端尚无实验八分支入口。
 - 执行约束：按用户要求在任务节点检查额度，任一适用窗口剩余达到 10% 时停止新增实验工作，整理进度、验证与遗留问题并更新 Git。此次远端推送被自动审批要求补充具体仓库及源码外发授权而拦截，本地提交保留。
+
+## 2026-09-14
+
+- 今日目标：按 AGENTS.md 恢复实验八 8.1，先完成质保截止并发测试质量修正及实验七完整业务回归，再进入四应用真实旅程和故障恢复。
+- 已完成节点：测试关闭后台质保调度、手动创建被测调度器，控制筹资 UPDATE 保留真实状态条件并断言一行，锁诊断按随机目标义务过滤。真实 MySQL 定点 3/3 通过，独立规格与质量复核 PASS；仅测试修正提交 `a6c477e`。
+- 完整回归证据：JDK 17、Docker Desktop 29.7.2 下 `mvnw.cmd -pl legacy-market-service -am verify` 退出0、BUILD SUCCESS（23分08秒）。本轮 support 单元6、identity 单元24/IT17、legacy 单元135/IT265，全部0 failures、0 errors、0 skipped；按运行启动时间过滤XML并与Maven汇总核对，排除历史报告。测试迁移配置与路径守卫提交 `678b8a8`。
+- 排障与取舍：原生产修正 `44e4441` 保留逐义务主键锁、数据库时间和条件迁移，候选扫描不持有二级索引锁；不吞掉死锁、不放宽并发断言。全套日志仍有前序上下文在容器关闭后尝试调度的连接异常，未造成断言失败，最终复核继续检查上下文隔离。
+- 当前进度：四应用真实 Eureka/HTTP 旅程正在实现，可执行打包配置尚待旅程验证。最小 Compose、应用实例地址、SMTP占位符、架构、迁移边界、学习日志与面试追问已补充，阶段提交 `6d141c4`；初始化脚本在全新临时MySQL8.4项目通过特殊字符测试密码、本库权限与跨库/DDL拒绝验证，测试环境已回收。实验保持“进行中”，尚不能用业务回归替代四应用故障恢复与最终 Reactor 验收。
