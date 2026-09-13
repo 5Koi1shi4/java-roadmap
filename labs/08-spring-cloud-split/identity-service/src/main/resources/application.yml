@@ -1,4 +1,6 @@
 spring:
+  application:
+    name: identity-service
   jackson:
     deserialization:
       fail-on-unknown-properties: true
@@ -34,6 +36,11 @@ management:
       exposure:
         include: health,info,metrics
 
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_DEFAULT_ZONE:http://localhost:8761/eureka/}
+
 campus:
   market:
     identity:
@@ -68,6 +75,10 @@ spring:
       - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
       - org.springframework.boot.autoconfigure.data.redis.RedisReactiveAutoConfiguration
       - org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration
+
+eureka:
+  client:
+    enabled: false
 
 ---
 spring:

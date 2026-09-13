@@ -1,4 +1,6 @@
 spring:
+  application:
+    name: legacy-market-service
   jackson:
     deserialization:
       fail-on-unknown-properties: true
@@ -38,6 +40,11 @@ management:
       exposure:
         include: health,info,metrics
 
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_DEFAULT_ZONE:http://localhost:8761/eureka/}
+
 campus:
   market:
     jwt:
@@ -65,6 +72,10 @@ spring:
       - org.springframework.boot.autoconfigure.elasticsearch.ElasticsearchClientAutoConfiguration
       - org.springframework.boot.autoconfigure.elasticsearch.ElasticsearchRestClientAutoConfiguration
       - org.springframework.boot.autoconfigure.data.elasticsearch.ElasticsearchDataAutoConfiguration
+
+eureka:
+  client:
+    enabled: false
 
 ---
 spring:
