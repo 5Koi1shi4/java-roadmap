@@ -23,6 +23,19 @@ class DiscoveryServerTest {
         });
     }
 
+    @Test
+    void serverDeclaresExplicitUtf8ServletEncoding() {
+        contexts.run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context.getEnvironment().getProperty("server.servlet.encoding.charset"))
+                .isEqualTo("UTF-8");
+            assertThat(context.getEnvironment().getProperty(
+                "server.servlet.encoding.enabled", Boolean.class)).isTrue();
+            assertThat(context.getEnvironment().getProperty(
+                "server.servlet.encoding.force", Boolean.class)).isTrue();
+        });
+    }
+
     @Configuration(proxyBeanMethods = false)
     static class TestConfiguration {
     }
