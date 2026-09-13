@@ -11,6 +11,12 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.annotation.DirtiesContext;
 
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.time.Duration;
 import java.util.UUID;
 import java.util.concurrent.*;
 
@@ -28,6 +34,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 })
 class WarrantyDeadlineRaceIT extends Task11MySqlContainers {
     @Autowired JdbcTemplate jdbc;
+    @Autowired DataSource dataSource;
     @Autowired WarrantyDeadlineScheduler deadlines;
     @Autowired SellerObligationService obligations;
 
@@ -70,6 +77,67 @@ class WarrantyDeadlineRaceIT extends Task11MySqlContainers {
         else { assertThat(funded).isLessThan(1000L); assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM seller_account_restriction WHERE source_obligation_id=? AND status='ACTIVE'", Integer.class, obligation.toString())).isEqualTo(2); }
     }
 
+    @Test
+    void deadlineCandidateScanDoesNotHoldFundingIndexWhileFundingOwnsPrimaryRow() throws Exception {
+        UUID[] f = fixture();
+        UUID obligation = UUID.randomUUID();
+        jdbc.update("INSERT INTO seller_obligation(id,warranty_case_id,seller_id,obligation_business_key,obligation_amount_fen,funded_amount_fen,funding_deadline,restriction_status,status,version,created_at,updated_at) VALUES (?,?,?, ?,1000,0,DATE_SUB(CURRENT_TIMESTAMP(6),INTERVAL 1 SECOND),'RESTRICTED','AWAITING_FUNDING',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))", obligation.toString(), f[2].toString(), f[1].toString(), "lock-path-" + obligation);
+
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        Future<?> expiry = null;
+        try (Connection funding = dataSource.getConnection();
+             Connection diagnostics = DriverManager.getConnection(MYSQL.getJdbcUrl(), "root", MYSQL.getPassword())) {
+            funding.setAutoCommit(false);
+            try (PreparedStatement timeout = funding.prepareStatement("SET SESSION innodb_lock_wait_timeout=5")) {
+                timeout.execute();
+            }
+            try (PreparedStatement lock = funding.prepareStatement("SELECT id FROM seller_obligation WHERE id=? FOR UPDATE")) {
+                lock.setString(1, obligation.toString());
+                lock.executeQuery().close();
+            }
+
+            expiry = pool.submit(() -> deadlines.runOnce(100));
+            assertThat(awaitSellerObligationLockWait(diagnostics, Duration.ofSeconds(10)))
+                .as("截止候选事务必须进入 seller_obligation 锁等待")
+                .isTrue();
+            boolean fundingIndexLock = hasGrantedFundingIndexLock(diagnostics);
+
+            SQLException fundingFailure = null;
+            try (PreparedStatement update = funding.prepareStatement("UPDATE seller_obligation SET funded_amount_fen=?,status='FUNDED',restriction_status='NONE',version=version+1,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND seller_id=? AND funded_amount_fen=?")) {
+                update.setLong(1, 1000L);
+                update.setString(2, obligation.toString());
+                update.setString(3, f[1].toString());
+                update.setLong(4, 0L);
+                update.executeUpdate();
+                funding.commit();
+            } catch (SQLException e) {
+                fundingFailure = e;
+                funding.rollback();
+            }
+
+            Throwable expiryFailure = null;
+            try {
+                expiry.get(20, TimeUnit.SECONDS);
+            } catch (ExecutionException e) {
+                expiryFailure = e.getCause();
+            }
+            String lockEvidence = fundingFailure == null && expiryFailure == null ? "" : innodbLockEvidence(diagnostics);
+            assertThat((Object) fundingFailure)
+                .as("筹资持有主键时不应因截止候选二级索引锁死锁；candidateFundingIndexLock=%s\n%s", fundingIndexLock, lockEvidence)
+                .isNull();
+            assertThat((Object) expiryFailure)
+                .as("截止候选扫描不应在筹资提交时失败；candidateFundingIndexLock=%s\n%s", fundingIndexLock, lockEvidence)
+                .isNull();
+            assertThat(fundingIndexLock)
+                .as("逐 ID 处理只能持有主键锁，候选扫描不得持有 funding 二级索引锁")
+                .isFalse();
+        } finally {
+            if (expiry != null) expiry.cancel(true);
+            pool.shutdownNow();
+            pool.awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
     private UUID[] fixture() {
         UUID buyer=user(), seller=user(), listing=UUID.randomUUID(), order=UUID.randomUUID(), caseId=UUID.randomUUID();
         jdbc.update("INSERT INTO listing(id,seller_id,title,description,category,unit_price_fen,available_quantity,status,version,created_at,updated_at) VALUES (?,?,?,'描述','数码',100,0,'SOLD_OUT',0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",listing.toString(),seller.toString(),"键盘");
@@ -79,4 +147,35 @@ class WarrantyDeadlineRaceIT extends Task11MySqlContainers {
     }
     private UUID user(){return UUID.randomUUID();}
     private static void await(CyclicBarrier barrier) { try { barrier.await(20, TimeUnit.SECONDS); } catch (Exception e) { throw new AssertionError("并发屏障失败", e); } }
+
+    private boolean awaitSellerObligationLockWait(Connection diagnostics, Duration timeout) throws Exception {
+        long deadline = System.nanoTime() + timeout.toNanos();
+        while (System.nanoTime() < deadline) {
+            try (PreparedStatement statement = diagnostics.prepareStatement("SELECT COUNT(*) FROM performance_schema.data_lock_waits waits JOIN performance_schema.data_locks requesting ON requesting.ENGINE_LOCK_ID=waits.REQUESTING_ENGINE_LOCK_ID WHERE requesting.OBJECT_SCHEMA=DATABASE() AND requesting.OBJECT_NAME='seller_obligation'")) {
+                try (var rows = statement.executeQuery()) {
+                    rows.next();
+                    if (rows.getInt(1) > 0) return true;
+                }
+            }
+            Thread.sleep(25L);
+        }
+        return false;
+    }
+
+    private boolean hasGrantedFundingIndexLock(Connection diagnostics) throws SQLException {
+        try (PreparedStatement statement = diagnostics.prepareStatement("SELECT COUNT(*) FROM performance_schema.data_locks WHERE OBJECT_SCHEMA=DATABASE() AND OBJECT_NAME='seller_obligation' AND INDEX_NAME='idx_seller_obligation_funding' AND LOCK_STATUS='GRANTED'")) {
+            try (var rows = statement.executeQuery()) {
+                rows.next();
+                return rows.getInt(1) > 0;
+            }
+        }
+    }
+
+    private String innodbLockEvidence(Connection diagnostics) throws SQLException {
+        try (PreparedStatement statement = diagnostics.prepareStatement("SHOW ENGINE INNODB STATUS")) {
+            try (var rows = statement.executeQuery()) {
+                return rows.next() ? rows.getString("Status") : "";
+            }
+        }
+    }
 }
