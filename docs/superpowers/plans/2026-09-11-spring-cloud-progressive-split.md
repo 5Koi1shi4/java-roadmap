@@ -570,6 +570,8 @@ public final class JwtPrincipalConverter
 
 `V1__identity_catalog.sql` 重命名为 `V1__catalog.sql` 并删除身份三表及 `fk_listing_seller`。从列出文件中只删除引用 `campus_user` 的外键子句，保留用户 ID 列、非空、索引、业务 CHECK 与其他领域内外键。由于 8.1 只支持全新库，不新增伪装成在线迁移的 `DROP FOREIGN KEY` 补丁。
 
+用户于 2026-09-13 确认的边界例外：允许在 `market_db` 新增最小、每个卖家唯一且持久的锁表，替代迁出身份表后的卖家互斥。提现及改变可提现结算事实的事务使用同一卖家锁，明确固定锁序，并以真实 MySQL 测试验证零/多结算及结算与提现交错；不得引入余额投影、账户状态机或跨身份库协作。
+
 - [ ] **Step 6: 将所有 legacy 测试 Token 改为测试夹具**
 
 生产代码不包含签发器。测试通过 test-scope `platform-test-support` 的 `TestJwtFactory` 签发用户/管理员 Token；测试 JWKS HTTP stub 只返回 `TestJwtFactory.publicJwk("test-key-1")`。
