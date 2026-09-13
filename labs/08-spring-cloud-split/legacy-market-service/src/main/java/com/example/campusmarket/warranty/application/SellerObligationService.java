@@ -2,6 +2,8 @@ package com.example.campusmarket.warranty.application;
 
 import com.example.campusmarket.payment.application.RefundService;
 import com.example.campusmarket.shared.Money;
+import com.example.campusmarket.shared.infrastructure.SellerBalanceLockRepository;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -18,8 +20,15 @@ import java.security.MessageDigest;
 @Service
 @Profile("!test")
 public final class SellerObligationService {
-    private final JdbcTemplate jdbc; private final TransactionTemplate transactions; private final RefundService refunds;
-    public SellerObligationService(JdbcTemplate jdbc, org.springframework.transaction.PlatformTransactionManager tx, RefundService refunds) { this.jdbc=Objects.requireNonNull(jdbc); this.transactions=new TransactionTemplate(Objects.requireNonNull(tx)); this.refunds=Objects.requireNonNull(refunds); }
+    private final JdbcTemplate jdbc; private final TransactionTemplate transactions; private final RefundService refunds; private final SellerBalanceLockRepository sellerLocks;
+    /** 兼容仍直接提供加锁前依赖的调用方。 */
+    public SellerObligationService(JdbcTemplate jdbc, org.springframework.transaction.PlatformTransactionManager tx, RefundService refunds) {
+        this(jdbc, tx, refunds, jdbc == null ? null : new SellerBalanceLockRepository(jdbc));
+    }
+
+    @Autowired
+    public SellerObligationService(JdbcTemplate jdbc, org.springframework.transaction.PlatformTransactionManager tx, RefundService refunds,
+                                   SellerBalanceLockRepository sellerLocks) { this.jdbc=Objects.requireNonNull(jdbc); this.transactions=new TransactionTemplate(Objects.requireNonNull(tx)); this.refunds=Objects.requireNonNull(refunds); this.sellerLocks=Objects.requireNonNull(sellerLocks); }
 
     public FundingResult fundObligation(UUID obligationId, UUID sellerId, Money amount) {
         return fundObligation(obligationId, sellerId, amount, "legacy-"+obligationId+"-"+amount.fen());
@@ -58,12 +67,20 @@ public final class SellerObligationService {
     public long deductFutureSettlement(UUID settlementId, UUID obligationId, Money amount) {
         Objects.requireNonNull(settlementId); Objects.requireNonNull(obligationId); Objects.requireNonNull(amount);
         if (amount.fen() <= 0) throw new IllegalArgumentException("抵扣金额必须为正数");
+        UUID seller=findObligationSeller(obligationId);
+        if (seller==null) throw new NotFoundException();
         long deducted = transactions.execute(s->{
-            SettlementFacts settlement=jdbc.query("SELECT s.status,s.net_settlement_fen,o.seller_id,t.seller_id FROM settlement s JOIN trade_order t ON t.id=s.order_id JOIN seller_obligation o ON o.id=? WHERE s.id=? FOR UPDATE",rs->rs.next()?new SettlementFacts(rs.getString(1),rs.getLong(2),UUID.fromString(rs.getString(3)),UUID.fromString(rs.getString(4))):null,obligationId.toString(),settlementId.toString());
-            if (settlement==null || !"SETTLED".equals(settlement.status()) || !settlement.seller().equals(settlement.orderSeller())) throw new IllegalStateException("结算归属或状态无效");
-            if (settlement.net() <= 0) return 0L;
+            // 所有结算余额写入路径固定按卖家 → 订单 → 结算 → 义务/限制加锁。
+            sellerLocks.lock(seller);
+            UUID orderId=jdbc.query("SELECT order_id FROM settlement WHERE id=?",rs->rs.next()?UUID.fromString(rs.getString(1)):null,settlementId.toString());
+            if (orderId==null) throw new IllegalStateException("结算不存在");
+            OrderFacts order=jdbc.query("SELECT id,seller_id FROM trade_order WHERE id=? FOR UPDATE",rs->rs.next()?new OrderFacts(UUID.fromString(rs.getString(1)),UUID.fromString(rs.getString(2))):null,orderId.toString());
+            SettlementFacts settlement=jdbc.query("SELECT order_id,status,net_settlement_fen FROM settlement WHERE id=? FOR UPDATE",rs->rs.next()?new SettlementFacts(UUID.fromString(rs.getString(1)),rs.getString(2),rs.getLong(3)):null,settlementId.toString());
             Obligation row=jdbc.query("SELECT id,warranty_case_id,seller_id,obligation_amount_fen,funded_amount_fen,status,version FROM seller_obligation WHERE id=? FOR UPDATE",rs->rs.next()?new Obligation(UUID.fromString(rs.getString(1)),UUID.fromString(rs.getString(2)),UUID.fromString(rs.getString(3)),rs.getLong(4),rs.getLong(5),rs.getString(6),null,rs.getLong(7)):null,obligationId.toString());
-            if(row==null) throw new NotFoundException();
+            if (order==null || settlement==null || row==null || !"SETTLED".equals(settlement.status())
+                || !seller.equals(order.sellerId()) || !seller.equals(row.sellerId())
+                || !orderId.equals(settlement.orderId())) throw new IllegalStateException("结算归属或状态无效");
+            if (settlement.net() <= 0) return 0L;
             long remaining=row.amount()-row.funded(); if(remaining<=0) return 0L;
             long deduction=Math.min(Math.min(amount.fen(),remaining),settlement.net());
             int inserted=jdbc.update("INSERT INTO settlement_obligation_deduction(id,settlement_id,obligation_id,amount_fen,created_at) VALUES (?,?,?,?,CURRENT_TIMESTAMP(6)) ON DUPLICATE KEY UPDATE id=id",UUID.randomUUID().toString(),settlementId.toString(),obligationId.toString(),deduction);
@@ -90,6 +107,9 @@ public final class SellerObligationService {
         return jdbc.query("SELECT id,warranty_case_id,obligation_amount_fen,funded_amount_fen,status,funding_deadline FROM seller_obligation WHERE seller_id=? ORDER BY funding_deadline,id",
             (rs,n)->new ObligationView(UUID.fromString(rs.getString(1)),UUID.fromString(rs.getString(2)),rs.getLong(3),rs.getLong(4),rs.getString(5),rs.getTimestamp(6).toInstant()),sellerId.toString());
     }
+    private UUID findObligationSeller(UUID obligationId) {
+        return jdbc.query("SELECT seller_id FROM seller_obligation WHERE id=?",rs->rs.next()?UUID.fromString(rs.getString(1)):null,obligationId.toString());
+    }
     private void clearRestrictions(UUID seller,UUID obligation,Instant now,long version){
         var types=jdbc.query("SELECT restriction_type FROM seller_account_restriction WHERE seller_id=? AND source_obligation_id=? AND status='ACTIVE' FOR UPDATE",(rs,n)->rs.getString(1),seller.toString(),obligation.toString());
         jdbc.update("UPDATE seller_account_restriction SET status='CLEARED',cleared_at=? WHERE seller_id=? AND source_obligation_id=? AND status='ACTIVE'",Timestamp.from(now),seller.toString(),obligation.toString());
@@ -110,7 +130,8 @@ public final class SellerObligationService {
     private static byte[] digest(String value){try{return MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));}catch(Exception e){throw new IllegalStateException(e);}}
     private record Obligation(UUID id,UUID caseId,UUID sellerId,long amount,long funded,String status,Instant deadline,long version,String fundingKey,byte[] fundingHash){ Obligation(UUID id,UUID caseId,UUID sellerId,long amount,long funded,String status,Instant deadline){this(id,caseId,sellerId,amount,funded,status,deadline,0L,null,null);} Obligation(UUID id,UUID caseId,UUID sellerId,long amount,long funded,String status,Instant deadline,long version){this(id,caseId,sellerId,amount,funded,status,deadline,version,null,null);} }
     private record FundingCommand(long amount,byte[] hash){}
-    private record SettlementFacts(String status,long net,UUID seller,UUID orderSeller){}
+    private record OrderFacts(UUID id,UUID sellerId){}
+    private record SettlementFacts(UUID orderId,String status,long net){}
     public record FundingResult(UUID obligationId,UUID warrantyCaseId,long obligationAmountFen,long fundedAmountFen,String status){}
     private record FundingOutcome(FundingResult result, boolean expired){}
     public record ObligationView(UUID obligationId,UUID warrantyCaseId,long obligationAmountFen,long fundedAmountFen,String status,Instant fundingDeadline){}

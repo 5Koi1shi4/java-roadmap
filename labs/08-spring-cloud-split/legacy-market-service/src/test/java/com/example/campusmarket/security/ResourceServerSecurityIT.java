@@ -92,15 +92,36 @@ class ResourceServerSecurityIT {
     }
 
     @Test
+    void missingOrBlankKidAlwaysReturns401() throws Exception {
+        for (String token : List.of(missingKidToken(), blankKidToken())) {
+            HttpResponse<String> response = get("/api/listings/mine", Map.of(
+                "Authorization", "Bearer " + token));
+            assertThat(response.statusCode()).as("kid is required").isEqualTo(401);
+            HttpAssertions.assertJsonUtf8(response);
+        }
+    }
+
+    @Test
+    void malformedRolesAlwaysReturn401() throws Exception {
+        for (String token : List.of(scalarRoleToken(), nullRoleToken(), mixedRoleToken())) {
+            HttpResponse<String> response = get("/api/listings/mine", Map.of(
+                "Authorization", "Bearer " + token));
+            assertThat(response.statusCode()).as("roles must be a string list").isEqualTo(401);
+            HttpAssertions.assertJsonUtf8(response);
+        }
+    }
+
+    @Test
     @Order(3)
     void invalidBearerTokensAlwaysReturn401() throws Exception {
         for (String token : Stream.of(
             expiredToken(), wrongIssuerToken(), wrongAudienceToken(), illegalRoleToken(),
             missingIssuedAtToken(), missingExpirationToken(), futureIssuedAtToken(),
-            longLifetimeToken(), unknownKidToken(), hs256Token(), tamperedToken()).toList()) {
+            longLifetimeToken(), unknownKidToken(), missingKidToken(), blankKidToken(),
+            scalarRoleToken(), nullRoleToken(), mixedRoleToken(), hs256Token(), tamperedToken()).toList()) {
             HttpResponse<String> response = get("/api/listings/mine", Map.of(
                 "Authorization", "Bearer " + token));
-            assertThat(response.statusCode()).as("invalid token must be rejected").isEqualTo(401);
+            assertThat(response.statusCode()).as("invalid token must be rejected: " + token).isEqualTo(401);
             HttpAssertions.assertJsonUtf8(response);
         }
     }
@@ -161,6 +182,40 @@ class ResourceServerSecurityIT {
             TestJwtFactory.ACCESS_TTL, ISSUER, AUDIENCE, "unknown-key");
     }
 
+    private static String missingKidToken() {
+        return signedClaims(claims(Instant.now(), Instant.now().plus(TestJwtFactory.ACCESS_TTL),
+            ISSUER, AUDIENCE, List.of("ROLE_USER")), null, JWSAlgorithm.RS256);
+    }
+
+    private static String blankKidToken() {
+        return signedClaims(claims(Instant.now(), Instant.now().plus(TestJwtFactory.ACCESS_TTL),
+            ISSUER, AUDIENCE, List.of("ROLE_USER")), " ", JWSAlgorithm.RS256);
+    }
+
+    private static String scalarRoleToken() {
+        JWTClaimsSet claims = new JWTClaimsSet.Builder().subject(USER_ID.toString()).issuer(ISSUER)
+            .audience(AUDIENCE).issueTime(Date.from(Instant.now()))
+            .expirationTime(Date.from(Instant.now().plus(TestJwtFactory.ACCESS_TTL)))
+            .claim("roles", "ROLE_USER").build();
+        return signedClaims(claims, KID, JWSAlgorithm.RS256);
+    }
+
+    private static String nullRoleToken() {
+        JWTClaimsSet claims = new JWTClaimsSet.Builder().subject(USER_ID.toString()).issuer(ISSUER)
+            .audience(AUDIENCE).issueTime(Date.from(Instant.now()))
+            .expirationTime(Date.from(Instant.now().plus(TestJwtFactory.ACCESS_TTL)))
+            .claim("roles", java.util.Arrays.asList("ROLE_USER", null)).build();
+        return signedClaims(claims, KID, JWSAlgorithm.RS256);
+    }
+
+    private static String mixedRoleToken() {
+        JWTClaimsSet claims = new JWTClaimsSet.Builder().subject(USER_ID.toString()).issuer(ISSUER)
+            .audience(AUDIENCE).issueTime(Date.from(Instant.now()))
+            .expirationTime(Date.from(Instant.now().plus(TestJwtFactory.ACCESS_TTL)))
+            .claim("roles", java.util.Arrays.asList("ROLE_USER", 42)).build();
+        return signedClaims(claims, KID, JWSAlgorithm.RS256);
+    }
+
     private static String hs256Token() {
         try {
             JWTClaimsSet claims = claims(Instant.now(), Instant.now().plus(TestJwtFactory.ACCESS_TTL),
@@ -193,7 +248,11 @@ class ResourceServerSecurityIT {
 
     private static String signedClaims(JWTClaimsSet claims, String kid, JWSAlgorithm algorithm) {
         try {
-            SignedJWT jwt = new SignedJWT(new JWSHeader.Builder(algorithm).keyID(kid).build(), claims);
+            JWSHeader.Builder header = new JWSHeader.Builder(algorithm);
+            if (kid != null) {
+                header.keyID(kid);
+            }
+            SignedJWT jwt = new SignedJWT(header.build(), claims);
             jwt.sign(new RSASSASigner(TestRsaKeys.privateKey()));
             return jwt.serialize();
         } catch (Exception ex) {

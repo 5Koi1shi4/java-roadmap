@@ -8,6 +8,7 @@ import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtException;
 import org.springframework.security.authentication.AbstractAuthenticationToken;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -21,17 +22,21 @@ public final class JwtPrincipalConverter implements Converter<Jwt, AbstractAuthe
         if (jwt == null) {
             throw new JwtException("JWT 不能为空");
         }
+        Object keyId = jwt.getHeaders().get("kid");
+        if (!(keyId instanceof String value) || value.isBlank()) {
+            throw new JwtException("JWT kid 非法");
+        }
         UUID userId = parseUserId(jwt.getSubject());
-        List<String> rawRoles;
-        try {
-            rawRoles = jwt.getClaimAsStringList("roles");
-        } catch (RuntimeException ex) {
+        Object rawClaim = jwt.getClaim("roles");
+        if (!(rawClaim instanceof List<?> rawValues) || rawValues.isEmpty()) {
             throw new JwtException("JWT 角色非法");
         }
-        if (rawRoles == null || rawRoles.isEmpty()
-            || rawRoles.stream().anyMatch(role -> role == null || role.isBlank()
-                || !ALLOWED_ROLES.contains(role))) {
-            throw new JwtException("JWT 角色非法");
+        List<String> rawRoles = new ArrayList<>(rawValues.size());
+        for (Object rawValue : rawValues) {
+            if (!(rawValue instanceof String role) || role.isBlank() || !ALLOWED_ROLES.contains(role)) {
+                throw new JwtException("JWT 角色非法");
+            }
+            rawRoles.add(role);
         }
         Set<String> roles = Set.copyOf(rawRoles);
         List<GrantedAuthority> authorities = roles.stream()

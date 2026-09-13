@@ -41,7 +41,7 @@ management:
 campus:
   market:
     jwt:
-      audience: ${CAMPUS_MARKET_JWT_AUDIENCE:campus-market-api}
+      audience: campus-market-api
     search:
       dispatcher:
         enabled: false

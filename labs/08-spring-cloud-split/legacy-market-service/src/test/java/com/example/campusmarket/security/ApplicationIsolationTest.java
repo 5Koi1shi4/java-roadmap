@@ -44,8 +44,20 @@ class ApplicationIsolationTest {
 
     @Test
     void contextContainsNoIdentityServiceBeans() {
+        assertThat(identityClassIsOnTestClasspath("com.example.campusmarket.identity.api.AuthController")).isTrue();
+        assertThat(identityClassIsOnTestClasspath("com.example.campusmarket.identity.application.AuthService")).isTrue();
+        assertThat(identityClassIsOnTestClasspath("com.example.campusmarket.identity.security.IdentityTokenIssuer")).isTrue();
         assertThat(applicationContext.containsBean("authController")).isFalse();
         assertThat(applicationContext.containsBean("authService")).isFalse();
         assertThat(applicationContext.containsBean("identityTokenIssuer")).isFalse();
+    }
+
+    private static boolean identityClassIsOnTestClasspath(String className) {
+        try {
+            Class.forName(className, false, ApplicationIsolationTest.class.getClassLoader());
+            return true;
+        } catch (ClassNotFoundException ex) {
+            return false;
+        }
     }
 }

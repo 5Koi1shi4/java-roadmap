@@ -105,6 +105,13 @@
             <classifier>tests</classifier>
         </dependency>
         <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>identity-service</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+            <classifier>test-classpath</classifier>
+        </dependency>
+        <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>testcontainers</artifactId>
             <scope>test</scope>

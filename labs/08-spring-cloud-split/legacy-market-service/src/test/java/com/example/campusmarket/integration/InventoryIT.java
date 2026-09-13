@@ -133,8 +133,6 @@ class InventoryIT extends SharedContainers {
         UUID seller = UUID.randomUUID();
         UUID buyer = UUID.randomUUID();
         UUID listing = UUID.randomUUID();
-        insertUser(seller);
-        insertUser(buyer);
         insertListing(seller, listing, 2, "ON_SALE");
         insertOrder(buyer, seller, listing, UUID.randomUUID());
         UUID firstOrder = UUID.randomUUID();
@@ -157,12 +155,8 @@ class InventoryIT extends SharedContainers {
     }
 
     private void insertListing(UUID seller, UUID listing, int quantity, String status) {
-        insertUser(seller);
         jdbc.update("INSERT INTO listing (id,seller_id,title,description,category,unit_price_fen,available_quantity,quarantined_quantity,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?, ?,?,0,CURRENT_TIMESTAMP(6),CURRENT_TIMESTAMP(6))",
             listing.toString(), seller.toString(), "教材", "描述", "教材", 100, quantity, 0, status);
-    }
-
-    private void insertUser(UUID user) {
     }
 
     private void insertOrder(UUID buyer, UUID seller, UUID listing, UUID order) {

@@ -6,6 +6,7 @@ import com.example.campusmarket.catalog.search.SearchOutboxRepository;
 import com.example.campusmarket.storage.ObjectUploadCoordinator;
 import com.example.campusmarket.observability.CampusMetrics;
 import com.example.campusmarket.observability.AfterCommitMetrics;
+import com.example.campusmarket.shared.infrastructure.SellerBalanceLockRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.context.annotation.Profile;
 import org.springframework.transaction.annotation.Transactional;
@@ -24,19 +25,28 @@ public class ListingService {
     private final SearchOutboxRepository searchOutbox;
     private final JdbcTemplate jdbc;
     private final CampusMetrics metrics;
+    private final SellerBalanceLockRepository sellerLocks;
 
     public ListingService(ListingRepository listings, ObjectUploadCoordinator uploads, SearchOutboxRepository searchOutbox) {
-        this(listings, uploads, searchOutbox, null, null);
+        this(listings, uploads, searchOutbox, null, null, null);
+    }
+
+    /** 兼容仍直接提供加锁前依赖的调用方。 */
+    public ListingService(ListingRepository listings, ObjectUploadCoordinator uploads, SearchOutboxRepository searchOutbox, JdbcTemplate jdbc,
+                          CampusMetrics metrics) {
+        this(listings, uploads, searchOutbox, jdbc, metrics,
+            jdbc == null ? null : new SellerBalanceLockRepository(jdbc));
     }
 
     @Autowired
     public ListingService(ListingRepository listings, ObjectUploadCoordinator uploads, SearchOutboxRepository searchOutbox, JdbcTemplate jdbc,
-                          CampusMetrics metrics) {
+                          CampusMetrics metrics, SellerBalanceLockRepository sellerLocks) {
         this.listings = listings;
         this.uploads = uploads;
         this.searchOutbox = java.util.Objects.requireNonNull(searchOutbox, "搜索 Outbox 不能为空");
         this.jdbc = jdbc;
         this.metrics = metrics;
+        this.sellerLocks = sellerLocks;
     }
 
     @Transactional
@@ -105,7 +115,7 @@ public class ListingService {
 
     public boolean canPublish(UUID sellerId) { return !isRestricted(sellerId, "PUBLISH"); }
     public boolean canWithdraw(UUID sellerId) { return !isRestricted(sellerId, "WITHDRAW"); }
-    /** Withdrawal command gate; callers must use this command rather than treating canWithdraw as authorization. */
+    /** 可提现命令入口；调用方必须使用此命令，不能把 canWithdraw 当作授权。 */
     @Transactional
     public void withdraw(UUID sellerId, long amountFen) {
         withdraw(sellerId, amountFen, "withdraw-" + UUID.randomUUID());
@@ -114,15 +124,10 @@ public class ListingService {
     public UUID withdraw(UUID sellerId, long amountFen, String idempotencyKey) {
         if (sellerId == null || amountFen <= 0 || idempotencyKey == null || idempotencyKey.isBlank()) throw new IllegalArgumentException("提现请求无效");
         if (jdbc == null) throw new IllegalStateException("提现账户存储不可用");
-        // Lock the seller's settled trade rows before reading the balance. The
-        // market database owns these rows, so concurrent withdrawals cannot
-        // both spend the same settlement without consulting an identity DB.
-        jdbc.query("SELECT s.id FROM settlement s JOIN trade_order o ON o.id=s.order_id " +
-                "WHERE o.seller_id=? AND s.status='SETTLED' FOR UPDATE",
-            (org.springframework.jdbc.core.ResultSetExtractor<Void>) rs -> {
-                while (rs.next()) { /* acquire every matching settlement lock */ }
-                return null;
-            }, sellerId.toString());
+        if (sellerLocks == null) throw new IllegalStateException("卖家锁存储不可用");
+        // 所有改变余额事实的市场事务都必须先锁定此持久行，
+        // 再访问幂等、限制或结算事实。
+        sellerLocks.lock(sellerId);
         Withdrawal existing=jdbc.query("SELECT id,amount_fen FROM seller_withdrawal WHERE seller_id=? AND idempotency_key=? FOR UPDATE",rs->rs.next()?new Withdrawal(UUID.fromString(rs.getString(1)),rs.getLong(2)):null,sellerId.toString(),idempotencyKey);
         if(existing!=null){if(existing.amount()!=amountFen) throw new IllegalArgumentException("提现幂等冲突");return existing.id();}
         if (activeRestrictionForUpdate(sellerId, "WITHDRAW")) throw new RestrictionException();

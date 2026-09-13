@@ -1,8 +1,10 @@
 package com.example.campusmarket.integration;
 
+import com.example.campusmarket.legacy.LegacyMarketApplication;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.ActiveProfiles;
 
 import java.sql.Connection;
@@ -30,6 +32,7 @@ class SchemaCheckClauseNormalizationTest {
 }
 
 @ActiveProfiles("local")
+@SpringBootTest(classes = LegacyMarketApplication.class)
 class SchemaIT extends SharedContainers {
     private static final String REFUND_TOTAL_CHECK =
         "reserved_refund_fen+successful_refund_fen+amount_fen<=paid_amount_fen";
@@ -53,9 +56,9 @@ class SchemaIT extends SharedContainers {
             "object_upload_session", "storage_cleanup_task", "manual_failure", "search_rebuild_gate",
             "search_index_cleanup_task", "search_rebuild_intent", "dispute_deadline_claim",
             "seller_obligation_funding", "settlement_obligation_deduction", "return_proof_attestation",
-            "seller_account_restriction", "warranty_deadline_claim", "seller_withdrawal");
+            "seller_account_restriction", "warranty_deadline_claim", "seller_withdrawal", "seller_balance_lock");
         assertThat(tableNames()).containsExactlyInAnyOrderElementsOf(expected);
-        assertThat(expected).hasSize(35);
+        assertThat(expected).hasSize(36);
     }
 
     @Test

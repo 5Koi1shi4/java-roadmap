@@ -1,5 +1,7 @@
 package com.example.campusmarket.payment.application;
 
+import com.example.campusmarket.shared.infrastructure.SellerBalanceLockRepository;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -17,15 +19,26 @@ import java.util.UUID;
 public class SettlementService {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
+    private final SellerBalanceLockRepository sellerLocks;
 
+    /** 兼容仍直接提供加锁前依赖的调用方。 */
     public SettlementService(JdbcTemplate jdbc, org.springframework.transaction.PlatformTransactionManager transactionManager) {
+        this(jdbc, transactionManager, jdbc == null ? null : new SellerBalanceLockRepository(jdbc));
+    }
+
+    @Autowired
+    public SettlementService(JdbcTemplate jdbc, org.springframework.transaction.PlatformTransactionManager transactionManager,
+                             SellerBalanceLockRepository sellerLocks) {
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.transactions = new TransactionTemplate(Objects.requireNonNull(transactionManager, "事务管理器不能为空"));
+        this.sellerLocks = Objects.requireNonNull(sellerLocks, "卖家锁存储不能为空");
     }
 
     public SettlementResult settle(UUID orderId) {
         Objects.requireNonNull(orderId, "订单ID不能为空");
-        return transactions.execute(status -> settleLocked(orderId));
+        UUID seller = findSeller(orderId);
+        if (seller == null) throw new IllegalArgumentException("订单不存在");
+        return transactions.execute(status -> settleLocked(orderId, seller));
     }
 
     public boolean canSettle(UUID orderId) {
@@ -36,15 +49,17 @@ public class SettlementService {
         });
     }
 
-    private SettlementResult settleLocked(UUID orderId) {
+    private SettlementResult settleLocked(UUID orderId, UUID seller) {
+        // 所有结算余额写入路径固定按卖家 → 订单 → 支付 → 结算 → 义务/限制加锁。
+        sellerLocks.lock(seller);
         OrderFacts order = lockOrder(orderId);
         if (order == null) throw new IllegalArgumentException("订单不存在");
+        if (!seller.equals(order.sellerId())) throw new IllegalStateException("订单卖家归属发生变化");
         if ("SETTLED".equals(order.status())) return existing(orderId);
         Instant now = databaseNow();
         if (!eligible(order, now)) return new SettlementResult(orderId, "BLOCKED", 0L, blockReason(order, now));
-        // Keep settlement's payment fact identical to refund and warranty:
-        // one canonical newest successful attempt, including only that row's
-        // refund counters.
+        // 结算采用与退款、质保一致的支付事实：只取最新一条成功尝试，
+        // 并且只使用该行的退款累计值。
         PaymentFacts payment = jdbc.query("SELECT paid_amount_fen,successful_refund_fen,reserved_refund_fen FROM payment_order WHERE order_id=? AND status='SUCCEEDED' ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE",
             rs -> rs.next() ? new PaymentFacts(rs.getLong(1), rs.getLong(2), rs.getLong(3)) : new PaymentFacts(0, 0, 0), orderId.toString());
         long net = payment.paidAmountFen() - payment.successfulRefundFen();
@@ -52,7 +67,7 @@ public class SettlementService {
         UUID settlementId = UUID.nameUUIDFromBytes(("settlement:" + orderId).getBytes(java.nio.charset.StandardCharsets.UTF_8));
         jdbc.update("INSERT INTO settlement (id,order_id,paid_amount_fen,successful_refund_fen,net_settlement_fen,status,created_at,settled_at) VALUES (?,?,?,?,?,'SETTLED',?,?) ON DUPLICATE KEY UPDATE status='SETTLED',net_settlement_fen=VALUES(net_settlement_fen),settled_at=VALUES(settled_at)",
             settlementId.toString(), orderId.toString(), payment.paidAmountFen(), payment.successfulRefundFen(), net, Timestamp.from(now), Timestamp.from(now));
-        applySellerObligations(orderId, settlementId, net, now);
+        applySellerObligations(orderId, settlementId, net, now, seller);
         long availableAfterObligations = jdbc.queryForObject("SELECT net_settlement_fen FROM settlement WHERE id=?", Long.class, settlementId.toString());
         jdbc.update("UPDATE trade_order SET status='SETTLED',version=version+1,updated_at=? WHERE id=? AND status='AFTERSALE_WINDOW'", Timestamp.from(now), orderId.toString());
         UUID eventId = UUID.nameUUIDFromBytes(("settlement-created:" + orderId).getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -95,15 +110,20 @@ public class SettlementService {
             : new SettlementResult(orderId, "SETTLED", 0, null), orderId.toString());
     }
 
+    private UUID findSeller(UUID orderId) {
+        return jdbc.query("SELECT seller_id FROM trade_order WHERE id=?", rs -> rs.next()
+            ? UUID.fromString(rs.getString(1)) : null, orderId.toString());
+    }
+
     private OrderFacts lockOrder(UUID orderId) {
-        return jdbc.query("SELECT id,status,t0 FROM trade_order WHERE id=? FOR UPDATE", rs -> rs.next()
-            ? new OrderFacts(UUID.fromString(rs.getString(1)), rs.getString(2), rs.getTimestamp(3) == null ? null : rs.getTimestamp(3).toInstant()) : null, orderId.toString());
+        return jdbc.query("SELECT id,seller_id,status,t0 FROM trade_order WHERE id=? FOR UPDATE", rs -> rs.next()
+            ? new OrderFacts(UUID.fromString(rs.getString(1)), UUID.fromString(rs.getString(2)), rs.getString(3),
+                rs.getTimestamp(4) == null ? null : rs.getTimestamp(4).toInstant()) : null, orderId.toString());
     }
     private Instant databaseNow() { return jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class).toInstant(); }
 
     /** 未来结算按最早到期义务抵扣；唯一业务键防止同一结算重复扣款。 */
-    private void applySellerObligations(UUID orderId, UUID settlementId, long net, Instant now) {
-        UUID seller = jdbc.queryForObject("SELECT seller_id FROM trade_order WHERE id=?", (rs, n) -> UUID.fromString(rs.getString(1)), orderId.toString());
+    private void applySellerObligations(UUID orderId, UUID settlementId, long net, Instant now, UUID seller) {
         long remaining = net;
         var obligations = jdbc.query("SELECT id,warranty_case_id,obligation_amount_fen,funded_amount_fen,version FROM seller_obligation WHERE seller_id=? AND status IN ('AWAITING_FUNDING','PARTIALLY_FUNDED','CANCELLED') ORDER BY funding_deadline,id FOR UPDATE",
             (rs, n) -> new Obligation(UUID.fromString(rs.getString(1)), UUID.fromString(rs.getString(2)), rs.getLong(3), rs.getLong(4), rs.getLong(5)), seller.toString());
@@ -143,7 +163,7 @@ public class SettlementService {
     }
 
     public record SettlementResult(UUID orderId, String status, long netSettlementFen, String blockedReason) {}
-    private record OrderFacts(UUID id, String status, Instant t0) {}
+    private record OrderFacts(UUID id, UUID sellerId, String status, Instant t0) {}
     private record PaymentFacts(long paidAmountFen, long successfulRefundFen, long reservedRefundFen) {}
     private record Obligation(UUID id, UUID caseId, long amount, long funded, long version) {}
 }

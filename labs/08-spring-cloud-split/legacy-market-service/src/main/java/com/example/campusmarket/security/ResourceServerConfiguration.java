@@ -33,6 +33,7 @@ import java.util.List;
 @Configuration(proxyBeanMethods = false)
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
 public class ResourceServerConfiguration {
+    static final String REQUIRED_AUDIENCE = "campus-market-api";
     private static final Duration ACCESS_TOKEN_TTL = Duration.ofMinutes(15);
 
     @Bean
@@ -44,7 +45,10 @@ public class ResourceServerConfiguration {
     JwtDecoder jwtDecoder(
         @Value("${spring.security.oauth2.resourceserver.jwt.jwk-set-uri}") String jwkSetUri,
         @Value("${spring.security.oauth2.resourceserver.jwt.issuer-uri}") String issuer,
-        @Value("${campus.market.jwt.audience}") String audience) {
+        @Value("${campus.market.jwt.audience:campus-market-api}") String audience) {
+        if (!REQUIRED_AUDIENCE.equals(audience)) {
+            throw new IllegalArgumentException("JWT audience must be " + REQUIRED_AUDIENCE);
+        }
         NimbusJwtDecoder decoder = NimbusJwtDecoder.withJwkSetUri(jwkSetUri)
             .jwsAlgorithm(SignatureAlgorithm.RS256)
             .build();
@@ -113,6 +117,10 @@ public class ResourceServerConfiguration {
                     || !ACCESS_TOKEN_TTL.equals(Duration.between(issuedAt, expiresAt))) {
                     errors.add(new OAuth2Error("invalid_token", "JWT 时间范围非法", null));
                 }
+            }
+            Object keyId = jwt.getHeaders().get("kid");
+            if (!(keyId instanceof String value) || value.isBlank()) {
+                errors.add(new OAuth2Error("invalid_token", "JWT kid 非法", null));
             }
             if (!List.of(audience).equals(jwt.getAudience())) {
                 errors.add(new OAuth2Error("invalid_token", "JWT 受众非法", null));

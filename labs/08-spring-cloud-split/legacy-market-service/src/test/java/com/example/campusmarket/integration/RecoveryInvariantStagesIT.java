@@ -43,6 +43,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class RecoveryInvariantStagesIT {
     private abstract static class Base {
         static void common(DynamicPropertyRegistry registry, MySQLContainer<?> mysql) {
+            ResourceServerTestSupport.register(registry);
             registry.add("spring.datasource.url", mysql::getJdbcUrl);
             registry.add("spring.datasource.username", mysql::getUsername);
             registry.add("spring.datasource.password", mysql::getPassword);
