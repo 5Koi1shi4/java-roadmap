@@ -142,6 +142,7 @@
 
 - 今日目标：继续实验八 8.1 身份服务渐进拆分，保留实验七业务基线和单实验分支边界。
 - 当前进度：本地分支 `learning/spring-cloud-split` 已建立聚合工程、独立身份库、RS256/JWKS 身份服务、兼容单体独立验签和 Eureka。Eureka 的真实 HTTP 中文 JSON 与显式 UTF-8 修正在 `277dded` 完成并通过任务复核；Gateway 实现在 `cd697d0` 提交，正在进行独立规格与代码质量复核。
-- 阶段测试证据：JDK 17 下 discovery/identity/legacy 三模块 `mvnw.cmd test` 共 162 项，Gateway 模块 `mvnw.cmd -pl api-gateway test` 共 21 项，均为 0 failures、0 errors、0 skipped。以上是阶段测试，不代表实验级完整验收。
+- 阶段测试证据：提交 `5949ccd` 前的 JDK 17 Reactor `mvnw.cmd test` 为 platform-test-support 6、discovery 4、identity 24、legacy 135、Gateway 21，合计 190 项，均为 0 failures、0 errors、0 skipped。legacy 数量包含尚未提交的本地 Dockerfile 路径守卫；此前沟通中的 170 为加总错误。以上是阶段测试，不代表实验级完整验收。
 - 本轮排障：Eureka 原健康响应缺少显式 charset，使用实际生效的 `server.servlet.encoding` 并以真实 HTTP 中文 JSON 验证；Gateway 的 issuer 校验曾直接比较 String 与 URL，导致有效 Token 被拒绝，改为精确比较字符串表示；路由断开和下游 5xx 使用稳定中文 UTF-8 503，并丢弃下游异常体。
-- 待完成：四应用真实 Eureka/HTTP 旅程、JWKS 缓存与服务停机恢复、实验七完整业务回归、运行与复盘文档，以及 Reactor 全量 `test`/`verify`。实验八保持“进行中”；远端尚无实验八分支入口。
+- 待完成：四应用真实 Eureka/HTTP 旅程、JWKS 缓存与服务停机恢复、实验七完整业务回归、运行与复盘文档，以及 Reactor 完整 `verify`。覆盖清单守卫已提交 `5949ccd`，完整 legacy 验证与 Gateway 审查已恢复；实验八保持“进行中”，远端尚无实验八分支入口。
+- 执行约束：按用户要求在任务节点检查额度，任一适用窗口剩余达到 10% 时停止新增实验工作，整理进度、验证与遗留问题并更新 Git。此次远端推送被自动审批要求补充具体仓库及源码外发授权而拦截，本地提交保留。
