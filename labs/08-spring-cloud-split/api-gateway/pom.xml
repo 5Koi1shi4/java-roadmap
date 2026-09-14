@@ -55,5 +55,57 @@
             <artifactId>spring-security-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>discovery-server</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+            <classifier>test-classpath</classifier>
+        </dependency>
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>identity-service</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+            <classifier>test-classpath</classifier>
+        </dependency>
+        <dependency>
+            <groupId>com.example</groupId>
+            <artifactId>legacy-market-service</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+            <classifier>test-classpath</classifier>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>mysql</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>
