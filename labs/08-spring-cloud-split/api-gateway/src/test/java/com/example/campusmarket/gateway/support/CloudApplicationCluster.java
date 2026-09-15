@@ -53,6 +53,22 @@ import java.util.stream.Stream;
  */
 public final class CloudApplicationCluster implements AutoCloseable {
     private static final String REDIS_IMAGE = "redis:7.4.2-alpine";
+    private static final String GATEWAY_WEBFLUX_ENABLED =
+        "spring.cloud.gateway.server.webflux.enabled";
+    private static final String GATEWAY_REDIS_ENABLED =
+        "spring.cloud.gateway.server.webflux.redis.enabled";
+    private static final String EUREKA_WEBCLIENT_ENABLED =
+        "eureka.client.webclient.enabled";
+    private static final String EUREKA_RESTCLIENT_ENABLED =
+        "eureka.client.restclient.enabled";
+    private static final String EUREKA_JERSEY_ENABLED =
+        "eureka.client.jersey.enabled";
+    private static final String DATA_SOURCE_AUTO_CONFIGURATION =
+        "org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration";
+    private static final String SECURITY_AUTO_CONFIGURATION =
+        "org.springframework.boot.autoconfigure.security.servlet.SecurityAutoConfiguration";
+    private static final String MANAGEMENT_SECURITY_AUTO_CONFIGURATION =
+        "org.springframework.boot.actuate.autoconfigure.security.servlet.ManagementWebSecurityAutoConfiguration";
     private static final Duration REGISTRY_TIMEOUT = Duration.ofSeconds(30);
     private static final Duration POLL_INTERVAL = Duration.ofMillis(100);
 
@@ -266,6 +282,14 @@ public final class CloudApplicationCluster implements AutoCloseable {
 
     private Map<String, Object> discoveryProperties() {
         Map<String, Object> properties = commonProperties(discoveryPort, null);
+        properties.put(GATEWAY_WEBFLUX_ENABLED, false);
+        properties.put(GATEWAY_REDIS_ENABLED, false);
+        properties.put(EUREKA_WEBCLIENT_ENABLED, false);
+        properties.put(EUREKA_RESTCLIENT_ENABLED, true);
+        properties.put(EUREKA_JERSEY_ENABLED, false);
+        properties.put("spring.autoconfigure.exclude",
+            DATA_SOURCE_AUTO_CONFIGURATION + "," + SECURITY_AUTO_CONFIGURATION + ","
+                + MANAGEMENT_SECURITY_AUTO_CONFIGURATION);
         properties.put("eureka.server.enable-self-preservation", false);
         properties.put("eureka.server.response-cache-update-interval-ms", 100);
         properties.put("eureka.server.eviction-interval-timer-in-ms", 1_000);
@@ -275,6 +299,11 @@ public final class CloudApplicationCluster implements AutoCloseable {
     private Map<String, Object> identityProperties(String zone, String redisUrl) {
         Properties database = SplitDatabaseContainer.identityProperties();
         Map<String, Object> properties = commonProperties(identityPort, zone);
+        properties.put(GATEWAY_WEBFLUX_ENABLED, false);
+        properties.put(GATEWAY_REDIS_ENABLED, false);
+        properties.put(EUREKA_WEBCLIENT_ENABLED, false);
+        properties.put(EUREKA_RESTCLIENT_ENABLED, true);
+        properties.put(EUREKA_JERSEY_ENABLED, false);
         properties.put("spring.data.redis.url", redisUrl);
         properties.put("spring.data.redis.repositories.enabled", false);
         properties.put("spring.data.redis.connect-timeout", "2s");
@@ -294,6 +323,11 @@ public final class CloudApplicationCluster implements AutoCloseable {
     private Map<String, Object> legacyProperties(String zone, String redisUrl, String identityJwks) {
         Properties database = SplitDatabaseContainer.marketProperties();
         Map<String, Object> properties = commonProperties(legacyPort, zone);
+        properties.put(GATEWAY_WEBFLUX_ENABLED, false);
+        properties.put(GATEWAY_REDIS_ENABLED, false);
+        properties.put(EUREKA_WEBCLIENT_ENABLED, false);
+        properties.put(EUREKA_RESTCLIENT_ENABLED, true);
+        properties.put(EUREKA_JERSEY_ENABLED, false);
         properties.put("spring.data.redis.url", redisUrl);
         properties.put("spring.data.redis.repositories.enabled", false);
         database.forEach((key, value) -> {
@@ -325,6 +359,11 @@ public final class CloudApplicationCluster implements AutoCloseable {
 
     private Map<String, Object> gatewayProperties(String zone, String identityJwks) {
         Map<String, Object> properties = commonProperties(gatewayPort, zone);
+        properties.put(GATEWAY_WEBFLUX_ENABLED, true);
+        properties.put(GATEWAY_REDIS_ENABLED, true);
+        properties.put(EUREKA_WEBCLIENT_ENABLED, true);
+        properties.put(EUREKA_RESTCLIENT_ENABLED, false);
+        properties.put(EUREKA_JERSEY_ENABLED, false);
         properties.put("spring.security.oauth2.resourceserver.jwt.jwk-set-uri", identityJwks);
         return properties;
     }
