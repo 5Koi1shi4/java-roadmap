@@ -69,7 +69,8 @@ public abstract class SharedContainers {
     protected static ToxiproxyContainer.ContainerProxy ELASTICSEARCH_PROXY;
 
     static {
-        Startables.deepStart(Stream.of(MYSQL, REDIS, RABBITMQ, ELASTICSEARCH, MINIO, TOXIPROXY, PAYMENT_PROVIDER_HTTP)).join();
+        REDIS.start();
+        Startables.deepStart(Stream.of(MYSQL, RABBITMQ, ELASTICSEARCH, MINIO, TOXIPROXY, PAYMENT_PROVIDER_HTTP)).join();
         MINIO_PROXY = TOXIPROXY.getProxy(MINIO, 9000);
         ELASTICSEARCH_PROXY = TOXIPROXY.getProxy(ELASTICSEARCH, 9200);
     }
