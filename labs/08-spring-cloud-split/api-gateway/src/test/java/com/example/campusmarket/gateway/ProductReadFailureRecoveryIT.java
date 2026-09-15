@@ -92,19 +92,26 @@ class ProductReadFailureRecoveryIT {
 
     @Test
     @Order(3)
-    void elasticsearchOutageReturnsSafe503AndRebuildsFromReadOutbox() throws Exception {
+    void elasticsearchOutageReturnsSafe503AndConvergesPendingReadOutbox() throws Exception {
         Account seller = registerAndLogin("搜索故障卖家");
         PublishedListing listing = createAndAwaitVisible(seller, "搜索恢复商品");
 
+        PublishedListing duringOutage = null;
         cluster.stopElasticsearch();
         try {
             HttpResponse<String> unavailable = search(seller.token(), listing.title());
             assertSafeUnavailable(unavailable);
+            duringOutage = createListing(seller, "ES 中断期间发布商品");
+            HttpResponse<String> published = postBearer(
+                "/api/listings/" + duringOutage.id() + "/publish", seller.token(), "{}");
+            assertThat(published.statusCode()).isEqualTo(200);
         } finally {
             cluster.restartElasticsearch();
         }
 
         awaitSearchContains(seller.token(), listing.title(), listing.id());
+        assertThat(duringOutage).isNotNull();
+        awaitSearchContains(seller.token(), duringOutage.title(), duringOutage.id());
     }
 
     private PublishedListing createAndAwaitVisible(Account seller, String title) throws Exception {
@@ -175,16 +182,19 @@ class ProductReadFailureRecoveryIT {
 
     private HttpResponse<String> uploadMedia(UUID listingId, String token) throws Exception {
         String boundary = "----campus-market-" + UUID.randomUUID();
-        String multipart = "--" + boundary + "\r\n"
-            + "Content-Disposition: form-data; name=\"file\"; filename=\"cover.txt\"\r\n"
-            + "Content-Type: text/plain\r\n\r\n"
-            + "故障恢复媒体\r\n"
-            + "--" + boundary + "--\r\n";
+        byte[] png = java.util.Base64.getDecoder().decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+        java.io.ByteArrayOutputStream multipart = new java.io.ByteArrayOutputStream();
+        multipart.write(("--" + boundary + "\r\n"
+            + "Content-Disposition: form-data; name=\"file\"; filename=\"cover.png\"\r\n"
+            + "Content-Type: image/png\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+        multipart.write(png);
+        multipart.write(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
         return http.send(HttpRequest.newBuilder(uri("/api/listings/" + listingId + "/media"))
             .timeout(REQUEST_TIMEOUT)
             .header("Authorization", "Bearer " + token)
             .header("Content-Type", "multipart/form-data; boundary=" + boundary)
-            .POST(HttpRequest.BodyPublishers.ofString(multipart, StandardCharsets.UTF_8))
+            .POST(HttpRequest.BodyPublishers.ofByteArray(multipart.toByteArray()))
             .build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
     }
 

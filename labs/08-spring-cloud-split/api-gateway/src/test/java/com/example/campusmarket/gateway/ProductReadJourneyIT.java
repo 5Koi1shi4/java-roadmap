@@ -148,16 +148,19 @@ class ProductReadJourneyIT {
 
     private HttpResponse<String> uploadMedia(UUID listingId, String token) throws Exception {
         String boundary = "----campus-market-" + UUID.randomUUID();
-        String multipart = "--" + boundary + "\r\n"
-            + "Content-Disposition: form-data; name=\"file\"; filename=\"cover.txt\"\r\n"
-            + "Content-Type: text/plain\r\n\r\n"
-            + "五应用旅程媒体\r\n"
-            + "--" + boundary + "--\r\n";
+        byte[] png = java.util.Base64.getDecoder().decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=");
+        java.io.ByteArrayOutputStream multipart = new java.io.ByteArrayOutputStream();
+        multipart.write(("--" + boundary + "\r\n"
+            + "Content-Disposition: form-data; name=\"file\"; filename=\"cover.png\"\r\n"
+            + "Content-Type: image/png\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+        multipart.write(png);
+        multipart.write(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
         HttpRequest request = HttpRequest.newBuilder(uri("/api/listings/" + listingId + "/media"))
             .timeout(REQUEST_TIMEOUT)
             .header("Authorization", "Bearer " + token)
             .header("Content-Type", "multipart/form-data; boundary=" + boundary)
-            .POST(HttpRequest.BodyPublishers.ofString(multipart, StandardCharsets.UTF_8))
+            .POST(HttpRequest.BodyPublishers.ofByteArray(multipart.toByteArray()))
             .build();
         return http.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
     }

@@ -102,6 +102,8 @@ class CloudJourneyIT {
         assertThat(cluster.gatewayRouteUris())
             .containsExactlyInAnyOrderEntriesOf(Map.of(
                 "identity-api", "lb://identity-service",
+                "product-search", "lb://product-read-service",
+                "product-listing-search", "lb://product-read-service",
                 "legacy-api", "lb://legacy-market-service"))
             .allSatisfy((id, uri) -> assertThat(uri).startsWith("lb://"));
     }

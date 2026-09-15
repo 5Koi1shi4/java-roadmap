@@ -25,6 +25,7 @@ import org.testcontainers.elasticsearch.ElasticsearchContainer;
 import org.testcontainers.images.builder.ImageFromDockerfile;
 import org.testcontainers.lifecycle.Startables;
 import org.testcontainers.utility.DockerImageName;
+import org.testcontainers.DockerClientFactory;
 import org.testcontainers.containers.wait.strategy.Wait;
 
 import java.io.IOException;
@@ -116,6 +117,7 @@ public final class CloudApplicationCluster implements AutoCloseable {
     private ConfigurableApplicationContext product;
     private ConfigurableApplicationContext gateway;
     private boolean closed;
+    private boolean elasticsearchPaused;
 
     private CloudApplicationCluster() {
         try {
@@ -141,8 +143,8 @@ public final class CloudApplicationCluster implements AutoCloseable {
             gatewayPort = randomPort();
             rabbitHostPort = randomPort();
             elasticsearchHostPort = randomPort();
-            rabbit = new RabbitMQContainer(DockerImageName.parse(RABBIT_IMAGE))
-                .withFixedExposedPort(rabbitHostPort, 5672);
+            rabbit = new RabbitMQContainer(DockerImageName.parse(RABBIT_IMAGE));
+            rabbit.setPortBindings(List.of(rabbitHostPort + ":5672"));
             DockerImageName compatibleElasticsearchImage = DockerImageName.parse(ELASTICSEARCH_IMAGE)
                 .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8");
             ImageFromDockerfile smartCnImage = new ImageFromDockerfile(ELASTICSEARCH_IMAGE, true)
@@ -150,9 +152,9 @@ public final class CloudApplicationCluster implements AutoCloseable {
             elasticsearch = new ElasticsearchContainer(compatibleElasticsearchImage)
                 .withEnv("xpack.security.enabled", "false")
                 .withEnv("ES_JAVA_OPTS", "-Xms128m -Xmx192m")
-                .withFixedExposedPort(elasticsearchHostPort, 9200)
                 .withCreateContainerCmdModifier(command -> command.getHostConfig()
                     .withMemory(ELASTICSEARCH_MEMORY_BYTES));
+            elasticsearch.setPortBindings(List.of(elasticsearchHostPort + ":9200"));
             elasticsearch.setImage(smartCnImage);
             discoveryBaseUri = URI.create("http://127.0.0.1:" + discoveryPort + "/eureka/");
         } catch (IOException | URISyntaxException exception) {
@@ -234,17 +236,21 @@ public final class CloudApplicationCluster implements AutoCloseable {
         }
     }
 
-    /** 停止商品读侧的真实 Elasticsearch。 */
+    /** 暂停同一 ES 容器，使网络请求超时而保留其索引和别名。 */
     public void stopElasticsearch() {
-        if (elasticsearch.isRunning()) {
-            elasticsearch.stop();
+        if (elasticsearch.isRunning() && !elasticsearchPaused) {
+            DockerClientFactory.instance().client()
+                .pauseContainerCmd(elasticsearch.getContainerId()).exec();
+            elasticsearchPaused = true;
         }
     }
 
-    /** 以固定宿主机端口恢复 SmartCN Elasticsearch。 */
+    /** 恢复同一 SmartCN ES 容器及其原有索引。 */
     public void restartElasticsearch() {
-        if (!elasticsearch.isRunning()) {
-            elasticsearch.start();
+        if (elasticsearchPaused) {
+            DockerClientFactory.instance().client()
+                .unpauseContainerCmd(elasticsearch.getContainerId()).exec();
+            elasticsearchPaused = false;
         }
     }
 
@@ -412,6 +418,7 @@ public final class CloudApplicationCluster implements AutoCloseable {
             cleanupFailure = appendFailure(cleanupFailure, failure);
         }
         try {
+            restartElasticsearch();
             if (elasticsearch.isRunning()) {
                 elasticsearch.stop();
             }
