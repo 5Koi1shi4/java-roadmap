@@ -8,4 +8,4 @@ Gateway 校验 Bearer Token，移除客户端伪造的身份与转发 Header，�
 
 身份数据库和交易数据库的账号相互隔离。身份领域模型不作为业务模块的生产 Java 依赖；测试支持模块仅在 test scope 提供临时 RSA 密钥及 HTTP/数据库夹具。交易业务中的库存、幂等、Outbox/Inbox、支付与售后事务继续在交易库内部完成。
 
-身份服务停止后，已经获取公钥的资源服务器可继续验证未过期 Token；这不表示可以继续登录，也不表示冷启动时可以跳过验签。Eureka 缓存、JWKS 缓存、目标停机恢复与冷启动 readiness 必须由真实网络故障测试证明。当前文档描述设计边界，最终验收状态以 README 的新鲜测试证据为准。
+身份服务停止后，已经获取公钥的资源服务器可继续验证未过期 Token；这不表示可以继续登录，也不表示冷启动时可以跳过验签。Eureka 缓存、JWKS 缓存、目标停机恢复与冷启动 readiness 由真实网络故障测试验证；公钥最近成功探测窗口为 30 秒，注册中心为 45 秒，超过窗口后 readiness 返回 DOWN。Compose 的 `service_started` 只保证启动排序；本地 smoke 应按 README 的有界 PowerShell 轮询四应用 `/actuator/health`、liveness/readiness 和 Eureka。最终验收状态以 README 的新鲜测试证据为准。

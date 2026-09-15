@@ -4,7 +4,7 @@
 
 ## 实验八：本地 Compose 启动
 
-Compose 只包含实验八四应用及其最小运行依赖：MySQL、Redis、RabbitMQ、安装 SmartCN 的 Elasticsearch 和 MinIO。Toxiproxy 由故障测试的 Testcontainers 独立创建，不需要也不应该作为本地常驻服务启动。先确认 JDK 17、Docker Engine 和各模块的 `target` JAR 已准备好，再执行：
+Compose 只包含实验八四应用及其最小运行依赖：MySQL、Redis、RabbitMQ、安装 SmartCN 的 Elasticsearch 和 MinIO。Toxiproxy 由故障测试的 Testcontainers 独立创建，不需要也不应该作为本地常驻服务启动。以下命令只做本地 Compose 基础启动 smoke；注册、登录和业务旅程仍必须由真实 Testcontainers 夹具验收。先确认 JDK 17、Docker Engine 和各模块的 `target` JAR 已准备好，再执行：
 
 ```powershell
 docker compose --env-file .env config --quiet
@@ -13,15 +13,17 @@ docker compose --env-file .env up -d
 docker compose --env-file .env ps
 ```
 
-`config --quiet` 只验证 Compose 语法，不把展开后的口令打印到终端。查看某个服务的启动错误时使用 `docker compose --env-file .env logs <service>`，不要把 `.env`、JWT 私钥或 Token 粘贴到排障记录。若应用镜像提示 JAR 不存在，先在实验目录执行 `.\mvnw.cmd -DskipTests package`，再重新构建对应镜像；该打包步骤不是测试验收。
+`config --quiet` 只验证 Compose 语法，不把展开后的口令打印到终端。查看某个服务的启动错误时使用 `docker compose --env-file .env logs <service>`，不要把 `.env`、JWT 私钥或 Token 粘贴到排障记录；根目录的 `.dockerignore` 会排除本地配置、密钥、日志、版本控制目录和非应用构建输出。若应用镜像提示 JAR 不存在，先在实验目录执行 `.\mvnw.cmd -DskipTests package`，再重新构建对应镜像；该打包步骤不是测试验收。
 
-Compose 只表达启动依赖顺序，应用自身仍可能需要几秒注册 Eureka。应先看 `docker compose ps` 和各应用日志，确认 `discovery-server` 已监听 8761，再确认 identity/legacy 注册，最后从 Gateway 18080 发起请求。所有服务均为 `restart: "no"`；反复重启只会掩盖首次失败，应该先保存错误边界再处理。
+Compose 只表达启动依赖顺序，应用自身仍可能需要几秒注册 Eureka。应先看 `docker compose ps` 和各应用日志，确认 `discovery-server` 已监听 8761，再按 README 中的有界 PowerShell 脚本轮询四个应用的 `/actuator/health`、liveness/readiness 和 Eureka 注册，最后从 Gateway 18080 发起请求。脚本最多等待 2 分钟；任一探针缺失或返回 DOWN 时保留应用日志并排查依赖，不能把 Compose 的 `service_started` 当作就绪。所有服务均为 `restart: "no"`；反复重启只会掩盖首次失败，应该先保存错误边界再处理。
+
+PowerShell 7 的 `Invoke-WebRequest.Content` 对没有显式字符集的 Actuator/Eureka JSON 可能返回字节数组；README 脚本先按 UTF-8 解码，再匹配 `UP` 与服务名。若 HTTP 200 却被脚本误报缺失，应先检查响应体类型和解码结果，而不是延长 deadline 或绕过 readiness。
 
 ## 实验八：双库初始化失败
 
 MySQL 的 `docker/mysql/01-split-databases.sh` 只在 `mysql-data` 空卷第一次初始化时执行。若日志显示数据库或账号不存在、Flyway 迁移未执行，先检查 MySQL 是否健康以及 `.env` 中五个数据库口令是否已经替换；已有卷不会自动重新运行脚本。确认只需丢弃本地实验数据后，才可执行 `docker compose --env-file .env down -v`，再重新 `up -d`。
 
-identity 使用 `identity_db`/`identity_app`，legacy 使用 `market_db`/`market_app`；两者的 Flyway 分别使用 `identity_migrator`/`market_migrator`。运行账号只有本库 DML，迁移账号才有本库 DDL，不要通过 root、全局授权或跨库读取来绕过 `Access denied`。跨库权限被拒绝是设计边界，需修正服务连接或迁移配置。
+identity 使用 `identity_db`/`identity_app`，legacy 使用 `market_db`/`market_app`；两者的 Flyway 分别使用 `identity_migrator`/`market_migrator`。运行账号只有本库必要 DML，迁移账号拥有本库 Flyway 所需 DML 与 DDL，不要通过 root、全局授权或跨库读取来绕过 `Access denied`。跨库权限被拒绝是设计边界，需修正服务连接或迁移配置。
 
 ## 实验八：密钥文件、JWKS 或 Gateway 路由
 
@@ -41,13 +43,17 @@ Gateway 只配置身份与业务两条显式路由。依赖故障应返回脱敏
 
 ## 实验八：JWKS 与身份失败
 
-身份服务实际 JWKS 端点是 `/api/auth/.well-known/jwks.json`。分别检查 Gateway 和 legacy 的 `spring.security.oauth2.resourceserver.jwt.jwk-set-uri`，并核对 issuer、固定 audience、当前 `kid` 与 RS256 公钥。不要输出 Token、私钥或密码做排障记录。
+身份服务实际 JWKS 端点是 `/api/auth/.well-known/jwks.json`。分别检查 Gateway 和 legacy 的 `spring.security.oauth2.resourceserver.jwt.jwk-set-uri`，并核对 issuer、固定 audience、当前 `kid` 与 RS256 公钥。local/test profile 使用受控内存邮件适配器，不读取 SMTP 配置；`.env.example` 中的 SMTP 占位符仅供非 local 部署填写。不要输出 Token、私钥或密码做排障记录。
 
 缺失或无效 Token 返回 401，普通用户访问管理员 API 返回 403。身份停机不等于已有 Token 立即失效：已缓存公钥可以验证未过期 Token，但登录仍不可用；冷启动不能跳过验签。未知 `kid` 不做递归认证重试。
 
+Gateway 和 legacy 的 readiness 同时报告 `jwks`、`eureka` 组件。JWKS 最近成功探测仅允许 30 秒缓冲，Eureka 为 45 秒；缓存实例为空时立即 DOWN。冷启动或超过窗口时，先核对组件状态、配置的 JWKS/Eureka URL 与对端网络，再检查认证和路由，不能把 liveness 的 UP 当成依赖已就绪。
+
+若仅在 `ApplicationBaselineIT` 或 `Task13FencingIT` 的无 Web 测试上下文出现 `Included health contributor 'jwks' ... does not exist`，原因是此模式不创建 Servlet 资源服务器健康组件。这两个测试上下文只校验 `readinessState`；真实 Web 服务仍必须包含并验证 `jwks`、`eureka`。
+
 ## 实验八：双库权限与迁移
 
-身份和交易分别配置本库 DataSource 与 Flyway 迁移账号。运行账号只有必要 DML 权限，迁移账号仅拥有本库 DDL 权限。跨库读取被拒绝是预期边界；不要授予全局权限或恢复跨库外键来解决启动错误。实验只支持全新环境，不能复用实验七单库 Flyway 历史冒充迁移完成。
+身份和交易分别配置本库 DataSource 与 Flyway 迁移账号。运行账号只有必要 DML 权限，迁移账号拥有本库 Flyway 所需 DML 与 DDL 权限。跨库读取被拒绝是预期边界；不要授予全局权限或恢复跨库外键来解决启动错误。实验只支持全新环境，不能复用实验七单库 Flyway 历史冒充迁移完成。
 
 ## 实验八：截止并发与测试发现
 
@@ -103,9 +109,9 @@ docker ps -a
 
 **症状：** 验证码接口返回 503、验证码无法消费、限流结果异常，或 Redis 故障后业务仍继续注册。
 
-**检查与恢复：** 检查 Redis URL、Lua 脚本、验证码 HMAC 和设备 Cookie 签名。10 分钟发送/失败窗口分别受邮箱、IP 和设备上限保护。恢复 Redis 后重新发起验证码流程。
+**检查与恢复：** 检查 Redis URL、Lua 脚本、验证码 HMAC 和设备 Cookie 签名。`CAMPUS_MARKET_IDENTITY_VERIFICATION_SECRET` 必须至少为 32 字节（UTF-8），否则服务启动或验证码流程会失败。10 分钟发送/失败窗口分别受邮箱、IP 和设备上限保护。恢复 Redis 后重新发起验证码流程。
 
-**边界：** Redis 不可用必须失败关闭，不能绕过身份验证；验证码只允许本地模拟发送器保存最近值，禁止写日志或 Git。
+**边界：** Redis 不可用必须失败关闭，不能绕过身份验证；验证码请求必须带 `purpose: REGISTER`；local 模拟发送器只保存最近值且没有生产验证码读取端点，Compose 基础启动不能代替 `CloudJourneyIT` 的真实 Testcontainers 注册旅程。禁止写日志或 Git。
 
 ## 6. MinIO 上传、读取或持久清理失败
 
@@ -113,7 +119,7 @@ docker ps -a
 
 **检查与恢复：** 确认 MinIO endpoint、bucket、凭据和 Toxiproxy 路由。检查 `object_upload_session`、`storage_cleanup_task.status/lease_until/claim_token`；恢复后运行 `StorageCleanupScheduler.runOnce(100)`。对象不存在按幂等成功处理，旧 claim token 的迟到完成应更新 0 行。
 
-**边界：** 数据库事务中禁止执行 MinIO IO；Object Key 不得写日志。图片/PDF/MP4 上限分别按实际读取字节 10/20/100 MiB 验证，不能信任文件名、扩展名或客户端类型。
+**边界：** 数据库事务中禁止执行 MinIO IO；Object Key 不得写日志。Compose 使用独立的 `minio-data` 命名卷，普通 `down` 会保留对象，只有明确清理本地实验数据时才使用 `down -v`。图片/PDF/MP4 上限分别按实际读取字节 10/20/100 MiB 验证，不能信任文件名、扩展名或客户端类型。
 
 ## 7. 私有证据 ACL 或 404 行为不一致
 
@@ -183,4 +189,4 @@ git diff --check
 
 `CampusMarketJourneyIT` 依次运行教材旅程（MySQL、Redis、SmartCN Elasticsearch）和质保旅程（MySQL、Redis、MinIO）。`RecoveryDrillIT` 依次运行 RabbitMQ、Elasticsearch、MinIO 三个核心阶段；`RecoveryInvariantStagesIT` 补充每轮 ACL 与搜索集合阶段。每轮都必须看到故障证据，并在恢复后证明库存非负、退款未超额、单次结算、无过期未决租约、证据 ACL 未放宽、MySQL 与搜索在售集合一致。
 
-截至 2026-09-11，最终基线为 Surefire 137 项、Failsafe/Testcontainers 251 项，0 failures、0 errors、0 skipped。任何 skipped、Docker 失联、SmartCN 未加载、模拟支付契约未执行、竞态未运行或恢复未收敛，都不能记为完整验收。
+截至 2026-09-11 的 Surefire 137 项、Failsafe/Testcontainers 251 项是实验七迁入基线的历史参考，不是实验八结果。2026-09-15 实验八 8.1 的 `clean verify` 六模块 BUILD SUCCESS，fresh XML 为 Surefire 196 项、Failsafe/Testcontainers 293 项，共 489 项，全部 0 failures、0 errors、0 skipped；真实注册旅程、四应用探针、停机恢复和原业务故障演练均覆盖。正式 JDK17 JRE 镜像的 Compose 启动也验证了四应用八个探针、Eureka 3/3 注册和 Gateway RSA JWKS。以后重跑仍须以 Docker 可用、无 skipped 且 SmartCN/支付/竞态/恢复实际执行的新报告判定。

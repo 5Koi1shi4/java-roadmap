@@ -2,7 +2,7 @@
 
 这是基于 JDK 17、Spring Boot 3.5.16、Spring Cloud 2025.0.3 的 Maven 聚合实验。身份服务独立签发 RS256 Token，Gateway 与兼容交易单体分别通过 JWKS 验签，Eureka 提供实例发现。`identity_db` 与 `market_db` 使用独立账号，交易不变量继续由兼容单体维护。
 
-当前总状态为“进行中”。2026-09-14 上传当前进度快照：四应用旅程测试与打包配置作为 WIP 保存；上次定点 verify 因 Gateway 单元测试 DataSource 启动错误退出，CloudJourneyIT 尚未运行，完整 Reactor 验收未通过。本次上传未重新执行 Maven 验收。实验七的已验收结果仅作为迁入基线，不能替代实验八的四应用旅程、停机恢复及完整 Reactor 验收。原计划的 `7.1` 聊天、`7.2` 竞价、`7.3` 跑腿/代取及真实支付适配器继续暂停。
+当前 8.1 身份拆分状态为“已验收”。2026-09-15 在 JDK 17、Docker Desktop 29.7.2 下，完整 `clean test` 与 `clean verify` 均 BUILD SUCCESS；fresh XML 汇总 196 项 Surefire、293 项 Failsafe/Testcontainers，共 489 项，全部 0 failures、0 errors、0 skipped。真实四应用旅程、身份/交易/Eureka 停机恢复、冷启动与 JWKS 刷新均在完整验收中运行。用 Dockerfile 指定的官方 `eclipse-temurin:17-jre` 重新构建并启动 Compose 后，四应用的 health、liveness、readiness 全部 UP，Eureka 3 项注册完成，Gateway 的 JWKS 返回 HTTP 200 与 1 把 RSA 公钥。实验七的已验收结果只作为迁入基线；原计划的 `7.1` 聊天、`7.2` 竞价、`7.3` 跑腿/代取及真实支付适配器继续暂停。
 
 ## 8.1 边界与验收入口
 
@@ -17,7 +17,7 @@ docker info
 git diff --check
 ```
 
-必须等 `docker info` 成功再执行完整验收；Docker 不可用或外部测试 skipped 均不算通过。2026-09-14 的质保截止定点回归为 3 项，0 failures、0 errors、0 skipped，完整验收结果尚待补齐。以下交易说明保留实验七业务范围；旧验收数只说明迁入基线。
+必须等 `docker info` 成功再执行完整验收；Docker 不可用或外部测试 skipped 均不算通过。2026-09-15 的 489 项结果来自 `clean verify` 清理旧报告后新产生的 XML；以下交易说明保留实验七业务范围，旧验收数只说明迁入基线。
 
 ## 你将运行到的能力
 
@@ -66,9 +66,9 @@ MySQL 是订单、库存、金额、截止时间和在售集合的事实源。Re
 - Docker Desktop，Docker Engine 已启动。
 - 完整验收前至少保留 1 GiB 可用内存，并关闭无关容器和并行构建。
 
-复制 `.env.example` 为 `.env`，仅填写本地值，不提交 `.env`。其中数据库口令、RabbitMQ/MinIO 凭据、验证码签名和模拟支付签名必须替换为本机值；JWT 密钥文件放在仓库外，并在 `.env` 中填写两个绝对路径。`CAMPUS_MARKET_JWT_ISSUER` 使用本地约定值 `http://gateway.test`，`CAMPUS_MARKET_JWT_AUDIENCE` 必须填写固定值 `campus-market-api`。示例文件只有占位符，不能直接启动。
+复制 `.env.example` 为 `.env`，仅填写本地值，不提交 `.env`。其中数据库口令、RabbitMQ/MinIO 凭据、验证码签名和模拟支付签名必须替换为本机值；`CAMPUS_MARKET_IDENTITY_VERIFICATION_SECRET` 至少为 32 字节（UTF-8）。JWT 密钥文件放在仓库外，并在 `.env` 中填写两个绝对路径。`CAMPUS_MARKET_JWT_ISSUER` 使用本地约定值 `http://gateway.test`，`CAMPUS_MARKET_JWT_AUDIENCE` 必须填写固定值 `campus-market-api`。示例文件只有占位符，不能直接启动。
 
-本地 Compose 使用 `local` profile 的受控内存邮件适配器保存最近验证码，不公开验证码读取接口，也不会发送真实邮件；因此本地启动不需要可用 SMTP。生产身份服务部署必须按既有 Task5 邮件适配器提供 `CAMPUS_MARKET_SMTP_HOST`、`CAMPUS_MARKET_SMTP_PORT`、`CAMPUS_MARKET_SMTP_USERNAME`、`CAMPUS_MARKET_SMTP_PASSWORD` 和 `CAMPUS_MARKET_SMTP_FROM`，真实邮件测试不属于本地 Compose 验证。
+本地 Compose 使用 `local` profile 的受控内存邮件适配器保存最近验证码，不公开验证码读取接口，也不会发送真实邮件；因此本地启动不需要可用 SMTP，`.env.example` 中的 SMTP 行在 local profile 下可以保留占位符。非 local/test 的身份服务部署必须按既有 Task5 邮件适配器提供 `CAMPUS_MARKET_SMTP_HOST`、`CAMPUS_MARKET_SMTP_PORT`、`CAMPUS_MARKET_SMTP_USERNAME`、`CAMPUS_MARKET_SMTP_PASSWORD` 和 `CAMPUS_MARKET_SMTP_FROM`，真实邮件测试不属于本地 Compose 验证。
 
 可用 OpenSSL 在仓库外生成一对仅供本地实验的 RSA 密钥。私钥必须是 PKCS#8，公钥必须是 X.509：
 
@@ -80,7 +80,7 @@ openssl pkcs8 -topk8 -nocrypt -in (Join-Path $keyDir 'jwt-private-rsa.pem') -out
 openssl rsa -in (Join-Path $keyDir 'jwt-private-rsa.pem') -pubout -out (Join-Path $keyDir 'jwt-public-key.pem')
 ```
 
-在本目录按以下顺序构建并启动四个独立应用。第一次启动前必须先打包，Compose 只使用各模块的 `target` JAR；不再使用旧的单体 `spring-boot:run` 命令：
+在本目录按以下顺序构建并启动四个独立应用。第一次启动前必须先打包，Compose 只使用各模块的 `target` JAR；不再使用旧的单体 `spring-boot:run` 命令。下面是本地 Compose 的基础启动 smoke；它不替代 Testcontainers 的完整注册旅程：
 
 ```powershell
 docker info
@@ -91,6 +91,104 @@ docker compose --env-file .env config --quiet
 docker compose --env-file .env build
 docker compose --env-file .env up -d
 docker compose --env-file .env ps
+```
+
+Compose 的 `depends_on: service_started` 只表达启动顺序，不代表应用已就绪。启动后可用以下有界 PowerShell 在同一个 2 分钟 deadline 内轮询四个应用的 `/actuator/health`、liveness/readiness 和 Eureka 三项注册；每次请求和休眠都会先计算剩余时间，超时即失败：
+
+```powershell
+$services = [ordered]@{
+  discovery = 'http://localhost:8761'
+  identity  = 'http://localhost:18081'
+  legacy    = 'http://localhost:18082'
+  gateway   = 'http://localhost:18080'
+}
+$registryNames = @('IDENTITY-SERVICE', 'LEGACY-MARKET-SERVICE', 'API-GATEWAY')
+$deadline = (Get-Date).AddMinutes(2)
+
+function Get-RemainingSeconds {
+  [int][Math]::Floor(($deadline - (Get-Date)).TotalSeconds)
+}
+
+function Invoke-BoundedWebRequest {
+  param(
+    [Parameter(Mandatory)][string]$Uri,
+    [hashtable]$Headers
+  )
+  $remaining = Get-RemainingSeconds
+  if ($remaining -lt 1) { return $null }
+  $timeout = [int][Math]::Min(5, $remaining)
+  try {
+    if ($null -ne $Headers) {
+      return Invoke-WebRequest -Uri $Uri -Headers $Headers -TimeoutSec $timeout -UseBasicParsing
+    }
+    return Invoke-WebRequest -Uri $Uri -TimeoutSec $timeout -UseBasicParsing
+  } catch {
+    return $null
+  }
+}
+
+function Get-WebResponseText {
+  param([Parameter(Mandatory)]$Response)
+  if ($Response.Content -is [byte[]]) {
+    return [System.Text.Encoding]::UTF8.GetString($Response.Content)
+  }
+  return [string]$Response.Content
+}
+
+$healthy = @{}
+$readyProbes = @{}
+$registered = @()
+do {
+  $healthy = @{}
+  $readyProbes = @{}
+  foreach ($entry in $services.GetEnumerator()) {
+    if ((Get-RemainingSeconds) -lt 1) { break }
+    $response = Invoke-BoundedWebRequest -Uri "$($entry.Value)/actuator/health"
+    if ($null -ne $response -and $response.StatusCode -eq 200) {
+      $healthy[$entry.Key] = $true
+    }
+    foreach ($probe in @('liveness', 'readiness')) {
+      if ((Get-RemainingSeconds) -lt 1) { break }
+      $probeResponse = Invoke-BoundedWebRequest -Uri "$($entry.Value)/actuator/health/$probe"
+      if ($null -ne $probeResponse -and $probeResponse.StatusCode -eq 200 -and
+          (Get-WebResponseText -Response $probeResponse) -match '"status"\s*:\s*"UP"') {
+        $readyProbes["$($entry.Key)/$probe"] = $true
+      }
+    }
+  }
+
+  $registryResponse = Invoke-BoundedWebRequest `
+    -Uri 'http://localhost:8761/eureka/apps' `
+    -Headers @{ Accept = 'application/json' }
+  $registered = @()
+  if ($null -ne $registryResponse -and $registryResponse.StatusCode -eq 200) {
+    $registryBody = Get-WebResponseText -Response $registryResponse
+    foreach ($name in $registryNames) {
+      if ($registryBody -match [regex]::Escape($name)) {
+        $registered += $name
+      }
+    }
+  }
+
+  if ($healthy.Count -eq $services.Count -and $readyProbes.Count -eq ($services.Count * 2) -and
+      $registered.Count -eq $registryNames.Count) {
+    break
+  }
+
+  $remainingMilliseconds = ($deadline - (Get-Date)).TotalMilliseconds
+  if ($remainingMilliseconds -lt 1) { break }
+  Start-Sleep -Milliseconds ([int][Math]::Min(2000, [Math]::Floor($remainingMilliseconds)))
+} while ((Get-Date) -lt $deadline)
+
+$missingHealth = @($services.Keys | Where-Object { -not $healthy.ContainsKey($_) })
+$missingProbes = @($services.Keys | ForEach-Object { $service = $_; @('liveness', 'readiness') |
+    Where-Object { -not $readyProbes.ContainsKey("$service/$_") } |
+    ForEach-Object { "$service/$_" } })
+$missingRegistry = @($registryNames | Where-Object { $_ -notin $registered })
+if ($missingHealth.Count -gt 0 -or $missingProbes.Count -gt 0 -or $missingRegistry.Count -gt 0) {
+  throw "Timed out before health/probes/Eureka became ready. Health: $($missingHealth -join ', '); Probes: $($missingProbes -join ', '); Eureka: $($missingRegistry -join ', ')"
+}
+$services.Keys | ForEach-Object { "$_ : health, liveness, readiness UP" }
 ```
 
 Compose 的依赖顺序是 discovery（8761）先启动，identity（18081）和 legacy（18082）在双库及其基础设施健康后启动，Gateway（18080）最后启动。宿主机端口如下：
@@ -121,7 +219,7 @@ Invoke-WebRequest -Uri http://localhost:18080/api/auth/.well-known/jwks.json
 docker compose --env-file .env down
 ```
 
-MySQL 初始化脚本只在 `mysql-data` 空卷第一次创建数据库和账号。需要丢弃本地实验数据并重新初始化时才使用 `down -v`；该命令会删除这个 Compose 项目的本地数据库卷。Toxiproxy 不属于本地运行 Compose，故障测试由 Testcontainers 按测试需要独立创建。测试使用隔离的 Testcontainers，不能用本机历史服务或 skipped 结果代替真实外部协作验证。
+MySQL 初始化脚本只在 `mysql-data` 空卷第一次创建数据库和账号；MinIO 对象保存在独立的 `minio-data` 命名卷。普通 `down` 保留这两个卷，需要丢弃本地实验数据并重新初始化时才使用 `down -v`；该命令会删除这个 Compose 项目的数据库和 MinIO 数据。Toxiproxy 不属于本地运行 Compose，故障测试由 Testcontainers 按测试需要独立创建。测试使用隔离的 Testcontainers，不能用本机历史服务或 skipped 结果代替真实外部协作验证。
 
 ## 主要 HTTP 接口
 
@@ -142,10 +240,10 @@ MySQL 初始化脚本只在 `mysql-data` 空卷第一次创建数据库和账号
 POST /api/auth/email-verifications
 Content-Type: application/json; charset=UTF-8
 
-{"email":"buyer@stu.example.edu.cn"}
+{"email":"buyer@stu.example.edu.cn","purpose":"REGISTER"}
 ```
 
-本地 `LocalVerificationMailSender` 只保存最近验证码，不写入日志。注册后使用 `/api/auth/login` 获取 JWT；业务接口携带 `Authorization: Bearer <token>`。商品搜索示例为 `GET /api/search?keyword=Java&size=20`，后续页使用响应中的 `nextSearchAfter`。
+本地 `LocalVerificationMailSender` 只保存最近验证码，不写入日志，也没有生产验证码读取端点；上面的请求只能证明发送请求被接受。Compose 基础启动和 JWKS 检查不能完成注册。完整注册、登录及后续业务 HTTP 旅程必须使用 `CloudJourneyIT` 的真实 Testcontainers 夹具读取测试邮件内容，并在 fresh 验收中单独计数；不要为本地 Compose 增加验证码读取接口。注册后使用 `/api/auth/login` 获取 JWT；业务接口携带 `Authorization: Bearer <token>`。商品搜索示例为 `GET /api/search?keyword=Java&size=20`，后续页使用响应中的 `nextSearchAfter`。
 
 要求幂等的写命令必须带 `Idempotency-Key`。同一键和相同请求摘要重放原始 UTF-8 终态响应；同键异参返回 409，失败事务不能遗留阻塞性幂等记录。所有金额均是人民币整数分并保存为 `BIGINT`，禁止浮点金额。
 
@@ -207,7 +305,9 @@ git diff --check
 
 低内存主机必须串行执行，等待上一条命令完全结束且容器回收后再运行下一条。共享 Testcontainers 测试默认不自动启动 Rabbit listener、搜索调度器和各业务截止任务；验证调度的测试直接调用对应 `runOnce`，需要真实 Rabbit 投递的测试使用自己的监听器容器，避免已结束上下文污染后续 Outbox、队列和租约。
 
-截至 2026-09-11，验收基线为：Surefire 137 项；完整 `verify` 中 Failsafe/Testcontainers 251 项；均为 0 failures、0 errors、0 skipped。完整 `verify` 同时覆盖真实 HTTP 旅程和三轮故障恢复，不接受 Docker 不可用、外部测试跳过或 SmartCN 未实际加载。
+截至 2026-09-11 的 Surefire 137 项、完整 `verify` 中 Failsafe/Testcontainers 251 项是实验七迁入基线的历史参考，不是实验八结果。本次实验八 `clean verify` 的 196/293 项覆盖真实 HTTP 旅程、三轮故障恢复、SmartCN、数据库权限与四应用停机恢复；分模块为 support 6、discovery 4、identity 24+17、legacy 137+267、Gateway 25+9，均为 0 failures、0 errors、0 skipped。完整验收报告来自同一次 fresh 运行，不接受 Docker 不可用或外部测试跳过。
+
+模块测试数、官方镜像启动结果和人工文档清单见 [8.1 验收记录](docs/acceptance-20260915.md)。
 
 ## 已知边界和扩展决策
 
@@ -223,4 +323,4 @@ git diff --check
 3. `7.3` 跑腿/代取：独立 `ServiceOrder`，不复用商品订单状态机。
 4. 真实支付适配器：取得资质、沙箱/生产账号和批准后，再实现现有 `PaymentGateway` 契约。
 
-上述扩展涉及通信内容与个人信息处理、交易平台责任、竞价与跑腿服务规则、支付资质及资金安全等法律与合规问题。相关设计只作为历史评估材料保留，当前不进入实现、测试或上线流程；如未来重新启动，必须先完成独立法律合规评估和明确授权。实验七主体不依赖这些扩展，其迁入基线已验收；实验八当前仍为“进行中”。更多故障症状和恢复动作见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
+上述扩展涉及通信内容与个人信息处理、交易平台责任、竞价与跑腿服务规则、支付资质及资金安全等法律与合规问题。相关设计只作为历史评估材料保留，当前不进入实现、测试或上线流程；如未来重新启动，必须先完成独立法律合规评估和明确授权。实验七主体不依赖这些扩展，其迁入基线已验收；实验八的 8.1 身份拆分已验收。更多故障症状和恢复动作见 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。
