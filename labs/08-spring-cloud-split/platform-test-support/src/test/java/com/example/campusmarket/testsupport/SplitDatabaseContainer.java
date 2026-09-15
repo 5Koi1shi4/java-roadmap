@@ -13,7 +13,7 @@ import java.util.Objects;
 import java.util.Properties;
 
 /**
- * 为身份与市场服务建立真实的双库最小权限测试边界。
+ * 为身份、市场与商品读服务建立真实的三库最小权限测试边界。
  *
  * <p>root 管理连接只在本夹具内部用于建库和授权；测试对外只暴露各自的 runtime
  * 账号，以及供 Spring Flyway 使用的独立 migration 账号属性。</p>
@@ -22,16 +22,21 @@ public final class SplitDatabaseContainer {
 
     public static final String IDENTITY_DATABASE = "identity_db";
     public static final String MARKET_DATABASE = "market_db";
+    public static final String PRODUCT_DATABASE = "product_read_db";
     public static final String IDENTITY_ACCOUNT = "identity_app";
     public static final String MARKET_ACCOUNT = "market_app";
+    public static final String PRODUCT_ACCOUNT = "product_app";
     public static final String IDENTITY_MIGRATOR_ACCOUNT = "identity_migrator";
     public static final String MARKET_MIGRATOR_ACCOUNT = "market_migrator";
+    public static final String PRODUCT_MIGRATOR_ACCOUNT = "product_migrator";
 
     /** 仅用于 Testcontainers，一次性测试口令，不是任何真实环境秘密。 */
     private static final String IDENTITY_PASSWORD = "identity_test_password";
     private static final String IDENTITY_MIGRATOR_PASSWORD = "identity_migrator_test_password";
     private static final String MARKET_PASSWORD = "market_test_password";
     private static final String MARKET_MIGRATOR_PASSWORD = "market_migrator_test_password";
+    private static final String PRODUCT_PASSWORD = "product_test_password";
+    private static final String PRODUCT_MIGRATOR_PASSWORD = "product_migrator_test_password";
     private static final String ADMIN_ACCOUNT = "root";
     private static final String ADMIN_PASSWORD = "root_test_password";
     private static final String BOOTSTRAP_DATABASE = "bootstrap";
@@ -75,6 +80,12 @@ public final class SplitDatabaseContainer {
             MARKET_MIGRATOR_ACCOUNT, MARKET_MIGRATOR_PASSWORD);
     }
 
+    /** 返回 product read runtime datasource 与独立 Flyway migration 的 Spring 属性。 */
+    public static Properties productProperties() {
+        return credentials(PRODUCT_DATABASE, PRODUCT_ACCOUNT, PRODUCT_PASSWORD,
+            PRODUCT_MIGRATOR_ACCOUNT, PRODUCT_MIGRATOR_PASSWORD);
+    }
+
     /** 将 identity 的 runtime/Flyway 属性注册到 Spring 测试环境。 */
     public static void identityProperties(DynamicPropertyRegistry registry) {
         registerSpringProperties(registry, identityProperties());
@@ -83,6 +94,11 @@ public final class SplitDatabaseContainer {
     /** 将 market 的 runtime/Flyway 属性注册到 Spring 测试环境。 */
     public static void marketProperties(DynamicPropertyRegistry registry) {
         registerSpringProperties(registry, marketProperties());
+    }
+
+    /** 将 product read 的 runtime/Flyway 属性注册到 Spring 测试环境。 */
+    public static void productProperties(DynamicPropertyRegistry registry) {
+        registerSpringProperties(registry, productProperties());
     }
 
     public static boolean isRunning() {
@@ -138,18 +154,24 @@ public final class SplitDatabaseContainer {
                 + " CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci");
             statement.execute("CREATE DATABASE " + MARKET_DATABASE
                 + " CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci");
+            statement.execute("CREATE DATABASE " + PRODUCT_DATABASE
+                + " CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci");
 
             createUser(statement, IDENTITY_MIGRATOR_ACCOUNT, IDENTITY_MIGRATOR_PASSWORD);
             createUser(statement, IDENTITY_ACCOUNT, IDENTITY_PASSWORD);
             createUser(statement, MARKET_MIGRATOR_ACCOUNT, MARKET_MIGRATOR_PASSWORD);
             createUser(statement, MARKET_ACCOUNT, MARKET_PASSWORD);
+            createUser(statement, PRODUCT_MIGRATOR_ACCOUNT, PRODUCT_MIGRATOR_PASSWORD);
+            createUser(statement, PRODUCT_ACCOUNT, PRODUCT_PASSWORD);
 
             grantMigrationPrivileges(statement, IDENTITY_DATABASE, IDENTITY_MIGRATOR_ACCOUNT);
             grantRuntimePrivileges(statement, IDENTITY_DATABASE, IDENTITY_ACCOUNT);
             grantMigrationPrivileges(statement, MARKET_DATABASE, MARKET_MIGRATOR_ACCOUNT);
             grantRuntimePrivileges(statement, MARKET_DATABASE, MARKET_ACCOUNT);
+            grantMigrationPrivileges(statement, PRODUCT_DATABASE, PRODUCT_MIGRATOR_ACCOUNT);
+            grantRuntimePrivileges(statement, PRODUCT_DATABASE, PRODUCT_ACCOUNT);
         } catch (SQLException exception) {
-            throw new IllegalStateException("无法初始化双库最小权限测试夹具", exception);
+            throw new IllegalStateException("无法初始化三库最小权限测试夹具", exception);
         }
     }
 

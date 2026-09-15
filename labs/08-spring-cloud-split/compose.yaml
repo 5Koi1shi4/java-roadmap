@@ -10,6 +10,8 @@ services:
       IDENTITY_MIGRATOR_PASSWORD: "${IDENTITY_MIGRATOR_PASSWORD}"
       MARKET_APP_PASSWORD: "${MARKET_APP_PASSWORD}"
       MARKET_MIGRATOR_PASSWORD: "${MARKET_MIGRATOR_PASSWORD}"
+      PRODUCT_APP_PASSWORD: "${PRODUCT_APP_PASSWORD}"
+      PRODUCT_MIGRATOR_PASSWORD: "${PRODUCT_MIGRATOR_PASSWORD}"
     volumes:
       - mysql-data:/var/lib/mysql
       - ./docker/mysql/01-split-databases.sh:/docker-entrypoint-initdb.d/01-split-databases.sh:ro
