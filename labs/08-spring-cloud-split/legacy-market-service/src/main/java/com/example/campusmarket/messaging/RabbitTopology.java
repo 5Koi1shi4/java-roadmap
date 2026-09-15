@@ -23,6 +23,8 @@ public class RabbitTopology {
     public static final String WARRANTY_QUEUE = "campus.market.events.warranty";
     public static final String MANUAL_EXCHANGE = "campus.market.manual";
     public static final String MANUAL_QUEUE = "campus.market.manual.failure";
+    public static final String PRODUCT_EXCHANGE = "campus.product.snapshot";
+    public static final String PRODUCT_QUEUE = "campus.product.read";
 
     @Bean
     DirectExchange campusMarketEventExchange() {
@@ -32,6 +34,11 @@ public class RabbitTopology {
     @Bean
     DirectExchange campusMarketManualExchange() {
         return new DirectExchange(MANUAL_EXCHANGE, true, false);
+    }
+
+    @Bean
+    DirectExchange campusProductSnapshotExchange() {
+        return new DirectExchange(PRODUCT_EXCHANGE, true, false);
     }
 
     @Bean
@@ -49,6 +56,14 @@ public class RabbitTopology {
     @Bean
     Queue campusMarketManualQueue() {
         return QueueBuilder.durable(MANUAL_QUEUE).quorum().build();
+    }
+
+    @Bean
+    Queue campusProductReadQueue() {
+        return QueueBuilder.durable(PRODUCT_QUEUE)
+                .deadLetterExchange(MANUAL_EXCHANGE)
+                .deadLetterRoutingKey("FAILURE")
+                .build();
     }
 
     @Bean
@@ -74,6 +89,17 @@ public class RabbitTopology {
         return BindingBuilder.bind(campusMarketManualQueue).to(campusMarketManualExchange).with("FAILURE");
     }
 
+    @Bean
+    Declarables campusProductSnapshotBindings(Queue campusProductReadQueue,
+                                               DirectExchange campusProductSnapshotExchange) {
+        List<Declarable> bindings = new ArrayList<>();
+        for (String eventType : PRODUCT_EVENT_TYPES) {
+            bindings.add(BindingBuilder.bind(campusProductReadQueue)
+                .to(campusProductSnapshotExchange).with(eventType));
+        }
+        return new Declarables(bindings);
+    }
+
     private static final List<String> ORDER_EVENT_TYPES = List.of(
         "LISTING_CREATED", "LISTING_UPDATED", "LISTING_PUBLISHED", "LISTING_OFF_SALE", "LISTING_SOLD_OUT",
         "INVENTORY_CHANGED", "ORDER_CREATED", "ORDER_CANCELLED", "ORDER_PAID", "ORDER_HANDOFF_CONFIRMED",
@@ -82,4 +108,8 @@ public class RabbitTopology {
         "REFUND_REQUESTED", "REFUND_SUCCEEDED", "REFUND_FAILED", "DISPUTE_CREATED", "DISPUTE_RESOLVED", "DISPUTE_SLA_ALERT",
         "SELLER_OBLIGATION_CREATED", "SELLER_OBLIGATION_FUNDED", "SELLER_RESTRICTION_ACTIVATED", "SELLER_RESTRICTION_CLEARED", "SELLER_OBLIGATION_DEDUCTED", "SELLER_OBLIGATION_EXPIRED",
         "SETTLEMENT_CREATED", "REVIEW_CREATED");
+
+    private static final List<String> PRODUCT_EVENT_TYPES = List.of(
+        "LISTING_CREATED", "LISTING_UPDATED", "LISTING_PUBLISHED", "LISTING_OFF_SALE",
+        "LISTING_SOLD_OUT", "INVENTORY_CHANGED");
 }

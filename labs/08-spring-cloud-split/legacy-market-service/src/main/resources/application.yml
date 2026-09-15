@@ -62,6 +62,9 @@ campus:
         enabled: false
         fixed-delay-ms: 1000
         cleanup-delay-ms: 5000
+    product:
+      publisher:
+        enabled: ${CAMPUS_MARKET_PRODUCT_PUBLISHER_ENABLED:false}
 
 ---
 spring:
