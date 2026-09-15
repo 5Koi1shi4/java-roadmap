@@ -208,6 +208,7 @@ services:
       CAMPUS_MARKET_PAYMENT_PROVIDER_URL: http://legacy-market-service:8080/simulated-provider
       CAMPUS_MARKET_PAYMENT_SIGNING_SECRET: "${CAMPUS_MARKET_PAYMENT_SIGNING_SECRET}"
       CAMPUS_MARKET_PAYMENT_SIMULATION_ENABLED: "true"
+      CAMPUS_MARKET_PRODUCT_PUBLISHER_ENABLED: "true"
     networks:
       - campus-cloud
 
