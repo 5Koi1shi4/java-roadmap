@@ -41,8 +41,8 @@ labs/08-spring-cloud-split/
 
 **Interfaces:** Produce `product-read-service` Maven module and `GET /api/search`, `GET /api/listings/search` routes with `lb://product-read-service`; existing auth and legacy routes remain.
 
-- [ ] **Step 1:** 在已有 linked worktree 检查 `git-dir != git-common-dir`、无 submodule、分支与干净状态；在 JDK 17 下运行 `mvnw.cmd test` 保存 fresh 基线 XML。`docker info` 只读检查留给外部测试。
-- [ ] **Step 2:** 先把路由测试改成如下预期并运行 `mvnw.cmd -pl api-gateway -am -Dtest=ExplicitRoutesTest -Dsurefire.failIfNoSpecifiedTests=false test`，确认因只有两条路由而失败：
+- [x] **Step 1:** 在已有 linked worktree 检查 `git-dir != git-common-dir`、无 submodule、分支与干净状态；在 JDK 17 下运行 `mvnw.cmd test` 保存 fresh 基线 XML。`docker info` 只读检查留给外部测试。
+- [x] **Step 2:** 先把路由测试改成如下预期并运行 `mvnw.cmd -pl api-gateway -am '-Dtest=ExplicitRoutesTest' '-Dsurefire.failIfNoSpecifiedTests=false' test`，确认因只有两条路由而失败：
 
 ```java
 assertThat(routes).extracting(RouteDefinition::getId)
@@ -52,8 +52,8 @@ assertThat(routes.get(1).getPredicates()).extracting(PredicateDefinition::getNam
     .contains("Path", "Method");
 ```
 
-- [ ] **Step 3:** 父 POM 添加 `<module>product-read-service</module>`；子 POM 继承父版本并只加入 Web、Security、OAuth2 Resource Server、JDBC、AMQP、Eureka、Flyway/MySQL、Actuator、Elasticsearch 与必要 test scope 依赖。Gateway 在 legacy 路由之前加入两条 `Path` + `Method=GET`，不得使用 discovery locator；不建立生产模块依赖。
-- [ ] **Step 4:** 重跑定点测试和 Reactor `test`，检查 `git diff --check`；只暂存上述文件并提交 `build(cloud): add explicit product read module and routes`。
+- [x] **Step 3:** 父 POM 添加 `<module>product-read-service</module>`；子 POM 继承父版本并只加入 Web、Security、OAuth2 Resource Server、JDBC、AMQP、Eureka、Flyway/MySQL、Actuator、Elasticsearch 与必要 test scope 依赖。Gateway 在 legacy 路由之前加入两条 `Path` + `Method=GET`，不得使用 discovery locator；不建立生产模块依赖。
+- [x] **Step 4:** 重跑定点测试和 Reactor `test`，检查 `git diff --check`；只暂存上述文件并提交 `build(cloud): add explicit product read module and routes`。执行证据：实验分支 `52cb5e0`，Gateway 定点 1 项 0 failures/errors/skipped，全 Reactor BUILD SUCCESS。
 
 ## Task 2: 源事件完整快照与事务证明
 
@@ -61,7 +61,7 @@ assertThat(routes.get(1).getPredicates()).extracting(PredicateDefinition::getNam
 
 **Interfaces:** Produce `ProductSnapshotEvent(UUID eventId, UUID listingId, long aggregateVersion, String eventType, Instant occurredAt, int schemaVersion, ProductSnapshot snapshot)` and `SearchOutboxRepository.enqueue(UUID listingId, long version, String eventType)`; all event payload fields are read from `listing` inside caller transaction.
 
-- [ ] **Step 1:** 写真实 MySQL 失败测试：事务回滚后 `search_outbox` 无新行；发布和库存归零后事件分别包含 `ON_SALE`/`SOLD_OUT` 及精确版本；隔离、重新上架和报损保持数量非负且各有事件。运行 `mvnw.cmd -pl legacy-market-service -am -Dit.test=ProductSnapshotOutboxIT verify`，确认事件缺字段或缺行的预期失败。
+- [ ] **Step 1:** 写真实 MySQL 失败测试：事务回滚后 `search_outbox` 无新行；发布和库存归零后事件分别包含 `ON_SALE`/`SOLD_OUT` 及精确版本；隔离、重新上架和报损保持数量非负且各有事件。运行 `mvnw.cmd -pl legacy-market-service -am '-Dit.test=ProductSnapshotOutboxIT' verify`，确认事件缺字段或缺行的预期失败。
 - [ ] **Step 2:** `V31` 增加 `schema_version INT NOT NULL DEFAULT 2` 与 `ck_search_outbox_schema_version CHECK (schema_version=2)`；保留 `id` 作 event ID，`sequence_no` 作 replay 高水位。`ProductSnapshotEvent` 构造器拒绝 null、非法 UUID/范围、未知状态/类型、非 2 版本。源 repository 在市场事务内 `SELECT` 商品快照并把完整 JSON 与版本写 Outbox，不在 publisher 阶段重新读取商品；`JdbcInventoryRepository` 的条件 UPDATE 与原事务仍不变。
 
 ```sql
