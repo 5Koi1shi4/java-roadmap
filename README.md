@@ -22,7 +22,7 @@
 | 5 | Elasticsearch 搜索 | 已验收 | [learning/elasticsearch-search/labs/05-elasticsearch-search](https://github.com/5Koi1shi4/java-roadmap/tree/learning/elasticsearch-search/labs/05-elasticsearch-search) |
 | 6 | 安全文件服务与 MinIO | 已验收 | [learning/secure-file-service/labs/06-file-service](https://github.com/5Koi1shi4/java-roadmap/tree/learning/secure-file-service/labs/06-file-service) |
 | 7 | 校园交易与服务平台 | 已验收 | [learning/campus-market/labs/07-campus-market](https://github.com/5Koi1shi4/java-roadmap/tree/learning/campus-market/labs/07-campus-market) |
-| 8 | Spring Cloud 渐进拆分 | 进行中 | [learning/spring-cloud-split](https://github.com/5Koi1shi4/java-roadmap/tree/learning/spring-cloud-split/labs/08-spring-cloud-split)（快照 `ea5cf49`，8.1 身份拆分，待验收） |
+| 8 | Spring Cloud 渐进拆分 | 已验收 | [learning/spring-cloud-split](https://github.com/5Koi1shi4/java-roadmap/tree/learning/spring-cloud-split/labs/08-spring-cloud-split)（8.1 身份拆分本地验收提交 `c51ad53`；远端入口待同步） |
 | 9 | Java AI 智能校园客服 | 未开始 | — |
 
 状态仅使用：`未开始`、`进行中`、`已验收`。
@@ -78,6 +78,14 @@
 - 入口：[learning/campus-market/labs/07-campus-market](https://github.com/5Koi1shi4/java-roadmap/tree/learning/campus-market/labs/07-campus-market)
 - 验证：实验代码只保存在独立分支 `learning/campus-market`，不合并到 `main`。JDK 17 下 `mvnw.cmd test` 为 137 项；MySQL 8.4、Redis 7.4、RabbitMQ 3.13、SmartCN Elasticsearch 8.18.8、MinIO 与 Toxiproxy 环境中的完整 `mvnw.cmd verify` 为 251 个 Failsafe/Testcontainers 集成测试；均为 0 failures、0 errors、0 skipped（验收状态提交 `4148f1e`）。
 - 状态与边界：实验七主体交易闭环已验收。正式 CAS、真实支付和真实物流尚未接入；原规划的 `7.1` 聊天、`7.2` 竞价、`7.3` 跑腿/代取及真实支付适配器涉及法律与合规问题，暂不开展，不作为本实验验收前置条件。已有扩展设计和合规检查材料仅作为决策记录保留。
+
+### 实验八：Spring Cloud 渐进拆分（8.1 身份服务）
+
+身份服务独立持有 `identity_db`、RSA 私钥和登录/注册接口；Gateway 与兼容交易单体分别使用 JWKS 验证 RS256 Token，并通过 Eureka 发现身份与业务实例。交易单体继续持有 `market_db` 内的库存、支付、售后和可靠事件事务，客户端只经 Gateway 访问。冷启动、身份/交易/Eureka 停机恢复和未知 `kid` 均由真实四应用测试验证。
+
+- 入口：[learning/spring-cloud-split/labs/08-spring-cloud-split](https://github.com/5Koi1shi4/java-roadmap/tree/learning/spring-cloud-split/labs/08-spring-cloud-split)；本地验收记录在独立分支提交 `c51ad53`，尚未推送远端。
+- 验证：JDK 17、Docker Desktop 29.7.2 下执行 fresh `mvnw.cmd clean test` 与 `mvnw.cmd clean verify`，六模块 BUILD SUCCESS；Surefire 196 项、Failsafe/Testcontainers 293 项，共 489 项，全部 0 failures、0 errors、0 skipped。官方 `eclipse-temurin:17-jre` 镜像的隔离 Compose 启动确认四应用八个探针 UP、Eureka 3/3 注册和 Gateway RSA JWKS HTTP 200。
+- 边界：8.1 只支持全新环境，不支持生产不停机迁移；正式 CAS、真实支付和真实物流继续不在本阶段，7.1/7.2/7.3 扩展仍暂停。实验代码只保存在 `learning/spring-cloud-split`，不合并到 `main`。
 
 ## 目录导航
 
