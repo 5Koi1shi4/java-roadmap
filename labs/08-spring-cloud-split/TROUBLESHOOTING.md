@@ -1,5 +1,11 @@
 # 排障手册
 
+## 8.2 商品读服务
+
+第五应用 `product-read-service` 的宿主诊断端口为 18083，Eureka 注册名 `PRODUCT-READ-SERVICE`。搜索的两个精确 GET 路由只从 Gateway 发起；客户端 Token、issuer/audience/kid 与 legacy 一致，商品服务也独立验签。搜索安全 503 时先看产品 `/actuator/health/readiness` 中的 `jwks`、`eureka`、`db`、`rabbit`、`productSearch`，再看 Rabbit `campus.product.read` 队列、源 `search_outbox`、读侧 `product_index_outbox` 和 ES `campus-product-read/write` 别名。不能改成固定下游端口、跳过 JWT 或手工标记待办已发布。
+
+Rabbit 停机后交易命令和源 Outbox 仍可提交。恢复 broker 后确认式 publisher 继续发布；保留事件可由本机 `ProductReplayService.replayOnce(limit)` 以固定高水位有界补放，读侧由 Inbox 和商品版本去重。ES 停机时投影和索引待办继续保留，恢复后 index scheduler 补投；零库存/下架须保持 tombstone。重建失败要检查 `product_rebuild_gate` 的 mode/intent/generation、别名目标和 `product_index_cleanup_task`，由有效 owner 恢复，不能直接删除 live 索引。更多操作边界见 [商品读服务说明](docs/product-read-service.md)。
+
 本手册保留实验七交易基线的排障路径，并记录实验八身份拆分的边界。先确认失败发生在哪个事实边界，再做恢复；不要通过跳过测试、手工篡改状态或放宽 ACL 获得表面成功。
 
 ## 实验八：本地 Compose 启动

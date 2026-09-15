@@ -1,8 +1,10 @@
-# 实验八：Spring Cloud 渐进拆分（8.1 身份服务）
+# 实验八：Spring Cloud 渐进拆分（8.1 身份服务、8.2 商品读服务）
 
 这是基于 JDK 17、Spring Boot 3.5.16、Spring Cloud 2025.0.3 的 Maven 聚合实验。身份服务独立签发 RS256 Token，Gateway 与兼容交易单体分别通过 JWKS 验签，Eureka 提供实例发现。`identity_db` 与 `market_db` 使用独立账号，交易不变量继续由兼容单体维护。
 
 当前 8.1 身份拆分状态为“已验收”。2026-09-15 在 JDK 17、Docker Desktop 29.7.2 下，完整 `clean test` 与 `clean verify` 均 BUILD SUCCESS；fresh XML 汇总 196 项 Surefire、293 项 Failsafe/Testcontainers，共 489 项，全部 0 failures、0 errors、0 skipped。真实四应用旅程、身份/交易/Eureka 停机恢复、冷启动与 JWKS 刷新均在完整验收中运行。用 Dockerfile 指定的官方 `eclipse-temurin:17-jre` 重新构建并启动 Compose 后，四应用的 health、liveness、readiness 全部 UP，Eureka 3 项注册完成，Gateway 的 JWKS 返回 HTTP 200 与 1 把 RSA 公钥。实验七的已验收结果只作为迁入基线；原计划的 `7.1` 聊天、`7.2` 竞价、`7.3` 跑腿/代取及真实支付适配器继续暂停。
+
+8.2 按已通过的设计推进独立商品读服务：交易事实与订单快照仍在兼容单体，商品完整快照经确认式 Rabbit 发布，读侧拥有第三库和独立 SmartCN 索引。当前 8.2 正在实施和验证；8.1 的 489 项是既有基线，不能当作 8.2 验收数。新模块的事实、路由、replay 和重建边界见 [商品读服务说明](docs/product-read-service.md)。
 
 ## 8.1 边界与验收入口
 
@@ -34,7 +36,7 @@ git diff --check
 
 ## 模块和事实边界
 
-聚合根包含五个 Maven 模块：`discovery-server`、`identity-service`、`legacy-market-service`、`api-gateway` 是四个独立应用；`platform-test-support` 只提供 test scope 夹具。身份代码和身份表已迁入身份服务；兼容单体仅保留交易事实，不签发 Token，不查询身份库。
+聚合根包含六个 Maven 模块：`discovery-server`、`identity-service`、`legacy-market-service`、`product-read-service`、`api-gateway` 是五个独立应用；`platform-test-support` 只提供 test scope 夹具。身份代码和身份表已迁入身份服务；商品读服务拥有独立投影库与索引，兼容单体继续拥有交易事实，不签发 Token，不查询身份库。
 
 ```text
 身份/邮箱 ──> 商品/库存 ──> 订单 ──> 支付/退款 ──> 交付与争议
@@ -80,7 +82,7 @@ openssl pkcs8 -topk8 -nocrypt -in (Join-Path $keyDir 'jwt-private-rsa.pem') -out
 openssl rsa -in (Join-Path $keyDir 'jwt-private-rsa.pem') -pubout -out (Join-Path $keyDir 'jwt-public-key.pem')
 ```
 
-在本目录按以下顺序构建并启动四个独立应用。第一次启动前必须先打包，Compose 只使用各模块的 `target` JAR；不再使用旧的单体 `spring-boot:run` 命令。下面是本地 Compose 的基础启动 smoke；它不替代 Testcontainers 的完整注册旅程：
+在本目录按以下顺序构建并启动五个独立应用。第一次启动前必须先打包，Compose 只使用各模块的 `target` JAR；不再使用旧的单体 `spring-boot:run` 命令。下面是本地 Compose 的基础启动 smoke；它不替代 Testcontainers 的完整注册旅程：
 
 ```powershell
 docker info
@@ -93,16 +95,17 @@ docker compose --env-file .env up -d
 docker compose --env-file .env ps
 ```
 
-Compose 的 `depends_on: service_started` 只表达启动顺序，不代表应用已就绪。启动后可用以下有界 PowerShell 在同一个 2 分钟 deadline 内轮询四个应用的 `/actuator/health`、liveness/readiness 和 Eureka 三项注册；每次请求和休眠都会先计算剩余时间，超时即失败：
+Compose 的 `depends_on: service_started` 只表达启动顺序，不代表应用已就绪。启动后可用以下有界 PowerShell 在同一个 2 分钟 deadline 内轮询五个应用的 `/actuator/health`、liveness/readiness 和 Eureka 四项注册；每次请求和休眠都会先计算剩余时间，超时即失败：
 
 ```powershell
 $services = [ordered]@{
   discovery = 'http://localhost:8761'
   identity  = 'http://localhost:18081'
   legacy    = 'http://localhost:18082'
+  product   = 'http://localhost:18083'
   gateway   = 'http://localhost:18080'
 }
-$registryNames = @('IDENTITY-SERVICE', 'LEGACY-MARKET-SERVICE', 'API-GATEWAY')
+$registryNames = @('IDENTITY-SERVICE', 'LEGACY-MARKET-SERVICE', 'PRODUCT-READ-SERVICE', 'API-GATEWAY')
 $deadline = (Get-Date).AddMinutes(2)
 
 function Get-RemainingSeconds {
@@ -191,7 +194,7 @@ if ($missingHealth.Count -gt 0 -or $missingProbes.Count -gt 0 -or $missingRegist
 $services.Keys | ForEach-Object { "$_ : health, liveness, readiness UP" }
 ```
 
-Compose 的依赖顺序是 discovery（8761）先启动，identity（18081）和 legacy（18082）在双库及其基础设施健康后启动，Gateway（18080）最后启动。宿主机端口如下：
+Compose 的依赖顺序是 discovery（8761）先启动，identity（18081）、legacy（18082）与 product（18083）在三库及各自基础设施健康后启动，Gateway（18080）最后启动。宿主机端口如下：
 
 | 服务 | 容器端口 | 宿主机端口 | 用途 |
 |---|---:|---:|---|
@@ -199,15 +202,16 @@ Compose 的依赖顺序是 discovery（8761）先启动，identity（18081）和
 | api-gateway | 8080 | 18080 | 客户端唯一入口 |
 | identity-service | 8080 | 18081 | 身份服务诊断入口 |
 | legacy-market-service | 8080 | 18082 | 兼容交易服务诊断入口 |
-| MySQL | 3306 | 3313 | `identity_db`、`market_db` |
+| product-read-service | 8080 | 18083 | 商品读服务诊断入口 |
+| MySQL | 3306 | 3313 | `identity_db`、`market_db`、`product_read_db` |
 | Redis | 6379 | 6383 | 验证码和限流 |
 | RabbitMQ | 5672/15672 | 5673/15673 | 事件与管理界面 |
 | Elasticsearch | 9200 | 9203 | SmartCN 搜索读模型 |
 | MinIO | 9000/9001 | 9010/9011 | 私有对象和控制台 |
 
-四个应用的关键环境变量已在 Compose 中显式配置：discovery 使用 `SERVER_PORT`；identity 使用 `SPRING_PROFILES_ACTIVE=local`、本库 `SPRING_DATASOURCE_*`/`SPRING_FLYWAY_*`、`SPRING_DATA_REDIS_URL`、`EUREKA_DEFAULT_ZONE`、`CAMPUS_MARKET_JWT_*` 和密钥 bind mount；legacy 使用本库数据源/Flyway、Redis、`SPRING_RABBITMQ_*`、`SPRING_ELASTICSEARCH_URIS`、MinIO `CAMPUS_MARKET_STORAGE_*`、支付模拟 `CAMPUS_MARKET_PAYMENT_*`、JWKS 和 Eureka；Gateway 使用 `SERVER_PORT`、JWKS、issuer/audience 和 `EUREKA_DEFAULT_ZONE`。所有口令和宿主机密钥路径只从 `.env` 读取。
+五个应用的关键环境变量已在 Compose 中显式配置：discovery 使用 `SERVER_PORT`；identity 使用 `SPRING_PROFILES_ACTIVE=local`、本库 `SPRING_DATASOURCE_*`/`SPRING_FLYWAY_*`、`SPRING_DATA_REDIS_URL`、`EUREKA_DEFAULT_ZONE`、`CAMPUS_MARKET_JWT_*` 和密钥 bind mount；legacy 使用本库数据源/Flyway、Redis、`SPRING_RABBITMQ_*`、`SPRING_ELASTICSEARCH_URIS`、MinIO `CAMPUS_MARKET_STORAGE_*`、支付模拟 `CAMPUS_MARKET_PAYMENT_*`、JWKS、Eureka 和商品 publisher 开关；product 使用第三库数据源/Flyway、RabbitMQ、Elasticsearch、JWKS、Eureka 和 index scheduler 开关；Gateway 使用 `SERVER_PORT`、JWKS、issuer/audience 和 `EUREKA_DEFAULT_ZONE`。所有口令和宿主机密钥路径只从 `.env` 读取。
 
-应用间只使用 Compose 服务名：Eureka 为 `http://discovery-server:8761/eureka/`，identity 的固定 JWKS 为 `http://identity-service:8080/api/auth/.well-known/jwks.json`，legacy 和 Gateway 均通过该地址验签。客户端只访问 Gateway；例如先检查 Gateway 暴露的 JWKS：
+应用间只使用 Compose 服务名：Eureka 为 `http://discovery-server:8761/eureka/`，identity 的固定 JWKS 为 `http://identity-service:8080/api/auth/.well-known/jwks.json`，legacy、product 和 Gateway 均通过该地址验签。客户端只访问 Gateway；例如先检查 Gateway 暴露的 JWKS：
 
 ```powershell
 Invoke-WebRequest -Uri http://localhost:18080/api/auth/.well-known/jwks.json
@@ -222,6 +226,8 @@ docker compose --env-file .env down
 MySQL 初始化脚本只在 `mysql-data` 空卷第一次创建数据库和账号；MinIO 对象保存在独立的 `minio-data` 命名卷。普通 `down` 保留这两个卷，需要丢弃本地实验数据并重新初始化时才使用 `down -v`；该命令会删除这个 Compose 项目的数据库和 MinIO 数据。Toxiproxy 不属于本地运行 Compose，故障测试由 Testcontainers 按测试需要独立创建。测试使用隔离的 Testcontainers，不能用本机历史服务或 skipped 结果代替真实外部协作验证。
 
 ## 主要 HTTP 接口
+
+8.2 的两个搜索 GET 经 `lb://product-read-service`；商品、库存和订单写命令仍经 `lb://legacy-market-service`。读服务根据事件投影和自己的 ES 别名返回搜索结果，可售库存仍以交易库为准。
 
 | 领域 | 接口 |
 |---|---|

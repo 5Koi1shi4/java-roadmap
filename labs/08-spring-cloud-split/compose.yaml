@@ -209,6 +209,7 @@ services:
       CAMPUS_MARKET_PAYMENT_SIGNING_SECRET: "${CAMPUS_MARKET_PAYMENT_SIGNING_SECRET}"
       CAMPUS_MARKET_PAYMENT_SIMULATION_ENABLED: "true"
       CAMPUS_MARKET_PRODUCT_PUBLISHER_ENABLED: "true"
+      SPRING_TASK_SCHEDULING_ENABLED: "true"
     networks:
       - campus-cloud
 
@@ -250,6 +251,8 @@ services:
       CAMPUS_MARKET_JWT_AUDIENCE: "${CAMPUS_MARKET_JWT_AUDIENCE}"
       EUREKA_DEFAULT_ZONE: http://discovery-server:8761/eureka/
       EUREKA_INSTANCE_HOSTNAME: product-read-service
+      CAMPUS_MARKET_PRODUCT_INDEX_ENABLED: "true"
+      SPRING_TASK_SCHEDULING_ENABLED: "true"
       MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED: "true"
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8080/actuator/health/readiness"]

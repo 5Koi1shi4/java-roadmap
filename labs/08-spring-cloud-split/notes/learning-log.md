@@ -1,5 +1,11 @@
 # 实验八学习日志
 
+## 2026-09-15：8.2 商品读服务实施中
+
+- 用户通过“独立商品读服务、交易事实暂留兼容单体”设计并批准实施。实验分支新增第五应用、精确 Gateway GET 路由、`product_read_db` 第三库及最小权限，市场事务产生 `schemaVersion=2` 完整快照，Rabbit publisher confirm 与本机保留事件 replay，读侧 Inbox/版本条件投影/index Outbox。
+- 定点真实 MySQL、Rabbit、SmartCN Elasticsearch 测试已分别覆盖事务回滚、publisher confirm/fencing、三库权限、幂等/乱序投影、搜索删失与 index 待办门禁。商品直连 HTTP/JWKS 安全 4/4，JWKS/Eureka 冷启动 readiness 1/1 通过；就绪探针红灯先表现为缺少 health contributor，补上后商品服务返回可检查的 503 组件状态。
+- 五应用 Gateway 旅程、故障恢复、在线重建、隔离 Compose smoke、fresh 全量 `clean test`/`clean verify` 仍待完成；旧 8.1 的 489 项不能代表 8.2 验收。当前状态为“实施中”。
+
 ## 2026-09-15
 
 - 目标：按 AGENTS.md 恢复实验八 8.1，继续现有独立工作树和 `learning/spring-cloud-split`，不修改实验七、不将实验分支合并回 main。

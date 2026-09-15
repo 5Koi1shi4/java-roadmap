@@ -1,5 +1,7 @@
 # 8.1 身份拆分架构
 
+8.1 的四应用架构和验收证据保留如下。8.2 增加独立 `product-read-service`：Gateway 的精确 `GET /api/search`、`GET /api/listings/search` 在 legacy 通配路由之前经 `lb://product-read-service` 转发；商品写入、库存、订单快照和其余交易命令仍由 legacy 执行。市场事务的完整 `schemaVersion=2` 快照经确认式 Rabbit 发布，读服务在 `product_read_db` 用 Inbox/版本条件投影/index Outbox 收敛，并维护独立 `campus-product-*` ES 别名。第五个服务直连仍验签，三库权限互不相通。详见 [8.2 商品读服务](product-read-service.md)。
+
 四个应用分别启动自己的 WebServer 和 Spring 上下文：`discovery-server` 提供 Eureka 注册表，`api-gateway` 提供客户端入口，`identity-service` 负责验证码、注册、登录和 RS256/JWKS，`legacy-market-service` 保留实验七的交易闭环。
 
 Gateway 的身份路由为 `/api/auth/** → lb://identity-service`，业务路由为 `/api/** → lb://legacy-market-service`，身份路由优先匹配。服务实例通过 Eureka 获取；关闭 discovery locator，避免自动公开 `/{serviceId}/**`。JWKS 的实际身份端点是 `/api/auth/.well-known/jwks.json`。
