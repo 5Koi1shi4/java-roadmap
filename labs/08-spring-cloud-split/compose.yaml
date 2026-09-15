@@ -211,6 +211,51 @@ services:
     networks:
       - campus-cloud
 
+  product-read-service:
+    build:
+      context: .
+      dockerfile: docker/product-read-service/Dockerfile
+      args:
+        APP_JAR: product-read-service/target/product-read-service-0.0.1-SNAPSHOT.jar
+    restart: "no"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      discovery-server:
+        condition: service_started
+    ports:
+      - "127.0.0.1:18083:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      SERVER_PORT: "8080"
+      SPRING_DATASOURCE_URL: "jdbc:mysql://mysql:3306/product_read_db?sslMode=DISABLED&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+      SPRING_DATASOURCE_USERNAME: product_app
+      SPRING_DATASOURCE_PASSWORD: "${PRODUCT_APP_PASSWORD}"
+      SPRING_FLYWAY_URL: "jdbc:mysql://mysql:3306/product_read_db?sslMode=DISABLED&allowPublicKeyRetrieval=true&serverTimezone=UTC"
+      SPRING_FLYWAY_USER: product_migrator
+      SPRING_FLYWAY_PASSWORD: "${PRODUCT_MIGRATOR_PASSWORD}"
+      SPRING_FLYWAY_LOCATIONS: classpath:db/migration
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: "5672"
+      SPRING_RABBITMQ_USERNAME: "${RABBITMQ_DEFAULT_USER}"
+      SPRING_RABBITMQ_PASSWORD: "${RABBITMQ_DEFAULT_PASS}"
+      SPRING_ELASTICSEARCH_URIS: http://elasticsearch:9200
+      EUREKA_DEFAULT_ZONE: http://discovery-server:8761/eureka/
+      EUREKA_INSTANCE_HOSTNAME: product-read-service
+      MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED: "true"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8080/actuator/health/readiness"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks:
+      - campus-cloud
+
   api-gateway:
     build:
       context: .
