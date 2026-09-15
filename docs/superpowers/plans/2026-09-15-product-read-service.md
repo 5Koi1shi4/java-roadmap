@@ -78,9 +78,9 @@ VALUES (?,?,?,?,CAST(? AS JSON),2,'NEW',0,CURRENT_TIMESTAMP(6),DEFAULT);
 
 **Interfaces:** Produce `ProductEventPublisher.publish(ProductSnapshotEvent)` and `ProductReplayService.replayOnce(int limit)`; Rabbit topology is durable exchange `campus.product.snapshot`, durable queue `campus.product.read`, persistent delivery, no auto retry of HTTP writes.
 
-- [ ] **Step 1:** 先写 Rabbit/MySQL IT：无 confirm 不标记 `PUBLISHED`；broker 断开时交易事实及 NEW Outbox 仍提交；恢复后投递持久消息；旧 owner 迟到 confirm 被 token/租约条件拒绝。replay 测试固定 `MAX(sequence_no)` 后模拟并发新事件与 owner 接管，证明已发布旧事件可重发且新事件照常发布。运行两个定点 IT 见预期失败。
-- [ ] **Step 2:** 新增生产 `ProductSnapshotPublisherDispatcher`，从源 Outbox 领取快照并用 `RabbitTemplate` correlated confirm 发布；旧 `SearchOutboxDispatcher` 保持实验七真实搜索回归入口，且生产配置明确只启用新 scheduler，不同时领取源 Outbox。完成 SQL 固定 `WHERE id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=? AND lease_until>CURRENT_TIMESTAMP(6)`；broker 未就绪时暂停领取，实际投递失败最多三次并转可检查失败终态，保留行由本机 replay 接管，不丢掉唯一恢复路径。`V32` 创建单行 replay claim 进度与高水位表，`replayOnce` 通过数据库时间领取、有界批量、token fencing 和 confirm 重新发布保留的完整事件；只允许本机运维调用，不添加 HTTP 路由。
-- [ ] **Step 3:** 两个定点 IT、legacy `test` 与 `git diff --check` 通过后提交 `feat(cloud): publish and replay product snapshots reliably`。
+- [x] **Step 1:** 先写 Rabbit/MySQL IT：无 confirm 不标记 `PUBLISHED`；broker 断开时交易事实及 NEW Outbox 仍提交；恢复后投递持久消息；旧 owner 迟到 confirm 被 token/租约条件拒绝。replay 测试固定 `MAX(sequence_no)` 后模拟并发新事件与 owner 接管，证明已发布旧事件可重发且新事件照常发布。运行两个定点 IT 见预期失败。
+- [x] **Step 2:** 新增生产 `ProductSnapshotPublisherDispatcher`，从源 Outbox 领取快照并用 `RabbitTemplate` correlated confirm 发布；旧 `SearchOutboxDispatcher` 保持实验七真实搜索回归入口，且生产配置明确只启用新 scheduler，不同时领取源 Outbox。完成 SQL 固定 `WHERE id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=? AND lease_until>CURRENT_TIMESTAMP(6)`；broker 未就绪时暂停领取，实际投递失败最多三次并转可检查失败终态，保留行由本机 replay 接管，不丢掉唯一恢复路径。`V32` 创建单行 replay claim 进度与高水位表，`replayOnce` 通过数据库时间领取、有界批量、token fencing 和 confirm 重新发布保留的完整事件；只允许本机运维调用，不添加 HTTP 路由。
+- [x] **Step 3:** 两个定点 IT、legacy `test` 与 `git diff --check` 通过后提交 `feat(cloud): publish and replay product snapshots reliably`。实验分支 `755725d`，真实 ProductPublisherIT 5/5、ProductReplayIT 2/2，legacy 单元 137/137、Flyway 到 v32，均 0 failures/errors/skipped、BUILD SUCCESS。
 
 ## Task 4: 读库与三库最小权限
 
@@ -94,12 +94,12 @@ VALUES (?,?,?,?,CAST(? AS JSON),2,'NEW',0,CURRENT_TIMESTAMP(6),DEFAULT);
 
 ## Task 5: 消费幂等与索引待办
 
-**Files:** Create `product-read-service/src/main/java/com/example/campusmarket/product/ProductReadApplication.java`, `event/ProductSnapshotDecoder.java`, `event/ProductEventConsumer.java`, `infrastructure/JdbcProductProjection.java`, `infrastructure/JdbcProductInbox.java`, `infrastructure/JdbcProductIndexOutbox.java`, `src/main/resources/application.yml`; create `product-read-service/src/test/java/com/example/campusmarket/product/ProductEventContractTest.java`, `integration/ProductProjectionIT.java`.
+**Files:** Create `product-read-service/src/main/java/com/example/campusmarket/product/ProductReadApplication.java`, `event/ProductSnapshotDecoder.java`, `event/ProductEventConsumer.java`, `event/ProductRabbitListener.java`, `event/ProductRabbitTopology.java`, `infrastructure/JdbcProductProjection.java`, `infrastructure/JdbcProductInbox.java`, `infrastructure/JdbcProductIndexOutbox.java`, `src/main/resources/application.yml`; create `product-read-service/src/test/java/com/example/campusmarket/product/ProductEventContractTest.java`, `event/ProductRabbitListenerTest.java`, `integration/ProductProjectionIT.java`, `integration/ProductRabbitConsumerIT.java`.
 
 **Interfaces:** Produce `ProductSnapshotDecoder.decode(byte[]): ProductSnapshotEvent`, `ProductEventConsumer.accept(byte[])`, `JdbcProductProjection.apply(ProductSnapshotEvent): boolean`; return false for same/lower aggregate version and create index Outbox only for true.
 
-- [ ] **Step 1:** 写失败契约测试：缺字段、错误类型、未知字段/版本/状态被 decoder 拒绝；真实 MySQL/Rabbit 测试同 eventId 两次仅一条 Inbox、乱序版本 3 后版本 2 不回退，合法版本的投影、Inbox 与 index Outbox 同事务提交，异常回滚时不 ACK。运行定点 `test`/`verify` 确认行为缺失。
-- [ ] **Step 2:** decoder 使用 Jackson `FAIL_ON_UNKNOWN_PROPERTIES`、严格 record 构造器和字段类型；消费使用手动 ACK、`@Transactional` 的应用用例；投影 SQL 使用 `INSERT ... ON DUPLICATE KEY UPDATE` 且每列仅在 `VALUES(aggregate_version)>aggregate_version` 时更新，Inbox eventId 唯一，索引 Outbox 与投影条件写同事务。
+- [x] **Step 1:** 写失败契约测试：缺字段、错误类型、未知字段/版本/状态被 decoder 拒绝；真实 MySQL/Rabbit 测试同 eventId 两次仅一条 Inbox、乱序版本 3 后版本 2 不回退，合法版本的投影、Inbox 与 index Outbox 同事务提交，异常回滚时不 ACK。运行定点 `test`/`verify` 确认行为缺失。红灯依次为缺 decoder、缺消费者/JDBC 类、读服务独立启动时 Rabbit 队列 404。
+- [x] **Step 2:** decoder 使用 Jackson `FAIL_ON_UNKNOWN_PROPERTIES`、严格 record 构造器和字段类型；消费使用手动 ACK、`@Transactional` 的应用用例；先条件 `UPDATE ... WHERE aggregate_version < ?`，并发首次投影时 `INSERT` 冲突后重试条件 UPDATE。Inbox eventId 唯一，索引 Outbox 与投影条件写同事务。读服务自行声明与源发布端一致的持久队列和死信拓扑。
 
 ```sql
 UPDATE product_projection SET title=?, description=?, category=?, unit_price_fen=?,
@@ -107,7 +107,7 @@ UPDATE product_projection SET title=?, description=?, category=?, unit_price_fen
 WHERE listing_id=? AND aggregate_version < ?;
 ```
 
-- [ ] **Step 3:** 运行定点测试与产品模块 `test`，检查源与消费者无生产 Java 依赖；提交 `feat(cloud): consume versioned product projections`。
+- [x] **Step 3:** 运行定点测试与产品模块 `test`，检查源与消费者无生产 Java 依赖；提交 `feat(cloud): consume versioned product projections`。实验分支 `7ae5ca9`、`304f804`、`71a23cd`、`e3aa3ae`、`ff53247`、`d347f2d`；产品单元 18/18、真实 MySQL 投影 3/3、真实 Rabbit/MySQL 消费 2/2、直连 HTTP/JWKS 安全 4/4，均 0 failures/errors/skipped、BUILD SUCCESS。
 
 ## Task 6: 独立搜索、外部版本与在线索引重建
 
