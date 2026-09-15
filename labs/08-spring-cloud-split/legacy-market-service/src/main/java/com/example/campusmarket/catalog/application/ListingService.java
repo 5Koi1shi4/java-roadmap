@@ -78,7 +78,7 @@ public class ListingService {
             if (!listings.hasMedia(listingId)) throw new IllegalStateException("商品至少需要一张媒体");
             listing.publish();
             Listing saved = listings.save(listing);
-            searchOutbox.enqueue(saved, "LISTING_PUBLISHED");
+            searchOutbox.enqueue(saved.id(), saved.version(), "LISTING_PUBLISHED");
             if (metrics != null) AfterCommitMetrics.record(() -> metrics.recordListingPublished("SUCCESS"));
             return saved;
         } catch (RestrictionException rejected) {
@@ -95,7 +95,7 @@ public class ListingService {
         Listing listing = owned(sellerId, listingId);
         listing.takeOffSale();
         listings.save(listing);
-        searchOutbox.enqueue(listing, "LISTING_OFF_SALE");
+        searchOutbox.enqueue(listing.id(), listing.version(), "LISTING_OFF_SALE");
     }
 
     public ListingRepository.MediaRecord addMedia(UUID sellerId, UUID listingId, String filename,

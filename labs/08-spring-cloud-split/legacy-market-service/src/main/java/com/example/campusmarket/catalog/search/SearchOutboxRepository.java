@@ -9,9 +9,9 @@ import org.springframework.stereotype.Repository;
 import org.springframework.context.annotation.Profile;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.time.Instant;
 
 /** 商品事实更新事务内写入的搜索 outbox。 */
 @Repository
@@ -43,13 +43,39 @@ public class SearchOutboxRepository {
         SearchSchema.requireEventType(eventType);
         try {
             gate.assertWritable();
-            String payload = mapper.writeValueAsString(Map.of("listingId", listingId.toString()));
+            ProductSnapshotEvent event = snapshotEvent(listingId, aggregateVersion, eventType);
+            String payload = mapper.writeValueAsString(event);
             jdbc.update("""
-                INSERT INTO search_outbox(id,listing_id,aggregate_version,event_type,payload,status,attempt_count,available_at,created_at)
-                VALUES (?,?,?,?,CAST(? AS JSON),'NEW',0,CURRENT_TIMESTAMP(6),DEFAULT)
-                """, UUID.randomUUID().toString(), listingId.toString(), aggregateVersion, eventType, payload);
+                INSERT INTO search_outbox(id,listing_id,aggregate_version,event_type,payload,schema_version,
+                                          status,attempt_count,available_at,created_at)
+                VALUES (?,?,?,?,CAST(? AS JSON),2,'NEW',0,CURRENT_TIMESTAMP(6),DEFAULT)
+                """, event.eventId().toString(), event.listingId().toString(), event.aggregateVersion(),
+                event.eventType(), payload);
         } catch (JsonProcessingException e) {
             throw new IllegalStateException("搜索事件序列化失败", e);
         }
+    }
+
+    private ProductSnapshotEvent snapshotEvent(UUID listingId, long aggregateVersion, String eventType) {
+        return jdbc.query("""
+            SELECT id,title,description,category,unit_price_fen,available_quantity,status,version
+            FROM listing WHERE id=? FOR UPDATE
+            """, rs -> {
+                if (!rs.next()) throw new IllegalArgumentException("商品不存在");
+                long actualVersion = rs.getLong("version");
+                if (actualVersion != aggregateVersion) {
+                    throw new IllegalArgumentException("商品版本与快照版本不一致");
+                }
+                UUID actualListingId = UUID.fromString(rs.getString("id"));
+                ProductSnapshotEvent.ProductSnapshot snapshot = new ProductSnapshotEvent.ProductSnapshot(
+                    rs.getString("title"),
+                    rs.getString("description"),
+                    rs.getString("category"),
+                    rs.getLong("unit_price_fen"),
+                    rs.getInt("available_quantity"),
+                    rs.getString("status"));
+                return new ProductSnapshotEvent(UUID.randomUUID(), actualListingId, aggregateVersion, eventType,
+                    Instant.now(), ProductSnapshotEvent.CURRENT_SCHEMA_VERSION, snapshot);
+            }, listingId.toString());
     }
 }
