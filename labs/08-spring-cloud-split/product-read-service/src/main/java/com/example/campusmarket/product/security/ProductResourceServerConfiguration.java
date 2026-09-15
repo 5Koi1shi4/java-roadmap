@@ -2,8 +2,13 @@ package com.example.campusmarket.product.security;
 
 import jakarta.servlet.DispatcherType;
 import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.actuate.health.Health;
+import org.springframework.boot.actuate.health.HealthIndicator;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
+import org.springframework.cloud.client.discovery.DiscoveryClient;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
@@ -23,6 +28,8 @@ import org.springframework.security.oauth2.jwt.JwtValidators;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.client.RestOperations;
+import co.elastic.clients.elasticsearch.ElasticsearchClient;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -41,6 +48,45 @@ public class ProductResourceServerConfiguration {
     private static final String REQUIRED_AUDIENCE = "campus-market-api";
     private static final Duration ACCESS_TTL = Duration.ofMinutes(15);
     private static final Set<String> ALLOWED_ROLES = Set.of("ROLE_USER", "ROLE_ADMIN");
+
+    @Bean(name = "productReadinessRestOperations")
+    RestOperations productReadinessRestOperations() {
+        SimpleClientHttpRequestFactory requests = new SimpleClientHttpRequestFactory();
+        requests.setConnectTimeout(1_000);
+        requests.setReadTimeout(3_000);
+        return new RestTemplate(requests);
+    }
+
+    @Bean(name = "jwks")
+    HealthIndicator productJwksReadiness(
+        @Qualifier("productReadinessRestOperations") RestOperations client,
+        @Value("${spring.security.oauth2.resourceserver.jwt.jwk-set-uri}") String jwksUri) {
+        return new JwksReadinessHealthIndicator(client, jwksUri);
+    }
+
+    @Bean(name = "eureka")
+    HealthIndicator productEurekaReadiness(ObjectProvider<DiscoveryClient> discovery,
+        @Qualifier("productReadinessRestOperations") RestOperations client,
+        @Value("${eureka.client.service-url.defaultZone:http://localhost:8761/eureka/}") String zone) {
+        String endpoint = zone.endsWith("/") ? zone + "apps" : zone + "/apps";
+        return new EurekaReadinessHealthIndicator(discovery, () -> {
+            client.getForObject(endpoint, String.class);
+            return true;
+        });
+    }
+
+    @Bean(name = "productSearch")
+    HealthIndicator productSearchReadiness(ObjectProvider<ElasticsearchClient> searchClient) {
+        return () -> {
+            try {
+                ElasticsearchClient client = searchClient.getIfAvailable();
+                return client != null && client.ping().value()
+                    ? Health.up().build() : Health.down().build();
+            } catch (Exception unavailable) {
+                return Health.down().build();
+            }
+        };
+    }
 
     @Bean
     JwtDecoder productJwtDecoder(

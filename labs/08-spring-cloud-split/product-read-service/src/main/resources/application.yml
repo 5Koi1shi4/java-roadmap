@@ -47,6 +47,10 @@ management:
     health:
       probes:
         enabled: true
+      group:
+        readiness:
+          include: readinessState,db,rabbit,jwks,eureka,productSearch
+          show-components: always
 
 eureka:
   client:
