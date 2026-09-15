@@ -74,12 +74,12 @@ VALUES (?,?,?,?,CAST(? AS JSON),2,'NEW',0,CURRENT_TIMESTAMP(6),DEFAULT);
 
 ## Task 3: 确认式发布与保留事件 replay
 
-**Files:** Modify `legacy-market-service/src/main/java/com/example/campusmarket/catalog/search/SearchOutboxDispatcher.java`, `SearchOutboxScheduler.java`, `SearchOutboxClaimer.java`; create `ProductEventPublisher.java`, `ProductReplayService.java`, `legacy-market-service/src/main/resources/db/migration/V32__product_replay_claim.sql`, `legacy-market-service/src/test/java/com/example/campusmarket/integration/ProductPublisherIT.java`, `ProductReplayIT.java`.
+**Files:** Keep legacy `SearchOutboxDispatcher.java`/`SearchOutboxScheduler.java` and their experiment-seven integration tests intact; create `legacy-market-service/src/main/java/com/example/campusmarket/catalog/search/ProductSnapshotPublisherDispatcher.java`, `ProductSnapshotPublisherScheduler.java`, `ProductSnapshotOutboxClaimer.java`, `ProductEventPublisher.java`, `ProductReplayService.java`, `legacy-market-service/src/main/resources/db/migration/V32__product_replay_claim.sql`, `legacy-market-service/src/test/java/com/example/campusmarket/integration/ProductPublisherIT.java`, `ProductReplayIT.java`; modify `legacy-market-service/src/main/resources/application.yml` to opt in only the new production publisher.
 
 **Interfaces:** Produce `ProductEventPublisher.publish(ProductSnapshotEvent)` and `ProductReplayService.replayOnce(int limit)`; Rabbit topology is durable exchange `campus.product.snapshot`, durable queue `campus.product.read`, persistent delivery, no auto retry of HTTP writes.
 
 - [ ] **Step 1:** 先写 Rabbit/MySQL IT：无 confirm 不标记 `PUBLISHED`；broker 断开时交易事实及 NEW Outbox 仍提交；恢复后投递持久消息；旧 owner 迟到 confirm 被 token/租约条件拒绝。replay 测试固定 `MAX(sequence_no)` 后模拟并发新事件与 owner 接管，证明已发布旧事件可重发且新事件照常发布。运行两个定点 IT 见预期失败。
-- [ ] **Step 2:** 把现有 projector 调用替换成 `RabbitTemplate` correlated confirm。完成 SQL 固定 `WHERE id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=? AND lease_until>CURRENT_TIMESTAMP(6)`；短暂故障释放为 NEW 并延迟，不在三次之后丢掉唯一恢复路径。`V32` 创建单行 replay claim 进度与高水位表，`replayOnce` 通过数据库时间领取、有界批量、token fencing 和 confirm 重新发布保留的完整事件；只允许本机运维调用，不添加 HTTP 路由。
+- [ ] **Step 2:** 新增生产 `ProductSnapshotPublisherDispatcher`，从源 Outbox 领取快照并用 `RabbitTemplate` correlated confirm 发布；旧 `SearchOutboxDispatcher` 保持实验七真实搜索回归入口，且生产配置明确只启用新 scheduler，不同时领取源 Outbox。完成 SQL 固定 `WHERE id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=? AND lease_until>CURRENT_TIMESTAMP(6)`；broker 未就绪时暂停领取，实际投递失败最多三次并转可检查失败终态，保留行由本机 replay 接管，不丢掉唯一恢复路径。`V32` 创建单行 replay claim 进度与高水位表，`replayOnce` 通过数据库时间领取、有界批量、token fencing 和 confirm 重新发布保留的完整事件；只允许本机运维调用，不添加 HTTP 路由。
 - [ ] **Step 3:** 两个定点 IT、legacy `test` 与 `git diff --check` 通过后提交 `feat(cloud): publish and replay product snapshots reliably`。
 
 ## Task 4: 读库与三库最小权限
