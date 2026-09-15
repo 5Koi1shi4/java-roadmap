@@ -18,7 +18,7 @@
 **/failsafe-reports/
 **/target/
 
-# Compose 只复制以下四个预构建运行 JAR；其余 target 内容（包括测试类路径和测试 JAR）继续排除。
+# Compose 只复制以下五个预构建运行 JAR；其余 target 内容（包括测试类路径和测试 JAR）继续排除。
 !discovery-server/target/
 discovery-server/target/**
 !discovery-server/target/discovery-server-0.0.1-SNAPSHOT.jar
@@ -28,6 +28,9 @@ identity-service/target/**
 !legacy-market-service/target/
 legacy-market-service/target/**
 !legacy-market-service/target/legacy-market-service-0.0.1-SNAPSHOT.jar
+!product-read-service/target/
+product-read-service/target/**
+!product-read-service/target/product-read-service-0.0.1-SNAPSHOT.jar
 !api-gateway/target/
 api-gateway/target/**
 !api-gateway/target/api-gateway-0.0.1-SNAPSHOT.jar
