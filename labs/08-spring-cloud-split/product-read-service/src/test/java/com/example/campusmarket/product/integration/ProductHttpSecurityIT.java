@@ -46,7 +46,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** 直接访问商品读服务也必须独立验 RS256/JWKS 与严格身份声明。 */
 @SpringBootTest(classes = ProductHttpSecurityIT.TestApplication.class,
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-    properties = "eureka.client.enabled=false")
+    properties = {"eureka.client.enabled=false",
+        "management.endpoint.health.group.readiness.include=readinessState"})
 class ProductHttpSecurityIT {
     private static final String ISSUER = "http://gateway.test";
     private static final String AUDIENCE = "campus-market-api";

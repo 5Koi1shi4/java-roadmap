@@ -22,7 +22,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** 读服务只拥有 product_read_db，运行账号不能跨入事实库，也不能执行 DDL。 */
-@SpringBootTest(classes = ProductDatabaseOwnershipIT.TestApplication.class)
+@SpringBootTest(classes = ProductDatabaseOwnershipIT.TestApplication.class,
+    properties = "management.endpoint.health.group.readiness.include=readinessState")
 class ProductDatabaseOwnershipIT {
 
     private static final String FLYWAY_HISTORY = "flyway_schema_history";

@@ -26,7 +26,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** 实际 RabbitMQ 投递与 ACK/死信，读服务自行声明协议队列。 */
 @Testcontainers
 @SpringBootTest(classes = ProductReadApplication.class, properties = {
-    "spring.main.web-application-type=none", "eureka.client.enabled=false"
+    "spring.main.web-application-type=none", "eureka.client.enabled=false",
+    "management.endpoint.health.group.readiness.include=readinessState"
 })
 class ProductRabbitConsumerIT {
     private static final String PRODUCT_EXCHANGE = "campus.product.snapshot";

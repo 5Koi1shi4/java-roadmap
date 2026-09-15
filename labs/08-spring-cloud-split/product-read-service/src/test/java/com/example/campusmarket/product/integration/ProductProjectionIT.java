@@ -25,7 +25,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /** 真实读库证明 Inbox 幂等、版本条件写与索引待办一致。 */
 @SpringBootTest(classes = ProductProjectionIT.TestApplication.class, properties = {
     "spring.main.web-application-type=none", "eureka.client.enabled=false",
-    "spring.rabbitmq.listener.simple.auto-startup=false"
+    "spring.rabbitmq.listener.simple.auto-startup=false",
+    "management.endpoint.health.group.readiness.include=readinessState"
 })
 class ProductProjectionIT {
     @Autowired private ProductEventConsumer consumer;
