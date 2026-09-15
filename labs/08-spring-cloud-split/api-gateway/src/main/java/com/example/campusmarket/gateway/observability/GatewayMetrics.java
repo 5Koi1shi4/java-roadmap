@@ -4,6 +4,7 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import org.springframework.stereotype.Component;
+import org.springframework.core.Ordered;
 import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
@@ -11,10 +12,11 @@ import reactor.core.publisher.Mono;
 
 import java.time.Duration;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Gateway 低基数请求与依赖指标。 */
 @Component
-public final class GatewayMetrics implements WebFilter {
+public final class GatewayMetrics implements WebFilter, Ordered {
     public static final String IDENTITY_ROUTE = "identity-api";
     public static final String LEGACY_ROUTE = "legacy-api";
     public static final String UNMATCHED_ROUTE = "unmatched";
@@ -26,12 +28,32 @@ public final class GatewayMetrics implements WebFilter {
     }
 
     @Override
+    public int getOrder() {
+        return Ordered.HIGHEST_PRECEDENCE;
+    }
+
+    @Override
     public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
         Timer.Sample sample = Timer.start(registry);
         String route = routeFor(exchange.getRequest().getPath().value());
+        AtomicBoolean recorded = new AtomicBoolean();
+        exchange.getResponse().beforeCommit(() -> {
+            if (recorded.compareAndSet(false, true)) {
+                recordRequest(exchange, route, sample, null);
+            }
+            return Mono.empty();
+        });
         return chain.filter(exchange)
-            .doOnSuccess(ignored -> recordRequest(exchange, route, sample, null))
-            .doOnError(error -> recordRequest(exchange, route, sample, error));
+            .doOnSuccess(ignored -> {
+                if (recorded.compareAndSet(false, true)) {
+                    recordRequest(exchange, route, sample, null);
+                }
+            })
+            .doOnError(error -> {
+                if (recorded.compareAndSet(false, true)) {
+                    recordRequest(exchange, route, sample, error);
+                }
+            });
     }
 
     public void recordJwksRefreshSuccess() {
@@ -75,6 +97,11 @@ public final class GatewayMetrics implements WebFilter {
         int status = exchange.getResponse().getStatusCode() == null
             ? 500 : exchange.getResponse().getStatusCode().value();
         String result = resultFor(status, error);
+        Counter.builder("campus.gateway.route")
+            .tag("route", route)
+            .tag("result", result)
+            .register(registry)
+            .increment();
         Counter.builder("gateway.requests")
             .tag("route", route)
             .tag("result", result)

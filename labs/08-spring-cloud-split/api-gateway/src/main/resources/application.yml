@@ -28,8 +28,8 @@ spring:
               predicates:
                 - Path=/api/**
           httpclient:
-            connect-timeout: 2000
-            response-timeout: 5s
+            connect-timeout: 1000
+            response-timeout: 3s
   security:
     oauth2:
       resourceserver:
@@ -50,6 +50,10 @@ management:
     health:
       probes:
         enabled: true
+      group:
+        readiness:
+          include: readinessState,jwks,eureka
+          show-components: always
 
 eureka:
   client:

@@ -25,7 +25,7 @@ spring:
     oauth2:
       resourceserver:
         jwt:
-          jwk-set-uri: ${CAMPUS_MARKET_IDENTITY_JWKS_URI:http://localhost:18081/.well-known/jwks.json}
+          jwk-set-uri: ${CAMPUS_MARKET_IDENTITY_JWKS_URI:http://localhost:18081/api/auth/.well-known/jwks.json}
           issuer-uri: ${CAMPUS_MARKET_JWT_ISSUER:http://gateway.test}
 server:
   servlet:
@@ -39,6 +39,14 @@ management:
     web:
       exposure:
         include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,jwks,eureka
+          show-components: always
 
 eureka:
   client:

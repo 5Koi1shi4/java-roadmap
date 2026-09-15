@@ -138,14 +138,60 @@ public final class CloudApplicationCluster implements AutoCloseable {
         return URI.create("http://127.0.0.1:" + gatewayPort + "/");
     }
 
+    /** 仅供运维健康探针测试访问身份服务；业务旅程仍只经过 Gateway。 */
+    public URI identityBaseUri() {
+        return URI.create("http://127.0.0.1:" + identityPort + "/");
+    }
+
+    /** 仅供运维探针验收访问注册中心，不承载客户端业务请求。 */
+    public URI discoveryHttpBaseUri() {
+        return URI.create("http://127.0.0.1:" + discoveryPort + "/");
+    }
+
+
     /** 只关闭身份服务上下文，供失败路径测试检查其他上下文。 */
     public void stopIdentity() {
         identity = closeContext(identity);
     }
 
+    /** 在身份服务故障断言后，以同一端口和配置重新启动身份服务。 */
+    public void restartIdentity() {
+        if (identity != null) {
+            return;
+        }
+        String redisUrl = "redis://" + redis.getHost() + ":" + redis.getMappedPort(6379);
+        identity = new SpringApplicationBuilder(IdentityServiceApplication.class)
+            .web(WebApplicationType.SERVLET)
+            .properties(configLocation(identityConfiguration))
+            .profiles("local")
+            .initializers(highPriorityProperties(identityProperties(discoveryBaseUri.toString(), redisUrl)))
+            .run();
+        assertPort(identity, identityPort, "identity-service");
+        awaitRegistry(Set.of("IDENTITY-SERVICE", "LEGACY-MARKET-SERVICE", "API-GATEWAY"));
+    }
+
     /** 只关闭市场服务上下文，供失败路径测试检查其他上下文。 */
     public void stopLegacy() {
         legacy = closeContext(legacy);
+    }
+
+    /** 在市场服务故障断言后，以同一端口和配置重新启动市场服务。 */
+    public void restartLegacy() {
+        if (legacy != null) {
+            return;
+        }
+        String redisUrl = "redis://" + redis.getHost() + ":" + redis.getMappedPort(6379);
+        String identityJwks = "http://127.0.0.1:" + identityPort
+            + "/api/auth/.well-known/jwks.json";
+        legacy = new SpringApplicationBuilder(LegacyMarketApplication.class)
+            .web(WebApplicationType.SERVLET)
+            .properties(configLocation(legacyConfiguration))
+            .profiles("local")
+            .initializers(highPriorityProperties(legacyProperties(
+                discoveryBaseUri.toString(), redisUrl, identityJwks)))
+            .run();
+        assertPort(legacy, legacyPort, "legacy-market-service");
+        awaitRegistry(Set.of("IDENTITY-SERVICE", "LEGACY-MARKET-SERVICE", "API-GATEWAY"));
     }
 
     /** 先停止客户端后关闭 Eureka 上下文。 */

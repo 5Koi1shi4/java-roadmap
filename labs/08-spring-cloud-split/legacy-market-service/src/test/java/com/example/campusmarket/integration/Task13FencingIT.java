@@ -42,6 +42,7 @@ import static org.assertj.core.api.Assertions.assertThat;
     "campus.market.payment.reconciliation.enabled=false",
     "spring.rabbitmq.listener.simple.auto-startup=false",
     "spring.rabbitmq.listener.direct.auto-startup=false",
+    "management.endpoint.health.group.readiness.include=readinessState",
     "campus.market.metrics.refresh-ms=3600000"
 })
 class Task13FencingIT extends Task11MySqlContainers {

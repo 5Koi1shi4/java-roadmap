@@ -1,7 +1,11 @@
 package com.example.campusmarket.gateway.security;
 
 import com.example.campusmarket.gateway.error.GatewayErrorWriter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.netty.channel.ChannelOption;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.convert.converter.Converter;
@@ -24,7 +28,13 @@ import org.springframework.security.oauth2.jwt.ReactiveJwtDecoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import org.springframework.security.oauth2.server.resource.authentication.ReactiveJwtAuthenticationConverterAdapter;
 import org.springframework.security.web.server.SecurityWebFilterChain;
+import org.springframework.security.web.server.ServerAuthenticationEntryPoint;
+import org.springframework.security.web.server.authentication.ServerAuthenticationEntryPointFailureHandler;
+import org.springframework.cloud.client.discovery.DiscoveryClient;
+import org.springframework.http.client.reactive.ReactorClientHttpConnector;
+import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.server.ServerWebExchange;
+import reactor.netty.http.client.HttpClient;
 import reactor.core.publisher.Mono;
 
 import java.time.Clock;
@@ -45,10 +55,46 @@ public class GatewaySecurityConfiguration {
     private static final Duration ACCESS_TOKEN_TTL = Duration.ofMinutes(15);
     private static final Set<String> ALLOWED_ROLES = Set.of("ROLE_USER", "ROLE_ADMIN");
 
+    @Bean(name = "jwksWebClient")
+    WebClient jwksWebClient() {
+        HttpClient httpClient = HttpClient.create()
+            .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 1_000)
+            .responseTimeout(Duration.ofSeconds(3));
+        return WebClient.builder()
+            .clientConnector(new ReactorClientHttpConnector(httpClient))
+            .build();
+    }
+
+    @Bean(name = "jwks")
+    JwksReadinessHealthIndicator jwksReadinessIndicator(
+        @Qualifier("jwksWebClient") WebClient jwksWebClient,
+        @Value("${spring.security.oauth2.resourceserver.jwt.jwk-set-uri}") String jwkSetUri) {
+        return new JwksReadinessHealthIndicator(jwksWebClient, jwkSetUri);
+    }
+
+    @Bean(name = "eureka")
+    EurekaReadinessHealthIndicator eurekaReadinessIndicator(
+        ObjectProvider<DiscoveryClient> discoveryClientProvider,
+        @Qualifier("jwksWebClient") WebClient client,
+        @Value("${eureka.client.service-url.defaultZone:http://localhost:8761/eureka/}")
+        String eurekaZone) {
+        String endpoint = eurekaZone.endsWith("/") ? eurekaZone + "apps" : eurekaZone + "/apps";
+        return new EurekaReadinessHealthIndicator(discoveryClientProvider,
+            () -> {
+                client.get().uri(endpoint).retrieve().toBodilessEntity().block(Duration.ofSeconds(4));
+                return true;
+            });
+    }
+
     @Bean
     SecurityWebFilterChain gatewaySecurityFilterChain(ServerHttpSecurity http,
                                                        ReactiveJwtDecoder jwtDecoder,
                                                        GatewayErrorWriter errorWriter) {
+        ServerAuthenticationEntryPoint authenticationEntryPoint = (exchange, ignored) ->
+            errorWriter.write(exchange, HttpStatus.UNAUTHORIZED, "UNAUTHENTICATED", "未认证");
+        ServerAuthenticationEntryPointFailureHandler authenticationFailureHandler =
+            new ServerAuthenticationEntryPointFailureHandler(authenticationEntryPoint);
+        authenticationFailureHandler.setRethrowAuthenticationServiceException(false);
         return http.csrf(ServerHttpSecurity.CsrfSpec::disable)
             .securityContextRepository(org.springframework.security.web.server.context
                 .NoOpServerSecurityContextRepository.getInstance())
@@ -73,9 +119,8 @@ public class GatewaySecurityConfiguration {
                 .anyExchange().denyAll())
             .oauth2ResourceServer(oauth2 -> oauth2
                 .jwt(jwt -> jwt.jwtAuthenticationConverter(jwtAuthenticationConverter()))
-                .authenticationEntryPoint((exchange, ignored) ->
-                    errorWriter.write(exchange, HttpStatus.UNAUTHORIZED,
-                        "UNAUTHENTICATED", "未认证")))
+                .authenticationEntryPoint(authenticationEntryPoint)
+                .authenticationFailureHandler(authenticationFailureHandler))
             .build();
     }
 
@@ -83,7 +128,9 @@ public class GatewaySecurityConfiguration {
     ReactiveJwtDecoder reactiveJwtDecoder(
         @Value("${spring.security.oauth2.resourceserver.jwt.jwk-set-uri}") String jwkSetUri,
         @Value("${spring.security.oauth2.resourceserver.jwt.issuer-uri}") String issuer,
-        @Value("${campus.market.jwt.audience:campus-market-api}") String audience) {
+        @Value("${campus.market.jwt.audience:campus-market-api}") String audience,
+        @Qualifier("jwksWebClient") WebClient jwksWebClient,
+        MeterRegistry meterRegistry) {
         if (!REQUIRED_AUDIENCE.equals(audience)) {
             throw new IllegalArgumentException("JWT audience must be " + REQUIRED_AUDIENCE);
         }
@@ -91,11 +138,12 @@ public class GatewaySecurityConfiguration {
             throw new IllegalArgumentException("JWT resource server properties are required");
         }
         NimbusReactiveJwtDecoder decoder = NimbusReactiveJwtDecoder.withJwkSetUri(jwkSetUri)
+            .webClient(jwksWebClient)
             .jwsAlgorithm(SignatureAlgorithm.RS256)
             .build();
         OAuth2TokenValidator<Jwt> standard = JwtValidators.createDefaultWithIssuer(issuer);
         decoder.setJwtValidator(new StrictJwtValidator(standard, issuer, audience, Clock.systemUTC()));
-        return decoder;
+        return new JwtFailureMetrics(decoder, meterRegistry);
     }
 
     private static Converter<Jwt, Mono<AbstractAuthenticationToken>> jwtAuthenticationConverter() {

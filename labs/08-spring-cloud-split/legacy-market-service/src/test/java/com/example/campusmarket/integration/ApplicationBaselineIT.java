@@ -17,7 +17,8 @@ import javax.sql.DataSource;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.NONE)
+@SpringBootTest(classes = LegacyMarketApplication.class, webEnvironment = SpringBootTest.WebEnvironment.NONE,
+    properties = "management.endpoint.health.group.readiness.include=readinessState")
 @ActiveProfiles("test")
 class ApplicationBaselineIT {
     @Autowired

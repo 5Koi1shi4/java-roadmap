@@ -3,7 +3,10 @@ package com.example.campusmarket.security;
 import com.example.campusmarket.api.SecurityConfiguration;
 import jakarta.servlet.DispatcherType;
 import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.actuate.health.HealthIndicator;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -21,6 +24,10 @@ import org.springframework.security.oauth2.jwt.JwtValidators;
 import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 import org.springframework.security.authentication.AbstractAuthenticationToken;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.cloud.client.discovery.DiscoveryClient;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.web.client.RestOperations;
+import org.springframework.web.client.RestTemplate;
 
 import java.io.IOException;
 import java.time.Clock;
@@ -41,6 +48,34 @@ public class ResourceServerConfiguration {
         return new JwtPrincipalConverter();
     }
 
+    @Bean(name = "jwksRestOperations")
+    RestOperations jwksRestOperations() {
+        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+        requestFactory.setConnectTimeout(1_000);
+        requestFactory.setReadTimeout(3_000);
+        return new RestTemplate(requestFactory);
+    }
+
+    @Bean(name = "jwks")
+    HealthIndicator jwksReadinessIndicator(
+        @Qualifier("jwksRestOperations") RestOperations restOperations,
+        @Value("${spring.security.oauth2.resourceserver.jwt.jwk-set-uri}") String jwkSetUri) {
+        return new JwksReadinessHealthIndicator(restOperations, jwkSetUri);
+    }
+
+    @Bean(name = "eureka")
+    HealthIndicator eurekaReadinessIndicator(ObjectProvider<DiscoveryClient> discoveryClientProvider,
+                                             @Qualifier("jwksRestOperations") RestOperations client,
+                                             @Value("${eureka.client.service-url.defaultZone:http://localhost:8761/eureka/}")
+                                             String eurekaZone) {
+        String endpoint = eurekaZone.endsWith("/") ? eurekaZone + "apps" : eurekaZone + "/apps";
+        return new EurekaReadinessHealthIndicator(discoveryClientProvider,
+            () -> {
+                client.getForObject(endpoint, String.class);
+                return true;
+            });
+    }
+
     @Bean
     JwtDecoder jwtDecoder(
         @Value("${spring.security.oauth2.resourceserver.jwt.jwk-set-uri}") String jwkSetUri,
@@ -50,10 +85,11 @@ public class ResourceServerConfiguration {
             throw new IllegalArgumentException("JWT audience must be " + REQUIRED_AUDIENCE);
         }
         NimbusJwtDecoder decoder = NimbusJwtDecoder.withJwkSetUri(jwkSetUri)
+            .restOperations(jwksRestOperations())
             .jwsAlgorithm(SignatureAlgorithm.RS256)
             .build();
         decoder.setJwtValidator(new StrictJwtValidator(issuer, audience, Clock.systemUTC()));
-        return decoder;
+        return new ResourceServerJwtDecoder(decoder);
     }
 
     @Bean
@@ -64,6 +100,7 @@ public class ResourceServerConfiguration {
             .authorizeHttpRequests(auth -> auth
                 .dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                 .requestMatchers("/api/payment-webhooks/**", "/actuator/health",
+                    "/actuator/health/**",
                     "/simulated-provider/**", "/api/simulated-provider/**").permitAll()
                 .requestMatchers("/api/admin/**").hasRole("ADMIN")
                 .requestMatchers(org.springframework.http.HttpMethod.OPTIONS, "/**").permitAll()
