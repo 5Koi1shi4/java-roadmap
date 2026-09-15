@@ -8,8 +8,8 @@ import java.util.Set;
 
 /** Product search port owned by the read service. */
 public interface ProductSearchPort {
-    String READ_ALIAS = "campus-listing-read";
-    String WRITE_ALIAS = "campus-listing-write";
+    String READ_ALIAS = "campus-product-read";
+    String WRITE_ALIAS = "campus-product-write";
 
     Set<String> STATUS_VALUES = Set.of("DRAFT", "ON_SALE", "SOLD_OUT", "OFF_SALE", "TOMBSTONE");
 
