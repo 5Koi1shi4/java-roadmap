@@ -3,6 +3,7 @@ package com.example.campusmarket.gateway;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.cloud.gateway.handler.predicate.PredicateDefinition;
 import org.springframework.cloud.gateway.route.RouteDefinition;
 import org.springframework.cloud.gateway.route.RouteDefinitionLocator;
 import org.springframework.core.env.Environment;
@@ -34,10 +35,29 @@ class ExplicitRoutesTest {
             .block(Duration.ofSeconds(5));
 
         assertThat(routes).isNotNull().extracting(RouteDefinition::getId)
-            .containsExactly("identity-api", "legacy-api");
+            .containsExactly("identity-api", "product-search", "product-listing-search", "legacy-api");
         assertThat(routes.get(0).getUri().toString()).isEqualTo("lb://identity-service");
-        assertThat(routes.get(1).getUri().toString()).isEqualTo("lb://legacy-market-service");
+        assertThat(routes.get(1).getUri().toString()).isEqualTo("lb://product-read-service");
+        assertGetPathRoute(routes.get(1), "/api/search");
+        assertThat(routes.get(2).getUri().toString()).isEqualTo("lb://product-read-service");
+        assertGetPathRoute(routes.get(2), "/api/listings/search");
+        assertThat(routes.get(3).getUri().toString()).isEqualTo("lb://legacy-market-service");
         assertThat(environment.getProperty(
             "spring.cloud.gateway.discovery.locator.enabled", Boolean.class)).isFalse();
+    }
+
+    private static void assertGetPathRoute(RouteDefinition route, String expectedPath) {
+        assertThat(route.getPredicates()).extracting(PredicateDefinition::getName)
+            .contains("Path", "Method");
+        PredicateDefinition path = route.getPredicates().stream()
+            .filter(predicate -> predicate.getName().equals("Path"))
+            .findFirst()
+            .orElseThrow();
+        assertThat(path.getArgs()).containsValue(expectedPath);
+        PredicateDefinition method = route.getPredicates().stream()
+            .filter(predicate -> predicate.getName().equals("Method"))
+            .findFirst()
+            .orElseThrow();
+        assertThat(method.getArgs()).containsValue("GET");
     }
 }

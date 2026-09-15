@@ -24,6 +24,7 @@
         <module>identity-service</module>
         <module>legacy-market-service</module>
         <module>api-gateway</module>
+        <module>product-read-service</module>
     </modules>
 
     <properties>

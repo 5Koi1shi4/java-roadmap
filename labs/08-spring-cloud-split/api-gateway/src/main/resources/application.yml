@@ -23,6 +23,16 @@ spring:
               uri: lb://identity-service
               predicates:
                 - Path=/api/auth/**
+            - id: product-search
+              uri: lb://product-read-service
+              predicates:
+                - Path=/api/search
+                - Method=GET
+            - id: product-listing-search
+              uri: lb://product-read-service
+              predicates:
+                - Path=/api/listings/search
+                - Method=GET
             - id: legacy-api
               uri: lb://legacy-market-service
               predicates:
