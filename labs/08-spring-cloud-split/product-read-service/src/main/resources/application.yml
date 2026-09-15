@@ -1,0 +1,48 @@
+spring:
+  application:
+    name: product-read-service
+  datasource:
+    url: ${PRODUCT_DATABASE_URL:jdbc:mysql://localhost:3306/product_read_db}
+    username: ${PRODUCT_DATABASE_USER:product_app}
+    password: ${PRODUCT_APP_PASSWORD:}
+  flyway:
+    url: ${PRODUCT_DATABASE_URL:jdbc:mysql://localhost:3306/product_read_db}
+    user: ${PRODUCT_MIGRATOR_USER:product_migrator}
+    password: ${PRODUCT_MIGRATOR_PASSWORD:}
+    locations: classpath:db/migration
+  rabbitmq:
+    listener:
+      simple:
+        acknowledge-mode: manual
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+    mapper:
+      allow-coercion-of-scalars: false
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+
+server:
+  servlet:
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_DEFAULT_ZONE:http://localhost:8761/eureka/}

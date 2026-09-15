@@ -5,8 +5,10 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import org.springframework.stereotype.Component;
 
 /** 只在消息协议入口解码；未知字段、类型和值均快速失败。 */
+@Component
 public final class ProductSnapshotDecoder {
     private static final int MAX_EVENT_BYTES = 64 * 1024;
 
