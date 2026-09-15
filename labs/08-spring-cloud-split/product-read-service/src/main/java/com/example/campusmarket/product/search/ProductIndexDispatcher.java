@@ -11,7 +11,7 @@ import java.util.Objects;
 /** 从读侧索引待办投递商品投影；ES 失败时保留待办以便重试。 */
 @Component
 public final class ProductIndexDispatcher {
-    private static final Duration RETRY_DELAY = Duration.ZERO;
+    private static final Duration RETRY_DELAY = Duration.ofSeconds(1);
 
     private final JdbcTemplate jdbc;
     private final ProductIndexOutboxClaimer claimer;
@@ -35,6 +35,10 @@ public final class ProductIndexDispatcher {
                     claimer.markRetry(claim, RETRY_DELAY);
                     continue;
                 }
+                if (!claimer.isCurrentOpen(claim)) {
+                    claimer.markRetry(claim, RETRY_DELAY);
+                    continue;
+                }
                 if (projection != null && isVisible(projection)) {
                     search.index(projection.document());
                 } else {
@@ -43,6 +47,10 @@ public final class ProductIndexDispatcher {
                     search.tombstone(claim.listingId(), version);
                 }
                 search.refresh();
+                if (!claimer.isCurrentOpen(claim)) {
+                    claimer.markRetry(claim, RETRY_DELAY);
+                    continue;
+                }
                 if (claimer.markPublished(claim)) {
                     published++;
                 }

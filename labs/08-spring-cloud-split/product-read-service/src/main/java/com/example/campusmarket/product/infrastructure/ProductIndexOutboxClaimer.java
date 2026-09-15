@@ -18,7 +18,7 @@ import java.util.UUID;
 
 /** 读侧索引待办的数据库时间领取与 owner/token fencing。 */
 @Repository
-public final class ProductIndexOutboxClaimer {
+public class ProductIndexOutboxClaimer {
     private static final RowMapper<OutboxRow> ROW_MAPPER = ProductIndexOutboxClaimer::mapRow;
 
     private final JdbcTemplate jdbc;
@@ -38,6 +38,16 @@ public final class ProductIndexOutboxClaimer {
         }
         long leaseMicros = micros(lease, false);
         List<Claim> claims = transaction.execute(status -> {
+            Gate gate = jdbc.queryForObject("""
+                SELECT mode,generation
+                FROM product_rebuild_gate
+                WHERE id=1
+                FOR UPDATE
+                """, (result, row) -> new Gate(result.getString("mode"),
+                    result.getLong("generation")));
+            if (gate == null || !"OPEN".equals(gate.mode())) {
+                return List.of();
+            }
             List<OutboxRow> candidates = jdbc.query("""
                 SELECT id,listing_id,aggregate_version
                 FROM product_index_outbox
@@ -68,7 +78,7 @@ public final class ProductIndexOutboxClaimer {
                     throw new IllegalStateException("索引待办租约缺失");
                 }
                 claimed.add(new Claim(candidate.id(), candidate.listingId(), candidate.aggregateVersion(),
-                        ownerId, token, leaseUntil.toInstant()));
+                        gate.generation(), ownerId, token, leaseUntil.toInstant()));
             }
             return claimed;
         });
@@ -82,6 +92,7 @@ public final class ProductIndexOutboxClaimer {
             UPDATE product_index_outbox
             SET status='PUBLISHED',owner_id=NULL,claim_token=NULL,lease_until=NULL
             WHERE id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=?
+              AND lease_until > CURRENT_TIMESTAMP(6)
             """, claim.id(), claim.ownerId(), claim.claimToken()) == 1);
     }
 
@@ -94,7 +105,21 @@ public final class ProductIndexOutboxClaimer {
             SET status='NEW',owner_id=NULL,claim_token=NULL,lease_until=NULL,
                 available_at=TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6))
             WHERE id=? AND status='PUBLISHING' AND owner_id=? AND claim_token=?
+              AND lease_until > CURRENT_TIMESTAMP(6)
             """, delayMicros, claim.id(), claim.ownerId(), claim.claimToken()) == 1);
+    }
+
+    /** 领取后、写入 ES 前后确认重建门禁仍处于同一代且允许正常投递。 */
+    public boolean isCurrentOpen(Claim claim) {
+        Objects.requireNonNull(claim, "领取记录不能为空");
+        Gate gate = jdbc.queryForObject("""
+            SELECT mode,generation
+            FROM product_rebuild_gate
+            WHERE id=1
+            """, (result, row) -> new Gate(result.getString("mode"),
+                result.getLong("generation")));
+        return gate != null && "OPEN".equals(gate.mode())
+                && gate.generation() == claim.gateGeneration();
     }
 
     private static void validateOwner(String ownerId) {
@@ -127,11 +152,15 @@ public final class ProductIndexOutboxClaimer {
     private record OutboxRow(String id, String listingId, long aggregateVersion) {
     }
 
-    public record Claim(String id, String listingId, long aggregateVersion, String ownerId,
-                        String claimToken, Instant leaseUntil) {
+    private record Gate(String mode, long generation) {
+    }
+
+    public record Claim(String id, String listingId, long aggregateVersion, long gateGeneration,
+                        String ownerId, String claimToken, Instant leaseUntil) {
         public Claim {
             if (id == null || id.isBlank() || listingId == null || listingId.isBlank()
-                    || aggregateVersion <= 0 || ownerId == null || ownerId.isBlank()
+                    || aggregateVersion <= 0 || gateGeneration <= 0
+                    || ownerId == null || ownerId.isBlank()
                     || claimToken == null || claimToken.isBlank() || leaseUntil == null) {
                 throw new IllegalArgumentException("索引待办领取记录无效");
             }

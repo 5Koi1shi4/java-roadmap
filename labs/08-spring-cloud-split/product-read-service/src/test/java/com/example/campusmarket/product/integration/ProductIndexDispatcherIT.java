@@ -73,6 +73,11 @@ class ProductIndexDispatcherIT {
     void resetFixture() throws IOException {
         jdbc.update("DELETE FROM product_index_outbox");
         jdbc.update("DELETE FROM product_projection");
+        jdbc.update("""
+            UPDATE product_rebuild_gate
+            SET mode='OPEN',generation=1,owner_id=NULL,claim_token=NULL,lease_until=NULL
+            WHERE id=1
+            """);
         deleteInitialSearchIndex();
         search = new ElasticsearchProductSearch(elasticsearch);
         claimer = new ProductIndexOutboxClaimer(jdbc, new DataSourceTransactionManager(dataSource));
@@ -128,7 +133,38 @@ class ProductIndexDispatcherIT {
     }
 
     @Test
-    void ElasticsearchDisconnectReturnsClaimToRetryAndLaterClearsIt() throws IOException {
+    void rebuildGateStopsNewClaimsAndFencesAnExistingGeneration() {
+        UUID listingId = UUID.randomUUID();
+        projection(listingId, 1, "并发编程教材", "并发编程", "教材", 10_000, 1, "ON_SALE");
+        outbox(listingId, 1);
+
+        ProductIndexOutboxClaimer.Claim claim = claimer.claimBatch("worker-a", 1,
+                Duration.ofSeconds(30)).get(0);
+        jdbc.update("""
+            UPDATE product_rebuild_gate
+            SET mode='REBUILDING',generation=2,owner_id='rebuild-test',claim_token=?,
+                lease_until=TIMESTAMPADD(SECOND,30,CURRENT_TIMESTAMP(6))
+            WHERE id=1
+            """, UUID.randomUUID().toString());
+
+        try {
+            assertThat(claimer.claimBatch("worker-b", 1, Duration.ofSeconds(30))).isEmpty();
+            assertThat(claimer.isCurrentOpen(claim)).isFalse();
+            assertThat(claimer.markRetry(claim, Duration.ofSeconds(1))).isTrue();
+            assertThat(jdbc.queryForObject("SELECT status FROM product_index_outbox WHERE listing_id=?",
+                    String.class, listingId.toString())).isEqualTo("NEW");
+        } finally {
+            jdbc.update("""
+                UPDATE product_rebuild_gate
+                SET mode='OPEN',generation=3,owner_id=NULL,claim_token=NULL,lease_until=NULL
+                WHERE id=1
+                """);
+        }
+    }
+
+    @Test
+    void ElasticsearchDisconnectReturnsClaimToRetryAndLaterClearsIt()
+            throws IOException, InterruptedException {
         UUID listingId = UUID.randomUUID();
         projection(listingId, 1, "并发编程教材", "并发编程", "教材", 10_000, 1, "ON_SALE");
         outbox(listingId, 1);
@@ -146,7 +182,13 @@ class ProductIndexDispatcherIT {
         search = new ElasticsearchProductSearch(elasticsearch);
         dispatcher = new ProductIndexDispatcher(jdbc, claimer, search);
 
-        assertThat(dispatcher.dispatchOnce("worker-b", 1, Duration.ofSeconds(30))).isEqualTo(1);
+        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+        while (!"PUBLISHED".equals(jdbc.queryForObject(
+                "SELECT status FROM product_index_outbox WHERE listing_id=?", String.class,
+                listingId.toString())) && System.nanoTime() < deadline) {
+            dispatcher.dispatchOnce("worker-b", 1, Duration.ofSeconds(30));
+            Thread.sleep(100);
+        }
         assertThat(jdbc.queryForObject("SELECT status FROM product_index_outbox WHERE listing_id=?", String.class,
                 listingId.toString())).isEqualTo("PUBLISHED");
         assertThat(search.search(new ProductSearchPort.SearchRequest("并发编程", "教材", null, null, 0, 20))
