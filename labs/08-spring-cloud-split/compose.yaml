@@ -244,6 +244,9 @@ services:
       SPRING_RABBITMQ_USERNAME: "${RABBITMQ_DEFAULT_USER}"
       SPRING_RABBITMQ_PASSWORD: "${RABBITMQ_DEFAULT_PASS}"
       SPRING_ELASTICSEARCH_URIS: http://elasticsearch:9200
+      CAMPUS_MARKET_IDENTITY_JWKS_URI: http://identity-service:8080/api/auth/.well-known/jwks.json
+      CAMPUS_MARKET_JWT_ISSUER: "${CAMPUS_MARKET_JWT_ISSUER}"
+      CAMPUS_MARKET_JWT_AUDIENCE: "${CAMPUS_MARKET_JWT_AUDIENCE}"
       EUREKA_DEFAULT_ZONE: http://discovery-server:8761/eureka/
       EUREKA_INSTANCE_HOSTNAME: product-read-service
       MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED: "true"
@@ -269,6 +272,8 @@ services:
       identity-service:
         condition: service_started
       legacy-market-service:
+        condition: service_started
+      product-read-service:
         condition: service_started
     ports:
       - "127.0.0.1:18080:8080"
