@@ -88,9 +88,9 @@ VALUES (?,?,?,?,CAST(? AS JSON),2,'NEW',0,CURRENT_TIMESTAMP(6),DEFAULT);
 
 **Interfaces:** Produce `product_read_db` app/migrator accounts, `product_projection`, `product_inbox`, `product_index_outbox`, `product_rebuild_gate`, `product_index_cleanup_task`; `SplitDatabaseContainer.productProperties(): Properties` and `productProperties(DynamicPropertyRegistry registry): void` follow the existing identity/market fixture pattern and expose only product DB credentials.
 
-- [ ] **Step 1:** 写三库权限失败 IT，使用真实 MySQL 分别执行 `SELECT` 对方 schema 并断言 `DataAccessException`，验证 Flyway 只创建读侧业务表、投影版本 CHECK 与 Inbox event ID 唯一键。运行定点 `verify` 确认因产品库/迁移缺失而失败。
-- [ ] **Step 2:** 迁移固定 `product_projection(listing_id CHAR(36) PRIMARY KEY, aggregate_version BIGINT NOT NULL, ... status VARCHAR(20) NOT NULL)`，`product_inbox(event_id CHAR(36) PRIMARY KEY, completed_at TIMESTAMP(6) NOT NULL)`，`product_index_outbox(id CHAR(36) PRIMARY KEY, listing_id CHAR(36), aggregate_version BIGINT, status VARCHAR(20), owner_id, claim_token, lease_until, available_at)`；版本正数、数量非负、状态白名单及领取字段 CHECK。脚本用现有 `escape_sql_literal` 处理五个新环境变量，并只授予 product app 本库 DML、migrator 本库 DDL；Compose 不公开新库访问给应用外网络。
-- [ ] **Step 3:** 真实权限 IT、现有 identity/market 权限 IT 与 `git diff --check` 通过后提交 `feat(cloud): isolate product read database`。
+- [x] **Step 1:** 写三库权限失败 IT，使用真实 MySQL 分别执行 `SELECT` 对方 schema 并断言 `DataAccessException`，验证 Flyway 只创建读侧业务表、投影版本 CHECK 与 Inbox event ID 唯一键。运行定点 `verify` 确认因产品库/迁移缺失而失败。红灯为 product_migrator 缺失、MySQL 1045。
+- [x] **Step 2:** 迁移固定 `product_projection(listing_id CHAR(36) PRIMARY KEY, aggregate_version BIGINT NOT NULL, ... status VARCHAR(20) NOT NULL)`，`product_inbox(event_id CHAR(36) PRIMARY KEY, completed_at TIMESTAMP(6) NOT NULL)`，`product_index_outbox(id CHAR(36) PRIMARY KEY, listing_id CHAR(36), aggregate_version BIGINT, status VARCHAR(20), owner_id, claim_token, lease_until, available_at)`；版本正数、数量非负、状态白名单及领取字段 CHECK。脚本用现有 `escape_sql_literal` 处理 `PRODUCT_APP_PASSWORD` 与 `PRODUCT_MIGRATOR_PASSWORD`，并只授予 product app 本库 DML、migrator 本库 DDL；Compose 不公开新库访问给应用外网络。
+- [x] **Step 3:** 真实权限 IT、现有 identity/market 权限 IT 与 `git diff --check` 通过后提交 `feat(cloud): isolate product read database`。实验分支 `cc3dd49`，ProductDatabaseOwnershipIT 6/6、IdentitySchemaIT 4/4，父代理在 Task3 import 修复后复验 DatabaseOwnershipIT 3/3，均为真实 MySQL、0 failures/errors/skipped，BUILD SUCCESS。
 
 ## Task 5: 消费幂等与索引待办
 
