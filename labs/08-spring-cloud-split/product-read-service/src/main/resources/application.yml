@@ -14,6 +14,12 @@ spring:
     listener:
       simple:
         acknowledge-mode: manual
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: ${CAMPUS_MARKET_IDENTITY_JWKS_URI:http://localhost:18081/api/auth/.well-known/jwks.json}
+          issuer-uri: ${CAMPUS_MARKET_JWT_ISSUER:http://gateway.test}
   jackson:
     deserialization:
       fail-on-unknown-properties: true
@@ -46,3 +52,8 @@ eureka:
   client:
     service-url:
       defaultZone: ${EUREKA_DEFAULT_ZONE:http://localhost:8761/eureka/}
+
+campus:
+  market:
+    jwt:
+      audience: ${CAMPUS_MARKET_JWT_AUDIENCE:campus-market-api}

@@ -39,6 +39,19 @@ class ProductEventContractTest {
     }
 
     @Test
+    void rejectsMissingRequiredFieldsAndNullPrimitiveVersion() {
+        assertThatThrownBy(() -> decoder.decode(bytes(validEvent().replace(
+            "\"eventId\":\"11111111-1111-1111-1111-111111111111\",", ""))))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> decoder.decode(bytes(validEvent().replace(
+            "\"title\":\"并发编程教材\",", ""))))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> decoder.decode(bytes(validEvent().replace(
+            "\"aggregateVersion\":3", "\"aggregateVersion\":null"))))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void rejectsUnsupportedVersionAndNegativeStock() {
         assertThatThrownBy(() -> decoder.decode(bytes(validEvent().replace("\"schemaVersion\":2", "\"schemaVersion\":3"))))
             .isInstanceOf(IllegalArgumentException.class);
