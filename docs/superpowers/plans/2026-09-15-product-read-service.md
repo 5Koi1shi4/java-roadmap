@@ -61,8 +61,8 @@ assertThat(routes.get(1).getPredicates()).extracting(PredicateDefinition::getNam
 
 **Interfaces:** Produce `ProductSnapshotEvent(UUID eventId, UUID listingId, long aggregateVersion, String eventType, Instant occurredAt, int schemaVersion, ProductSnapshot snapshot)` and `SearchOutboxRepository.enqueue(UUID listingId, long version, String eventType)`; all event payload fields are read from `listing` inside caller transaction.
 
-- [ ] **Step 1:** 写真实 MySQL 失败测试：事务回滚后 `search_outbox` 无新行；发布和库存归零后事件分别包含 `ON_SALE`/`SOLD_OUT` 及精确版本；隔离、重新上架和报损保持数量非负且各有事件。运行 `mvnw.cmd -pl legacy-market-service -am '-Dit.test=ProductSnapshotOutboxIT' verify`，确认事件缺字段或缺行的预期失败。
-- [ ] **Step 2:** `V31` 增加 `schema_version INT NOT NULL DEFAULT 2` 与 `ck_search_outbox_schema_version CHECK (schema_version=2)`；保留 `id` 作 event ID，`sequence_no` 作 replay 高水位。`ProductSnapshotEvent` 构造器拒绝 null、非法 UUID/范围、未知状态/类型、非 2 版本。源 repository 在市场事务内 `SELECT` 商品快照并把完整 JSON 与版本写 Outbox，不在 publisher 阶段重新读取商品；`JdbcInventoryRepository` 的条件 UPDATE 与原事务仍不变。
+- [x] **Step 1:** 写真实 MySQL 失败测试：事务回滚后 `search_outbox` 无新行；发布和库存归零后事件分别包含 `ON_SALE`/`SOLD_OUT` 及精确版本；隔离、重新上架和报损保持数量非负且各有事件。运行 `mvnw.cmd -pl legacy-market-service -am '-Dit.test=ProductSnapshotOutboxIT' '-Dfailsafe.failIfNoSpecifiedTests=false' verify`，确认事件缺字段或缺行的预期失败。红灯因 `schema_version` 列缺失。
+- [x] **Step 2:** `V31` 增加 `schema_version INT NOT NULL DEFAULT 2` 与 `ck_search_outbox_schema_version CHECK (schema_version=2)`；保留 `id` 作 event ID，`sequence_no` 作 replay 高水位。`ProductSnapshotEvent` 构造器拒绝 null、非法 UUID/范围、未知状态/类型、非 2 版本。源 repository 在市场事务内 `SELECT` 商品快照并把完整 JSON 与版本写 Outbox，不在 publisher 阶段重新读取商品；`JdbcInventoryRepository` 的条件 UPDATE 与原事务仍不变。
 
 ```sql
 INSERT INTO search_outbox(id,listing_id,aggregate_version,event_type,payload,schema_version,
@@ -70,7 +70,7 @@ INSERT INTO search_outbox(id,listing_id,aggregate_version,event_type,payload,sch
 VALUES (?,?,?,?,CAST(? AS JSON),2,'NEW',0,CURRENT_TIMESTAMP(6),DEFAULT);
 ```
 
-- [ ] **Step 3:** 定点 IT 和全部 legacy 单元 `test` 通过后检查源事件没有 object key、签名 URL、Token 或校方字段；只暂存任务文件并提交 `feat(cloud): capture immutable product snapshots in market outbox`。
+- [x] **Step 3:** 定点 IT 和全部 legacy 单元 `test` 通过后检查源事件没有 object key、签名 URL、Token 或校方字段；只暂存任务文件并提交 `feat(cloud): capture immutable product snapshots in market outbox`。执行证据：实验分支 `c3f7482`，父代理复验真实 MySQL 定点 IT 4 项 0 failures/errors/skipped，Reactor BUILD SUCCESS。
 
 ## Task 3: 确认式发布与保留事件 replay
 
