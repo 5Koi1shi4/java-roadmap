@@ -3,7 +3,7 @@ package com.example.campusmarket.gateway.security;
 import com.example.campusmarket.testsupport.TestJwtFactory;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.boot.actuate.health.Status;
+import org.springframework.boot.health.contributor.Status;
 import org.springframework.cloud.client.ServiceInstance;
 import org.springframework.cloud.client.discovery.DiscoveryClient;
 import org.springframework.http.HttpStatus;

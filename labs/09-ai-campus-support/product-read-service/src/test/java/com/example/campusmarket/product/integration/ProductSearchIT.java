@@ -4,11 +4,10 @@ import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch.indices.AnalyzeResponse;
 import co.elastic.clients.json.jackson.JacksonJsonpMapper;
 import co.elastic.clients.transport.ElasticsearchTransport;
-import co.elastic.clients.transport.rest_client.RestClientTransport;
+import co.elastic.clients.transport.rest5_client.Rest5ClientTransport;
+import co.elastic.clients.transport.rest5_client.low_level.Rest5Client;
 import com.example.campusmarket.product.search.ProductSearchPort;
 import com.example.campusmarket.product.search.ElasticsearchProductSearch;
-import org.apache.http.HttpHost;
-import org.elasticsearch.client.RestClient;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -20,6 +19,7 @@ import org.testcontainers.utility.DockerImageName;
 import org.testcontainers.images.builder.ImageFromDockerfile;
 
 import java.io.IOException;
+import java.net.URI;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Set;
@@ -29,22 +29,22 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** 读侧使用独立 SmartCN Elasticsearch 索引，并以外部版本保护搜索视图。 */
 @Testcontainers
 class ProductSearchIT {
-    private static final String IMAGE_NAME = "campus-market/product-read-elasticsearch:8.18.8-smartcn";
+    private static final String IMAGE_NAME = "campus-market/product-read-elasticsearch:9.4.5-smartcn";
     private static final ImageFromDockerfile SMART_CN_IMAGE = new ImageFromDockerfile(IMAGE_NAME, true)
             .withDockerfile(Path.of("../docker/elasticsearch/Dockerfile"));
 
     @Container
     static final ElasticsearchContainer ELASTICSEARCH = elasticsearchContainer();
 
-    private static RestClient restClient;
+    private static Rest5Client restClient;
     private static ElasticsearchTransport transport;
     private static ElasticsearchClient elasticsearch;
     private ElasticsearchProductSearch search;
 
     @BeforeAll
     static void openClient() {
-        restClient = RestClient.builder(HttpHost.create(ELASTICSEARCH.getHttpHostAddress())).build();
-        transport = new RestClientTransport(restClient, new JacksonJsonpMapper());
+        restClient = Rest5Client.builder(URI.create("http://" + ELASTICSEARCH.getHttpHostAddress())).build();
+        transport = new Rest5ClientTransport(restClient, new JacksonJsonpMapper());
         elasticsearch = new ElasticsearchClient(transport);
     }
 
@@ -150,7 +150,7 @@ class ProductSearchIT {
 
     private static ElasticsearchContainer elasticsearchContainer() {
         DockerImageName compatibleImage = DockerImageName.parse(IMAGE_NAME)
-                .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8");
+                .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:9.4.5");
         ElasticsearchContainer container = new ElasticsearchContainer(compatibleImage)
                 .withEnv("xpack.security.enabled", "false")
                 .withEnv("ES_JAVA_OPTS", "-Xms128m -Xmx192m")
@@ -167,7 +167,7 @@ class ProductSearchIT {
     }
 
     private Set<String> productIndexes() throws IOException {
-        return elasticsearch.indices().getAlias(a -> a.name(ProductSearchPort.READ_ALIAS)).result().keySet();
+        return elasticsearch.indices().getAlias(a -> a.name(ProductSearchPort.READ_ALIAS)).aliases().keySet();
     }
 
     private static ProductSearchPort.ProductDocument document(String id, String title, String description,

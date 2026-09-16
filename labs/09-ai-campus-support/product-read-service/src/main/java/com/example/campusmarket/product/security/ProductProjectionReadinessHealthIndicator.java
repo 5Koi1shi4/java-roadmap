@@ -4,8 +4,8 @@ import com.example.campusmarket.product.infrastructure.JdbcProductReadinessRepos
 import com.example.campusmarket.product.event.ProductRabbitTopology;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.actuate.health.Health;
-import org.springframework.boot.actuate.health.HealthIndicator;
+import org.springframework.boot.health.contributor.Health;
+import org.springframework.boot.health.contributor.HealthIndicator;
 import org.springframework.stereotype.Component;
 
 import java.util.Objects;

@@ -40,7 +40,7 @@ public abstract class SharedContainers {
         .withNetworkAliases("rabbitmq");
 
     private static final ImageFromDockerfile ELASTICSEARCH_IMAGE = new ImageFromDockerfile(
-        "campus-market/elasticsearch:8.18.8-smartcn", true)
+        "campus-market/elasticsearch:9.4.5-smartcn", true)
         .withDockerfile(Path.of("../docker/elasticsearch/Dockerfile"));
     protected static final ElasticsearchContainer ELASTICSEARCH = elasticsearchContainer();
 
@@ -76,8 +76,8 @@ public abstract class SharedContainers {
     }
 
     private static ElasticsearchContainer elasticsearchContainer() {
-        DockerImageName compatibleImage = DockerImageName.parse("campus-market/elasticsearch:8.18.8-smartcn")
-            .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8");
+        DockerImageName compatibleImage = DockerImageName.parse("campus-market/elasticsearch:9.4.5-smartcn")
+            .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:9.4.5");
         ElasticsearchContainer container = SharedElasticsearchContainerFactory.create(compatibleImage)
             .withNetwork(NETWORK)
             .withNetworkAliases("elasticsearch");

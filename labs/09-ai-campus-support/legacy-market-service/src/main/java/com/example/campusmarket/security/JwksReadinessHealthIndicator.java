@@ -4,8 +4,8 @@ import com.nimbusds.jose.jwk.JWKSet;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.jwk.KeyUse;
 import com.nimbusds.jose.jwk.RSAKey;
-import org.springframework.boot.actuate.health.Health;
-import org.springframework.boot.actuate.health.HealthIndicator;
+import org.springframework.boot.health.contributor.Health;
+import org.springframework.boot.health.contributor.HealthIndicator;
 import org.springframework.web.client.RestOperations;
 
 import java.util.Objects;

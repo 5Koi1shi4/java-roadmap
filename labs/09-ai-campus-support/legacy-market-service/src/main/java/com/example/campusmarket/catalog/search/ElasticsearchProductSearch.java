@@ -249,7 +249,7 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
 
     private Set<String> aliasMembers(String alias) throws IOException {
         var response = client.indices().getAlias(g -> g.name(alias));
-        return response.result().keySet();
+        return response.aliases().keySet();
     }
 
     record AliasTransition(Set<String> previousIndexes) {
@@ -271,7 +271,7 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
     Set<String> readCurrentReadIndexes() {
         try {
             var response = client.indices().getAlias(g -> g.name(READ_ALIAS));
-            return Set.copyOf(response.result().keySet());
+            return Set.copyOf(response.aliases().keySet());
         } catch (IOException e) {
             throw new SearchUnavailableException("读取搜索别名失败", e);
         }
@@ -347,7 +347,7 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
         initializeIfNeeded();
         try {
             var response = client.indices().getAlias(g -> g.name(WRITE_ALIAS));
-            return Set.copyOf(response.result().keySet());
+            return Set.copyOf(response.aliases().keySet());
         } catch (IOException e) {
             throw new SearchUnavailableException("读取写别名失败", e);
         }

@@ -1,6 +1,9 @@
 spring:
   application:
     name: legacy-market-service
+  elasticsearch:
+    connection-timeout: ${CAMPUS_MARKET_ELASTICSEARCH_CONNECTION_TIMEOUT:2s}
+    socket-timeout: ${CAMPUS_MARKET_ELASTICSEARCH_SOCKET_TIMEOUT:2s}
   jackson:
     deserialization:
       fail-on-unknown-properties: true
@@ -73,16 +76,15 @@ spring:
       on-profile: test
   autoconfigure:
     exclude:
-      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
-      - org.springframework.boot.autoconfigure.jdbc.DataSourceTransactionManagerAutoConfiguration
-      - org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration
-      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
-      - org.springframework.boot.autoconfigure.data.redis.RedisReactiveAutoConfiguration
-      - org.springframework.boot.autoconfigure.data.redis.RedisRepositoriesAutoConfiguration
-      - org.springframework.boot.autoconfigure.amqp.RabbitAutoConfiguration
-      - org.springframework.boot.autoconfigure.elasticsearch.ElasticsearchClientAutoConfiguration
-      - org.springframework.boot.autoconfigure.elasticsearch.ElasticsearchRestClientAutoConfiguration
-      - org.springframework.boot.autoconfigure.data.elasticsearch.ElasticsearchDataAutoConfiguration
+      - org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration
+      - org.springframework.boot.jdbc.autoconfigure.DataSourceTransactionManagerAutoConfiguration
+      - org.springframework.boot.flyway.autoconfigure.FlywayAutoConfiguration
+      - org.springframework.boot.data.redis.autoconfigure.DataRedisAutoConfiguration
+      - org.springframework.boot.data.redis.autoconfigure.DataRedisReactiveAutoConfiguration
+      - org.springframework.boot.data.redis.autoconfigure.DataRedisRepositoriesAutoConfiguration
+      - org.springframework.boot.amqp.autoconfigure.RabbitAutoConfiguration
+      - org.springframework.boot.elasticsearch.autoconfigure.ElasticsearchClientAutoConfiguration
+      - org.springframework.boot.elasticsearch.autoconfigure.ElasticsearchRestClientAutoConfiguration
 
 eureka:
   client:

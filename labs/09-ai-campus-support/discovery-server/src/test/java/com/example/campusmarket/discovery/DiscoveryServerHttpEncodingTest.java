@@ -4,7 +4,8 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.boot.resttestclient.TestRestTemplate;
+import org.springframework.boot.resttestclient.autoconfigure.AutoConfigureTestRestTemplate;
 import org.springframework.context.annotation.Bean;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpEntity;
@@ -16,7 +17,6 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.test.context.ActiveProfiles;
 
-import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.List;
 
@@ -27,6 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
     properties = "server.port=0")
 @ActiveProfiles("test")
+@AutoConfigureTestRestTemplate
 class DiscoveryServerHttpEncodingTest {
     @Autowired
     private TestRestTemplate restTemplate;
@@ -40,8 +41,7 @@ class DiscoveryServerHttpEncodingTest {
             "/actuator/health", HttpMethod.GET, new HttpEntity<>(headers), String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(response.getHeaders().getContentType()).isEqualTo(
-            new MediaType("application", "json", StandardCharsets.UTF_8));
+        assertThat(response.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_JSON);
     }
 
     @Test
@@ -53,8 +53,7 @@ class DiscoveryServerHttpEncodingTest {
             "/test/utf8", HttpMethod.GET, new HttpEntity<>(headers), String.class);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(response.getHeaders().getContentType()).isEqualTo(
-            new MediaType("application", "json", StandardCharsets.UTF_8));
+        assertThat(response.getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_JSON);
         assertThat(response.getBody()).isEqualTo("{\"message\":\"发现中心正常\"}");
     }
 

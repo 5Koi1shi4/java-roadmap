@@ -2,7 +2,7 @@ package com.example.campusmarket.product.api;
 
 import com.example.campusmarket.product.search.ProductSearchPort;
 import com.example.campusmarket.product.security.ProductProjectionReadinessHealthIndicator;
-import org.springframework.boot.actuate.health.Health;
+import org.springframework.boot.health.contributor.Health;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.web.servlet.MockMvc;

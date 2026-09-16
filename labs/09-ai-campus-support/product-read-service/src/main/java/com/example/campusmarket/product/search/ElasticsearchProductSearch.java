@@ -360,7 +360,7 @@ public class ElasticsearchProductSearch implements ProductSearchPort {
 
     private Set<String> aliasMembers(String alias, String message) {
         try {
-            return Set.copyOf(client.indices().getAlias(get -> get.name(alias)).result().keySet());
+            return Set.copyOf(client.indices().getAlias(get -> get.name(alias)).aliases().keySet());
         } catch (IOException | RuntimeException failure) {
             throw new SearchUnavailableException(message, failure);
         }

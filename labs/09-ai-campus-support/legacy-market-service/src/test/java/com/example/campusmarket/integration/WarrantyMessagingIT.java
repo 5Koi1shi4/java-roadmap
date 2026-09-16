@@ -13,7 +13,7 @@ import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
@@ -45,7 +45,7 @@ class WarrantyMessagingIT extends Task12RabbitMySqlContainers {
     @Autowired OutboxDispatcher dispatcher;
     @Autowired RabbitTemplate rabbit;
     @Autowired EventEnvelopeCodec codec;
-    @MockBean RefundService refunds;
+    @MockitoBean RefundService refunds;
 
     @Test
     void outboxConfirmRoutesToWarrantyInboxAndReplayIsIdempotent() {

@@ -56,7 +56,7 @@ services:
   elasticsearch:
     build:
       context: ./docker/elasticsearch
-    image: campus-market/elasticsearch:8.18.8-smartcn
+    image: campus-market/elasticsearch:9.4.5-smartcn
     restart: "no"
     ports:
       - "127.0.0.1:9203:9200"

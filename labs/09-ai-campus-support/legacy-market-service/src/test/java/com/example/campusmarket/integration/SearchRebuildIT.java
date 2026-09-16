@@ -488,8 +488,8 @@ class SearchRebuildIT extends SharedContainers {
             SearchRebuildService.RebuildReport secondReport = secondResult.get(30, TimeUnit.SECONDS);
 
             assertThat(secondReport.index()).isNotEqualTo(firstReport.index());
-            assertThat(elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.READ_ALIAS)).result()).hasSize(1).containsKey(secondReport.index());
-            assertThat(elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.WRITE_ALIAS)).result()).hasSize(1).containsKey(secondReport.index());
+            assertThat(elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.READ_ALIAS)).aliases()).hasSize(1).containsKey(secondReport.index());
+            assertThat(elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.WRITE_ALIAS)).aliases()).hasSize(1).containsKey(secondReport.index());
             assertThat(jdbc.queryForObject("SELECT status FROM search_index_cleanup_task WHERE index_name=?", String.class, firstReport.index()))
                 .isEqualTo("NEW");
         } finally {
@@ -693,8 +693,8 @@ class SearchRebuildIT extends SharedContainers {
     private Set<String> allAliasMembersFromRawClient() {
         try {
             Set<String> members = new java.util.LinkedHashSet<>();
-            members.addAll(elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.READ_ALIAS)).result().keySet());
-            members.addAll(elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.WRITE_ALIAS)).result().keySet());
+            members.addAll(elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.READ_ALIAS)).aliases().keySet());
+            members.addAll(elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.WRITE_ALIAS)).aliases().keySet());
             return members;
         } catch (java.io.IOException failure) {
             throw new IllegalStateException(failure);
@@ -1100,8 +1100,8 @@ class SearchRebuildIT extends SharedContainers {
         SearchRebuildReconciler coldReconciler = new SearchRebuildReconciler(
             new SearchGateRepository(new JdbcTemplate(dataSource)), new SearchAliasCoordinator(dataSource), coldSearch);
         assertThat(coldReconciler.runOnce()).isEqualTo(SearchRebuildReconciler.ReconcileResult.UNCHANGED);
-        Set<String> readMembers = elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.READ_ALIAS)).result().keySet();
-        Set<String> writeMembers = elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.WRITE_ALIAS)).result().keySet();
+        Set<String> readMembers = elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.READ_ALIAS)).aliases().keySet();
+        Set<String> writeMembers = elasticsearchClient.indices().getAlias(g -> g.name(ProductSearchPort.WRITE_ALIAS)).aliases().keySet();
         assertThat(readMembers).hasSize(1);
         assertThat(writeMembers).containsExactlyElementsOf(readMembers);
     }

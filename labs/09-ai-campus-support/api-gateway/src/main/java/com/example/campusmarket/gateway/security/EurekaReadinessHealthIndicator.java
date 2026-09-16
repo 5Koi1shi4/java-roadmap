@@ -1,8 +1,8 @@
 package com.example.campusmarket.gateway.security;
 
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.boot.actuate.health.Health;
-import org.springframework.boot.actuate.health.ReactiveHealthIndicator;
+import org.springframework.boot.health.contributor.Health;
+import org.springframework.boot.health.contributor.ReactiveHealthIndicator;
 import org.springframework.cloud.client.discovery.DiscoveryClient;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;

@@ -3,7 +3,8 @@ package com.example.campusmarket.product.integration;
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.json.jackson.JacksonJsonpMapper;
 import co.elastic.clients.transport.ElasticsearchTransport;
-import co.elastic.clients.transport.rest_client.RestClientTransport;
+import co.elastic.clients.transport.rest5_client.Rest5ClientTransport;
+import co.elastic.clients.transport.rest5_client.low_level.Rest5Client;
 import com.example.campusmarket.product.search.ElasticsearchProductSearch;
 import com.example.campusmarket.product.search.ProductSearchPort;
 import com.example.campusmarket.product.infrastructure.ProductIndexOutboxClaimer;
@@ -12,8 +13,6 @@ import com.example.campusmarket.product.infrastructure.ProductRebuildGateReposit
 import com.example.campusmarket.product.search.ProductIndexDispatcher;
 import com.example.campusmarket.product.search.ProductIndexCleanupWorker;
 import com.example.campusmarket.testsupport.SplitDatabaseContainer;
-import org.apache.http.HttpHost;
-import org.elasticsearch.client.RestClient;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -30,6 +29,7 @@ import org.testcontainers.utility.DockerImageName;
 
 import javax.sql.DataSource;
 import java.io.IOException;
+import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
@@ -45,7 +45,7 @@ import static org.mockito.Mockito.when;
 /** 真实 MySQL + SmartCN ES 验证读侧索引待办、fencing 与可重试投递。 */
 @Testcontainers
 class ProductIndexDispatcherIT {
-    private static final String ES_IMAGE = "campus-market/product-read-elasticsearch:8.18.8-smartcn";
+    private static final String ES_IMAGE = "campus-market/product-read-elasticsearch:9.4.5-smartcn";
     private static final ImageFromDockerfile SMART_CN_IMAGE = new ImageFromDockerfile(ES_IMAGE, true)
             .withDockerfile(Path.of("../docker/elasticsearch/Dockerfile"));
 
@@ -54,7 +54,7 @@ class ProductIndexDispatcherIT {
 
     private static JdbcTemplate jdbc;
     private static DataSource dataSource;
-    private static RestClient restClient;
+    private static Rest5Client restClient;
     private static ElasticsearchTransport transport;
     private static ElasticsearchClient elasticsearch;
     private ProductIndexOutboxClaimer claimer;
@@ -362,7 +362,7 @@ class ProductIndexDispatcherIT {
 
     private static ElasticsearchContainer elasticsearchContainer() {
         DockerImageName image = DockerImageName.parse(ES_IMAGE)
-                .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8");
+                .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:9.4.5");
         ElasticsearchContainer container = new ElasticsearchContainer(image)
                 .withEnv("xpack.security.enabled", "false")
                 .withEnv("ES_JAVA_OPTS", "-Xms128m -Xmx192m")
@@ -372,8 +372,8 @@ class ProductIndexDispatcherIT {
     }
 
     private static void openSearchClient() {
-        restClient = RestClient.builder(HttpHost.create(ELASTICSEARCH.getHttpHostAddress())).build();
-        transport = new RestClientTransport(restClient, new JacksonJsonpMapper());
+        restClient = Rest5Client.builder(URI.create("http://" + ELASTICSEARCH.getHttpHostAddress())).build();
+        transport = new Rest5ClientTransport(restClient, new JacksonJsonpMapper());
         elasticsearch = new ElasticsearchClient(transport);
     }
 

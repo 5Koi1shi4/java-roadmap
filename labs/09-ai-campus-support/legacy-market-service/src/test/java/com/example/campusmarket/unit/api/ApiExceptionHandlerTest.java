@@ -19,7 +19,7 @@ class ApiExceptionHandlerTest {
         assertThat(Arrays.asList(handledTypes)).contains(NoResourceFoundException.class);
 
         var response = new ApiExceptionHandler().notFound(
-            new NoResourceFoundException(org.springframework.http.HttpMethod.GET, "/api/private"));
+            new NoResourceFoundException(org.springframework.http.HttpMethod.GET, "/api/private", ""));
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
         assertThat(response.getBody().code()).isEqualTo("RESOURCE_NOT_FOUND");
     }

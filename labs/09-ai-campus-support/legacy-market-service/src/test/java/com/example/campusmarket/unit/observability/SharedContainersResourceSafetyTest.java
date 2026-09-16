@@ -36,8 +36,8 @@ class SharedContainersResourceSafetyTest {
     }
 
     private static ElasticsearchContainer newContainer() {
-        DockerImageName image = DockerImageName.parse("campus-market/elasticsearch:8.18.8-smartcn")
-            .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8");
+        DockerImageName image = DockerImageName.parse("campus-market/elasticsearch:9.4.5-smartcn")
+            .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:9.4.5");
         return SharedElasticsearchContainerFactory.create(image);
     }
 }

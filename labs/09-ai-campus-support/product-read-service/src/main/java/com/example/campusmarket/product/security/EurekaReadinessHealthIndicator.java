@@ -1,8 +1,8 @@
 package com.example.campusmarket.product.security;
 
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.boot.actuate.health.Health;
-import org.springframework.boot.actuate.health.HealthIndicator;
+import org.springframework.boot.health.contributor.Health;
+import org.springframework.boot.health.contributor.HealthIndicator;
 import org.springframework.cloud.client.discovery.DiscoveryClient;
 
 import java.time.Clock;

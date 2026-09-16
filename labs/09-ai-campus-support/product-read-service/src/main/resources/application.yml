@@ -1,6 +1,9 @@
 spring:
   application:
     name: product-read-service
+  elasticsearch:
+    connection-timeout: ${CAMPUS_MARKET_ELASTICSEARCH_CONNECTION_TIMEOUT:2s}
+    socket-timeout: ${CAMPUS_MARKET_ELASTICSEARCH_SOCKET_TIMEOUT:2s}
   datasource:
     url: ${PRODUCT_DATABASE_URL:jdbc:mysql://localhost:3306/product_read_db}
     username: ${PRODUCT_DATABASE_USER:product_app}

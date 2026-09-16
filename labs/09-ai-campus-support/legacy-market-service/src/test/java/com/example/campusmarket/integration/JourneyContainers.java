@@ -14,7 +14,8 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.boot.resttestclient.TestRestTemplate;
+import org.springframework.boot.resttestclient.autoconfigure.AutoConfigureTestRestTemplate;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.util.LinkedMultiValueMap;
@@ -42,6 +43,7 @@ import java.util.stream.Stream;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /** HTTP 旅程共用的断言与 fixture；具体容器由每个阶段的基类独立管理。 */
+@AutoConfigureTestRestTemplate
 abstract class JourneyHttpSupport {
     protected static final String PAYMENT_SECRET = "local-only-payment-secret-change-me";
 
@@ -160,10 +162,10 @@ abstract class TextbookContainers extends JourneyHttpSupport {
     protected static final GenericContainer<?> REDIS = new GenericContainer<>(DockerImageName.parse("redis:7.4.2-alpine"))
         .withNetwork(NETWORK).withNetworkAliases("redis").withExposedPorts(6379);
     private static final ImageFromDockerfile ES_IMAGE = new ImageFromDockerfile(
-        "campus-market/elasticsearch:8.18.8-smartcn", true).withDockerfile(Path.of("../docker/elasticsearch/Dockerfile"));
+        "campus-market/elasticsearch:9.4.5-smartcn", true).withDockerfile(Path.of("../docker/elasticsearch/Dockerfile"));
     protected static final ElasticsearchContainer ELASTICSEARCH = new ElasticsearchContainer(
-        DockerImageName.parse("campus-market/elasticsearch:8.18.8-smartcn")
-            .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8"))
+        DockerImageName.parse("campus-market/elasticsearch:9.4.5-smartcn")
+            .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:9.4.5"))
         .withEnv("xpack.security.enabled", "false")
         .withEnv("ES_JAVA_OPTS", "-Xms128m -Xmx192m")
         .withCreateContainerCmdModifier(cmd -> cmd.getHostConfig().withMemory(TEXTBOOK_ELASTICSEARCH_MEMORY_BYTES))

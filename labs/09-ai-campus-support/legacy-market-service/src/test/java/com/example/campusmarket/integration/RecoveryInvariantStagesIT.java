@@ -125,7 +125,7 @@ class RecoveryInvariantStagesIT {
     private static final class SearchResources {
         private final Network network=Network.newNetwork();
         private final MySQLContainer<?> mysql=mysql(network);
-        private final ImageFromDockerfile image=new ImageFromDockerfile("campus-market/elasticsearch:8.18.8-smartcn",true).withDockerfile(Path.of("../docker/elasticsearch/Dockerfile"));
+        private final ImageFromDockerfile image=new ImageFromDockerfile("campus-market/elasticsearch:9.4.5-smartcn",true).withDockerfile(Path.of("../docker/elasticsearch/Dockerfile"));
         private final ElasticsearchContainer elasticsearch=es(network,image);
         private SearchResources(){Startables.deepStart(Stream.of(mysql,elasticsearch)).join();}
         private void register(DynamicPropertyRegistry r){Base.common(r,mysql);r.add("spring.elasticsearch.uris",()->"http://"+elasticsearch.getHost()+":"+elasticsearch.getMappedPort(9200));r.add("campus.market.storage.endpoint",()->"http://127.0.0.1:1");}
@@ -134,5 +134,5 @@ class RecoveryInvariantStagesIT {
 
     private static MySQLContainer<?> mysql(Network n){return new MySQLContainer<>(DockerImageName.parse("mysql:8.4")).withDatabaseName("campus_market").withUsername("campus_market").withPassword("campus_market_local").withNetwork(n).withCreateContainerCmdModifier(c->c.getHostConfig().withMemory(512L*1024*1024));}
     private static GenericContainer<?> minio(Network n){return new GenericContainer<>(DockerImageName.parse("quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z")).withCommand("server /data --console-address :9001").withEnv("MINIO_ROOT_USER","minioadmin").withEnv("MINIO_ROOT_PASSWORD","minioadmin-local").withNetwork(n).withExposedPorts(9000).waitingFor(Wait.forListeningPort());}
-    private static ElasticsearchContainer es(Network n,ImageFromDockerfile image){ElasticsearchContainer c=new ElasticsearchContainer(DockerImageName.parse("campus-market/elasticsearch:8.18.8-smartcn").asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8")).withEnv("xpack.security.enabled","false").withEnv("ES_JAVA_OPTS","-Xms128m -Xmx192m").withNetwork(n).withCreateContainerCmdModifier(x->x.getHostConfig().withMemory(768L*1024*1024));c.setImage(image);return c;}
+    private static ElasticsearchContainer es(Network n,ImageFromDockerfile image){ElasticsearchContainer c=new ElasticsearchContainer(DockerImageName.parse("campus-market/elasticsearch:9.4.5-smartcn").asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:9.4.5")).withEnv("xpack.security.enabled","false").withEnv("ES_JAVA_OPTS","-Xms128m -Xmx192m").withNetwork(n).withCreateContainerCmdModifier(x->x.getHostConfig().withMemory(768L*1024*1024));c.setImage(image);return c;}
 }

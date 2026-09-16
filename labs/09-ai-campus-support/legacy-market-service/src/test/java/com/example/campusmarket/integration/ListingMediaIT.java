@@ -10,7 +10,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
-import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import com.example.campusmarket.storage.UploadBindingHook;
 
 import java.net.URI;
@@ -43,7 +43,7 @@ class ListingMediaIT extends SharedContainers {
     @LocalServerPort
     private int port;
     @Autowired private JdbcTemplate jdbc;
-    @MockBean private UploadBindingHook bindingHook;
+    @MockitoBean private UploadBindingHook bindingHook;
     private final HttpClient client = HttpClient.newHttpClient();
 
     @Test

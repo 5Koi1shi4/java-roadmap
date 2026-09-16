@@ -1,7 +1,7 @@
 package com.example.campusmarket.gateway.error;
 
 import com.example.campusmarket.gateway.filter.TrustedHeaderFilter;
-import org.springframework.boot.web.reactive.error.ErrorWebExceptionHandler;
+import org.springframework.boot.webflux.error.ErrorWebExceptionHandler;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.http.HttpHeaders;

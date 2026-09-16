@@ -28,7 +28,7 @@ class TrustedHeaderFilterTest {
 
         ServerHttpRequest filtered = new TrustedHeaderFilter().filter(request);
 
-        assertThat(filtered.getHeaders()).doesNotContainKeys(
+        assertThat(filtered.getHeaders().headerNames()).doesNotContain(
             "X-User-Id", "X-User-Roles", "X-Authenticated-User", "X-Internal-Role",
             "Forwarded", "X-Forwarded-For", "X-Real-IP");
         assertThat(filtered.getHeaders().getFirst("Authorization"))

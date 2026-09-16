@@ -67,7 +67,7 @@ public final class TrustedHeaderFilter implements GlobalFilter, WebFilter, Order
 
     private static ServerHttpRequest sanitize(ServerHttpRequest request, String correlationId) {
         return request.mutate().headers(headers -> {
-            headers.keySet().stream()
+            headers.headerNames().stream()
                 .filter(TrustedHeaderFilter::isUntrusted)
                 .toList()
                 .forEach(headers::remove);

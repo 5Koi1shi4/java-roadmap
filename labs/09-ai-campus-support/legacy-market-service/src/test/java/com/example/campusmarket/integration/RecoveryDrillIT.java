@@ -391,6 +391,7 @@ class RecoveryDrillIT {
                 HttpResponse<String> unavailable = HttpClient.newHttpClient().send(
                     HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/api/search?keyword=%E6%95%85%E9%9A%9C&size=20"))
                         .header("Authorization", "Bearer " + ResourceServerTestSupport.token(seller, Set.of("ROLE_USER")))
+                        .timeout(Duration.ofSeconds(10))
                         .GET().build(), HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
                 assertThat(unavailable.statusCode()).isEqualTo(503);
                 searchOutbox.dispatchOnce(10, Duration.ofSeconds(2));
@@ -628,11 +629,11 @@ class RecoveryDrillIT {
             .withNetwork(NETWORK).withNetworkAliases("mysql")
             .withCreateContainerCmdModifier(memoryLimit(MYSQL_MEMORY_BYTES));
         private static final ImageFromDockerfile ES_IMAGE = new ImageFromDockerfile(
-            "campus-market/elasticsearch:8.18.8-smartcn", true)
+            "campus-market/elasticsearch:9.4.5-smartcn", true)
             .withDockerfile(Path.of("../docker/elasticsearch/Dockerfile"));
         protected static final ElasticsearchContainer ES = new ElasticsearchContainer(
-            DockerImageName.parse("campus-market/elasticsearch:8.18.8-smartcn")
-            .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8"))
+            DockerImageName.parse("campus-market/elasticsearch:9.4.5-smartcn")
+            .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:9.4.5"))
             .withEnv("xpack.security.enabled", "false")
             .withEnv("ES_JAVA_OPTS", "-Xms128m -Xmx192m")
             .withCreateContainerCmdModifier(memoryLimit(ELASTICSEARCH_MEMORY_BYTES))
@@ -700,13 +701,13 @@ class RecoveryDrillIT {
     }
 
     private static ImageFromDockerfile smartCnImage() {
-        return new ImageFromDockerfile("campus-market/elasticsearch:8.18.8-smartcn", true)
+        return new ImageFromDockerfile("campus-market/elasticsearch:9.4.5-smartcn", true)
             .withDockerfile(Path.of("../docker/elasticsearch/Dockerfile"));
     }
 
     private static ElasticsearchContainer elasticsearch(Network network, ImageFromDockerfile image, long memoryBytes) {
-        ElasticsearchContainer container = new ElasticsearchContainer(DockerImageName.parse("campus-market/elasticsearch:8.18.8-smartcn")
-            .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8"))
+        ElasticsearchContainer container = new ElasticsearchContainer(DockerImageName.parse("campus-market/elasticsearch:9.4.5-smartcn")
+            .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:9.4.5"))
             .withEnv("xpack.security.enabled", "false").withEnv("ES_JAVA_OPTS", "-Xms128m -Xmx192m")
             .withCreateContainerCmdModifier(DrillContainers.memoryLimit(memoryBytes)).withNetwork(network).withNetworkAliases("elasticsearch");
         container.setImage(image);

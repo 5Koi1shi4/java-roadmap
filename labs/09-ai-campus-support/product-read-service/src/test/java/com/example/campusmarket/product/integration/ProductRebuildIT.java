@@ -3,7 +3,8 @@ package com.example.campusmarket.product.integration;
 import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.json.jackson.JacksonJsonpMapper;
 import co.elastic.clients.transport.ElasticsearchTransport;
-import co.elastic.clients.transport.rest_client.RestClientTransport;
+import co.elastic.clients.transport.rest5_client.Rest5ClientTransport;
+import co.elastic.clients.transport.rest5_client.low_level.Rest5Client;
 import com.example.campusmarket.product.infrastructure.ProductIndexCleanupRepository;
 import com.example.campusmarket.product.infrastructure.ProductRebuildGateRepository;
 import com.example.campusmarket.product.search.ElasticsearchProductSearch;
@@ -12,7 +13,6 @@ import com.example.campusmarket.product.search.ProductSearchPort;
 import com.example.campusmarket.product.search.ProductSearchRebuildService;
 import com.example.campusmarket.product.search.ProductSearchRebuildRecoveryService;
 import com.example.campusmarket.testsupport.SplitDatabaseContainer;
-import org.apache.http.HttpHost;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -31,6 +31,7 @@ import org.testcontainers.utility.DockerImageName;
 
 import javax.sql.DataSource;
 import java.io.IOException;
+import java.net.URI;
 import java.sql.Timestamp;
 import java.nio.file.Path;
 import java.time.Duration;
@@ -44,7 +45,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 /** 真实 product_read_db + SmartCN ES 验证一致性快照、门禁 fencing 与安全清理。 */
 @Testcontainers
 class ProductRebuildIT {
-    private static final String ES_IMAGE = "campus-market/product-read-elasticsearch:8.18.8-smartcn";
+    private static final String ES_IMAGE = "campus-market/product-read-elasticsearch:9.4.5-smartcn";
     private static final ImageFromDockerfile SMART_CN_IMAGE = new ImageFromDockerfile(ES_IMAGE, true)
             .withDockerfile(Path.of("../docker/elasticsearch/Dockerfile"));
 
@@ -277,7 +278,7 @@ class ProductRebuildIT {
 
     private static ElasticsearchContainer elasticsearchContainer() {
         DockerImageName image = DockerImageName.parse(ES_IMAGE)
-                .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8");
+                .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:9.4.5");
         ElasticsearchContainer container = new ElasticsearchContainer(image)
                 .withEnv("xpack.security.enabled", "false")
                 .withEnv("ES_JAVA_OPTS", "-Xms128m -Xmx192m")
@@ -287,14 +288,14 @@ class ProductRebuildIT {
     }
 
     private static void openSearchClient() {
-        org.elasticsearch.client.RestClient restClient = org.elasticsearch.client.RestClient
-                .builder(HttpHost.create(ELASTICSEARCH.getHttpHostAddress())).build();
-        transport = new RestClientTransport(restClient, new JacksonJsonpMapper());
+        Rest5Client restClient = Rest5Client
+                .builder(URI.create("http://" + ELASTICSEARCH.getHttpHostAddress())).build();
+        transport = new Rest5ClientTransport(restClient, new JacksonJsonpMapper());
         elasticsearch = new ElasticsearchClient(transport);
     }
 
     private static void deleteProductIndexes() throws IOException {
-        Set<String> indexes = elasticsearch.indices().get(g -> g.index("campus-product-*")).result().keySet();
+        Set<String> indexes = elasticsearch.indices().get(g -> g.index("campus-product-*")).indices().keySet();
         if (!indexes.isEmpty()) {
             elasticsearch.indices().delete(d -> d.index(String.join(",", indexes)));
         }

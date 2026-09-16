@@ -21,7 +21,8 @@ class SingleExperimentTreeTest {
     }
 
     private static Path gitTopLevel() throws IOException, InterruptedException {
-        Process rootCommand = new ProcessBuilder("git", "rev-parse", "--show-toplevel")
+        Process rootCommand = new ProcessBuilder("git", "-c", "safe.directory=*",
+                "rev-parse", "--show-toplevel")
                 .redirectErrorStream(true)
                 .start();
         String root = new String(rootCommand.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
@@ -30,7 +31,7 @@ class SingleExperimentTreeTest {
     }
 
     private static List<String> trackedFiles(Path repoRoot) throws IOException, InterruptedException {
-        Process trackedCommand = new ProcessBuilder("git", "ls-files")
+        Process trackedCommand = new ProcessBuilder("git", "-c", "safe.directory=*", "ls-files")
                 .directory(repoRoot.toFile())
                 .redirectErrorStream(true)
                 .start();

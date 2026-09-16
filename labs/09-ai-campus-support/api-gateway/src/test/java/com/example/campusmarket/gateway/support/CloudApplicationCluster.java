@@ -12,7 +12,7 @@ import com.netflix.discovery.shared.Application;
 import com.netflix.eureka.EurekaServerContext;
 import org.springframework.boot.WebApplicationType;
 import org.springframework.boot.builder.SpringApplicationBuilder;
-import org.springframework.boot.web.context.WebServerApplicationContext;
+import org.springframework.boot.web.server.context.WebServerApplicationContext;
 import org.springframework.cloud.client.discovery.DiscoveryClient;
 import org.springframework.cloud.gateway.route.RouteDefinitionLocator;
 import org.springframework.context.ApplicationContextInitializer;
@@ -62,7 +62,7 @@ import java.util.stream.Stream;
 public final class CloudApplicationCluster implements AutoCloseable {
     private static final String REDIS_IMAGE = "redis:7.4.2-alpine";
     private static final String RABBIT_IMAGE = "rabbitmq:3.13.7-management";
-    private static final String ELASTICSEARCH_IMAGE = "campus-market/elasticsearch:8.18.8-smartcn";
+    private static final String ELASTICSEARCH_IMAGE = "campus-market/elasticsearch:9.4.5-smartcn";
     private static final String MINIO_IMAGE = "quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z";
     private static final long ELASTICSEARCH_MEMORY_BYTES = 768L * 1024L * 1024L;
     private static final String GATEWAY_WEBFLUX_ENABLED =
@@ -75,12 +75,18 @@ public final class CloudApplicationCluster implements AutoCloseable {
         "eureka.client.restclient.enabled";
     private static final String EUREKA_JERSEY_ENABLED =
         "eureka.client.jersey.enabled";
-    private static final String DATA_SOURCE_AUTO_CONFIGURATION =
-        "org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration";
     private static final String SECURITY_AUTO_CONFIGURATION =
-        "org.springframework.boot.autoconfigure.security.servlet.SecurityAutoConfiguration";
+        "org.springframework.boot.security.autoconfigure.SecurityAutoConfiguration";
+    private static final String SERVLET_WEB_SECURITY_AUTO_CONFIGURATION =
+        "org.springframework.boot.security.autoconfigure.web.servlet.ServletWebSecurityAutoConfiguration";
+    private static final String SECURITY_FILTER_AUTO_CONFIGURATION =
+        "org.springframework.boot.security.autoconfigure.web.servlet.SecurityFilterAutoConfiguration";
+    private static final String USER_DETAILS_AUTO_CONFIGURATION =
+        "org.springframework.boot.security.autoconfigure.UserDetailsServiceAutoConfiguration";
     private static final String MANAGEMENT_SECURITY_AUTO_CONFIGURATION =
-        "org.springframework.boot.actuate.autoconfigure.security.servlet.ManagementWebSecurityAutoConfiguration";
+        "org.springframework.boot.security.autoconfigure.actuate.web.servlet.ManagementWebSecurityAutoConfiguration";
+    private static final String DATA_SOURCE_AUTO_CONFIGURATION =
+        "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration";
     private static final Duration REGISTRY_TIMEOUT = Duration.ofSeconds(30);
     private static final Duration POLL_INTERVAL = Duration.ofMillis(100);
 
@@ -149,7 +155,7 @@ public final class CloudApplicationCluster implements AutoCloseable {
             rabbit = new RabbitMQContainer(DockerImageName.parse(RABBIT_IMAGE));
             rabbit.setPortBindings(List.of(rabbitHostPort + ":5672"));
             DockerImageName compatibleElasticsearchImage = DockerImageName.parse(ELASTICSEARCH_IMAGE)
-                .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:8.18.8");
+                .asCompatibleSubstituteFor("docker.elastic.co/elasticsearch/elasticsearch:9.4.5");
             ImageFromDockerfile smartCnImage = new ImageFromDockerfile(ELASTICSEARCH_IMAGE, true)
                 .withDockerfile(moduleRoot.resolveSibling("docker/elasticsearch/Dockerfile"));
             elasticsearch = new ElasticsearchContainer(compatibleElasticsearchImage)
@@ -210,16 +216,14 @@ public final class CloudApplicationCluster implements AutoCloseable {
         if (product != null) {
             return;
         }
-        product = new SpringApplicationBuilder(ProductReadApplication.class)
-            .web(WebApplicationType.SERVLET)
-            .properties(configLocation(productConfiguration))
-            .profiles("local")
-            .initializers(highPriorityProperties(productProperties(
+        product = applicationBuilder(ProductReadApplication.class, WebApplicationType.SERVLET,
+            productConfiguration, productProperties(
                 discoveryBaseUri.toString(),
                 rabbit.getHost(),
                 rabbit.getMappedPort(5672),
                 elasticsearchUri(),
-                identityJwksUri())))
+                identityJwksUri()))
+            .profiles("local")
             .run();
         assertPort(product, productPort, "product-read-service");
         awaitRegistry(Set.of("IDENTITY-SERVICE", "PRODUCT-READ-SERVICE"));
@@ -268,11 +272,9 @@ public final class CloudApplicationCluster implements AutoCloseable {
             return;
         }
         String redisUrl = "redis://" + redis.getHost() + ":" + redis.getMappedPort(6379);
-        identity = new SpringApplicationBuilder(IdentityServiceApplication.class)
-            .web(WebApplicationType.SERVLET)
-            .properties(configLocation(identityConfiguration))
+        identity = applicationBuilder(IdentityServiceApplication.class, WebApplicationType.SERVLET,
+            identityConfiguration, identityProperties(discoveryBaseUri.toString(), redisUrl))
             .profiles("local")
-            .initializers(highPriorityProperties(identityProperties(discoveryBaseUri.toString(), redisUrl)))
             .run();
         assertPort(identity, identityPort, "identity-service");
         awaitRegistry(registeredApplicationNames());
@@ -289,12 +291,9 @@ public final class CloudApplicationCluster implements AutoCloseable {
             return;
         }
         String redisUrl = "redis://" + redis.getHost() + ":" + redis.getMappedPort(6379);
-        legacy = new SpringApplicationBuilder(LegacyMarketApplication.class)
-            .web(WebApplicationType.SERVLET)
-            .properties(configLocation(legacyConfiguration))
+        legacy = applicationBuilder(LegacyMarketApplication.class, WebApplicationType.SERVLET,
+            legacyConfiguration, legacyProperties(discoveryBaseUri.toString(), redisUrl, identityJwksUri()))
             .profiles("local")
-            .initializers(highPriorityProperties(legacyProperties(
-                discoveryBaseUri.toString(), redisUrl, identityJwksUri())))
             .run();
         assertPort(legacy, legacyPort, "legacy-market-service");
         awaitRegistry(registeredApplicationNames());
@@ -449,39 +448,31 @@ public final class CloudApplicationCluster implements AutoCloseable {
             .run();
         assertPort(discovery, discoveryPort, "discovery-server");
 
-        identity = new SpringApplicationBuilder(IdentityServiceApplication.class)
-            .web(WebApplicationType.SERVLET)
-            .properties(configLocation(identityConfiguration))
+        identity = applicationBuilder(IdentityServiceApplication.class, WebApplicationType.SERVLET,
+            identityConfiguration, identityProperties(zone, redisUrl))
             .profiles("local")
-            .initializers(highPriorityProperties(identityProperties(zone, redisUrl)))
             .run();
         assertPort(identity, identityPort, "identity-service");
         awaitRegistry(Set.of("IDENTITY-SERVICE"));
 
         String identityJwks = identityJwksUri();
-        product = new SpringApplicationBuilder(ProductReadApplication.class)
-            .web(WebApplicationType.SERVLET)
-            .properties(configLocation(productConfiguration))
+        product = applicationBuilder(ProductReadApplication.class, WebApplicationType.SERVLET,
+            productConfiguration, productProperties(
+                zone, rabbit.getHost(), rabbit.getMappedPort(5672), elasticsearchUri(), identityJwks))
             .profiles("local")
-            .initializers(highPriorityProperties(productProperties(
-                zone, rabbit.getHost(), rabbit.getMappedPort(5672), elasticsearchUri(), identityJwks)))
             .run();
         assertPort(product, productPort, "product-read-service");
         awaitRegistry(Set.of("IDENTITY-SERVICE", "PRODUCT-READ-SERVICE"));
 
-        legacy = new SpringApplicationBuilder(LegacyMarketApplication.class)
-            .web(WebApplicationType.SERVLET)
-            .properties(configLocation(legacyConfiguration))
+        legacy = applicationBuilder(LegacyMarketApplication.class, WebApplicationType.SERVLET,
+            legacyConfiguration, legacyProperties(zone, redisUrl, identityJwks))
             .profiles("local")
-            .initializers(highPriorityProperties(legacyProperties(zone, redisUrl, identityJwks)))
             .run();
         assertPort(legacy, legacyPort, "legacy-market-service");
         awaitRegistry(Set.of("IDENTITY-SERVICE", "LEGACY-MARKET-SERVICE", "PRODUCT-READ-SERVICE"));
 
-        gateway = new SpringApplicationBuilder(com.example.campusmarket.gateway.ApiGatewayApplication.class)
-            .web(WebApplicationType.REACTIVE)
-            .properties(configLocation(gatewayConfiguration))
-            .initializers(highPriorityProperties(gatewayProperties(zone, identityJwks)))
+        gateway = applicationBuilder(com.example.campusmarket.gateway.ApiGatewayApplication.class,
+            WebApplicationType.REACTIVE, gatewayConfiguration, gatewayProperties(zone, identityJwks))
             .run();
         assertPort(gateway, gatewayPort, "api-gateway");
         awaitRegistry(registeredApplicationNames());
@@ -496,8 +487,9 @@ public final class CloudApplicationCluster implements AutoCloseable {
         properties.put(EUREKA_RESTCLIENT_ENABLED, true);
         properties.put(EUREKA_JERSEY_ENABLED, false);
         properties.put("spring.autoconfigure.exclude",
-            DATA_SOURCE_AUTO_CONFIGURATION + "," + SECURITY_AUTO_CONFIGURATION + ","
-                + MANAGEMENT_SECURITY_AUTO_CONFIGURATION);
+            String.join(",", SECURITY_AUTO_CONFIGURATION, SERVLET_WEB_SECURITY_AUTO_CONFIGURATION,
+                SECURITY_FILTER_AUTO_CONFIGURATION, USER_DETAILS_AUTO_CONFIGURATION,
+                MANAGEMENT_SECURITY_AUTO_CONFIGURATION, DATA_SOURCE_AUTO_CONFIGURATION));
         properties.put("eureka.server.enable-self-preservation", false);
         properties.put("eureka.server.response-cache-update-interval-ms", 100);
         properties.put("eureka.server.eviction-interval-timer-in-ms", 1_000);
@@ -610,8 +602,8 @@ public final class CloudApplicationCluster implements AutoCloseable {
         Map<String, Object> properties = commonProperties(gatewayPort, zone);
         properties.put(GATEWAY_WEBFLUX_ENABLED, true);
         properties.put(GATEWAY_REDIS_ENABLED, true);
-        properties.put(EUREKA_WEBCLIENT_ENABLED, true);
-        properties.put(EUREKA_RESTCLIENT_ENABLED, false);
+        properties.put(EUREKA_WEBCLIENT_ENABLED, false);
+        properties.put(EUREKA_RESTCLIENT_ENABLED, true);
         properties.put(EUREKA_JERSEY_ENABLED, false);
         properties.put("spring.security.oauth2.resourceserver.jwt.jwk-set-uri", identityJwks);
         return properties;
@@ -703,6 +695,7 @@ public final class CloudApplicationCluster implements AutoCloseable {
     private static SpringApplicationBuilder applicationBuilder(Class<?> source, WebApplicationType type,
                                                                Path configuration, Map<String, Object> overrides) {
         return new SpringApplicationBuilder(source)
+            .sources(IsolatedReactorNettyConfiguration.class)
             .web(type)
             .properties(configLocation(configuration))
             .initializers(highPriorityProperties(overrides));
@@ -769,7 +762,7 @@ public final class CloudApplicationCluster implements AutoCloseable {
         for (Path candidate = location; candidate != null; candidate = candidate.getParent()) {
             if (Files.isRegularFile(candidate.resolve("pom.xml"))) return candidate;
         }
-        throw new IllegalStateException("无法定位 spring-cloud-split 模块根目录：" + location);
+        throw new IllegalStateException("无法定位 ai-campus-support 模块根目录：" + location);
     }
 
     private static void copyMigration(Path source, Path target) {

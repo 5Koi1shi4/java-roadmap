@@ -7,7 +7,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
-import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.boot.resttestclient.TestRestTemplate;
+import org.springframework.boot.resttestclient.autoconfigure.AutoConfigureTestRestTemplate;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
 import org.springframework.context.annotation.Import;
@@ -40,6 +41,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 })
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @Import(WarrantyHttpAclIT.FakeStorageConfig.class)
+@AutoConfigureTestRestTemplate
 class WarrantyHttpAclIT extends Task11MySqlContainers {
     @Autowired JdbcTemplate jdbc;
     @Autowired TestRestTemplate http;

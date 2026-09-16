@@ -116,7 +116,10 @@ class ProductRabbitConsumerIT {
 
     private int queueCount(String queue) {
         Map<?, ?> properties = admin.getQueueProperties(queue);
-        return properties == null ? -1 : (Integer) properties.get(RabbitAdmin.QUEUE_MESSAGE_COUNT);
+        Number count = properties == null
+            ? null
+            : (Number) properties.get(RabbitAdmin.QUEUE_MESSAGE_COUNT);
+        return count == null ? -1 : count.intValue();
     }
 
     private static void await(BooleanSupplier condition) throws InterruptedException {

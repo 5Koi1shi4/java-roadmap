@@ -9,7 +9,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
-import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 
@@ -45,7 +45,7 @@ class ConcurrentOrderIT extends SharedContainers {
     private final JdbcTemplate lockObserver = new JdbcTemplate(
         new DriverManagerDataSource(MYSQL.getJdbcUrl(), "root", MYSQL.getPassword()));
     @Autowired private ObjectMapper objectMapper;
-    @MockBean private com.example.campusmarket.order.application.OrderCreationHook orderCreationHook;
+    @MockitoBean private com.example.campusmarket.order.application.OrderCreationHook orderCreationHook;
     private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
 
     @Test

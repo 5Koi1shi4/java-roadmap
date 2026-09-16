@@ -2,7 +2,7 @@ package com.example.campusmarket.product.api;
 
 import com.example.campusmarket.product.search.ProductSearchPort;
 import com.example.campusmarket.product.security.ProductProjectionReadinessHealthIndicator;
-import org.springframework.boot.actuate.health.Status;
+import org.springframework.boot.health.contributor.Status;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;

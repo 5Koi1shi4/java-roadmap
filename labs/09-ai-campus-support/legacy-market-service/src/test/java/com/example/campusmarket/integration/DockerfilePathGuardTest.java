@@ -23,6 +23,10 @@ class DockerfilePathGuardTest {
         assertThat(Files.isRegularFile(dockerfile))
             .as("从 legacy-market-service 模块目录定位的 Dockerfile")
             .isTrue();
+        assertThat(Files.readString(dockerfile))
+            .as("SmartCN 在线下载必须具备有限重试，避免瞬时网络错误破坏整套验收")
+            .contains("seq 1 3")
+            .contains("elasticsearch-plugin install --batch analysis-smartcn");
 
         List<Path> sources = List.of(
             Path.of("src/test/java/com/example/campusmarket/integration/JourneyContainers.java"),
