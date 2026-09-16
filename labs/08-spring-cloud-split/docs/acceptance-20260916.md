@@ -24,6 +24,8 @@
 
 使用官方 `eclipse-temurin:17-jre` 五应用 Dockerfile 与安装 SmartCN 的 Elasticsearch 镜像，以仓库外随机口令和 PKCS#8/X.509 RSA 密钥运行独立 `campus82smoke` Compose 项目。`docker compose config --quiet`、build、up 均退出 0；五个应用 `/actuator/health` 为 UP，十个 liveness/readiness 探针为 UP，Eureka 的 identity、legacy、product、Gateway 为 4/4，Gateway JWKS HTTP 200 且只有一把公钥。商品投影 readiness 及 `db/eureka/jwks/productSearch/projection/rabbit` 组件均 UP；`campus.product.read` 和专用 `campus.product.manual.failure` 队列各有 0 条消息。
 
-验证后对该独立项目执行 `docker compose down -v`，再核对无活动容器、项目或 `campus82smoke` 卷；临时密钥和随机口令目录在仓库外删除。Compose smoke 证明镜像和首次启动就绪，注册/业务/故障结论仍由上述真实 Testcontainers 测试承担。
+另以新的仓库外临时 RSA 密钥和随机凭据重复隔离启动，等待商品读服务与 Gateway readiness UP 后，本机签发符合 RS256/15 分钟契约的临时测试 Token，直接经镜像 Gateway 请求两条精确路由：`GET /api/search` 与 `GET /api/listings/search` 均 HTTP 200、`application/json`、空库 `total=0`。Token 只用于这两次本地请求，没有输出或保存到仓库。
+
+两次验证后均对独立项目执行 `docker compose down -v`，再核对无活动容器、项目或 `campus82smoke` 卷；临时 Token、密钥和随机口令目录在仓库外删除。Compose smoke 证明镜像和首次启动就绪，注册/业务/故障结论仍由上述真实 Testcontainers 测试承担。
 
 人工复核入口：[商品读服务与恢复边界](product-read-service.md)、[架构](architecture.md)、[迁移边界](migration-boundary.md)、[排障](../TROUBLESHOOTING.md)、[学习日志](../notes/learning-log.md)、[面试追问](../interview/question-bank.md)。

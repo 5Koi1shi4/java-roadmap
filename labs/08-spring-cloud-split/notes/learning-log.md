@@ -7,6 +7,7 @@
 - JDK 17.0.12、Docker Engine 29.7.2；串行 fresh `mvnw.cmd clean test`、`mvnw.cmd clean verify` 均退出 0、六模块 BUILD SUCCESS。最终 142 个 XML 汇总 Surefire 228、Failsafe/Testcontainers 357，共 585 项，全部 0 failures、0 errors、0 skipped。真实五应用旅程和故障恢复、原实验七三轮演练与旧搜索重建 35 项均在同次 `verify` 运行。
 - 官方 JRE 五应用与 SmartCN 镜像的隔离 Compose config/build/up 通过；五应用 health、十个探针均 UP，Eureka 4/4、Gateway JWKS HTTP 200；商品 Rabbit 主队列和专用人工失败队列均为 0。隔离容器、卷、网络及仓库外临时口令/密钥已清理，复查无残留。证据见 [8.2 验收记录](../docs/acceptance-20260916.md)。
 - legacy Failsafe 结束时 Eureka 后台线程触发 Surefire 30 秒强制结束 fork 的日志提示；reactor 仍退出 0，fresh XML 的 280 项 legacy 集成测试为 0 failures/errors/skipped。该提示属于测试进程退出阶段，未作为业务测试失败隐藏。
+- 镜像路由补充：用第二组仓库外随机凭据和 RSA 密钥隔离重启，同一契约的本机短时 Token 经镜像 Gateway 请求 `GET /api/search` 与 `GET /api/listings/search`，两条均 HTTP 200、空库 `total=0`；随后再次删除独立容器、卷、网络和临时密钥，复查无残留。未打印 Token。
 
 ## 2026-09-15：8.2 商品读服务实施中
 
