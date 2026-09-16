@@ -174,3 +174,11 @@
 - Git：实验验收提交 `c72c7f1` 在 `learning/spring-cloud-split`，活动树仅 `.gitignore` 与 `labs/08-spring-cloud-split/**`；敏感信息与暂存差异检查通过，远端从 `ea5cf49` 快进至 `c72c7f1`。main 只更新路线、计划和验收复盘，不合并实验代码。
 - 镜像路由补证：第二组仓库外临时 RSA 密钥签发短时本地 Token，经隔离 Compose Gateway 的两条精确商品搜索 GET 均 HTTP 200、空库结果；临时 Token、密钥、容器和卷已再次回收。
 - 补证提交：仅更新实验验收记录与实验学习日志的 `177cd25` 从 `c72c7f1` 快进推送到远端实验分支；8.2 的最终公开入口包含该镜像路由结果。
+
+### 2026-09-16：开始实验九全栈智能校园客服
+
+- 本阶段范围：公开交易规则问答、本人订单/普通售后/质保状态只读查询，以及注册登录、资源选择、规则来源与状态分区展示的客服前端；不重建交易平台页面或执行资金仲裁。
+- 设计与计划：已确认 [实验九设计](../docs/superpowers/specs/2026-09-16-ai-campus-support-design.md)和[实施计划](../docs/superpowers/plans/2026-09-16-ai-campus-support-fullstack.md)。AI 服务采用 Spring AI 1.1.8 与独立公开规则索引，交易服务按自身 JWT 用户身份授权，外部模型不接收私人原始问题或订单/案件 ID。
+- Git：从实验八验收提交 `177cd25` 建立本地独立工作树 `learning/ai-campus-support`；实验八及其他已验收分支保持不变。实验九尚处于实现阶段，远端入口和验收计数待完整验证后填写。
+- 基线证据：在迁移代码前，JDK 17 下运行实验八基线 `mvnw.cmd test` 退出 0，七个 Reactor 项目 BUILD SUCCESS。此命令只验证单元测试，不作为实验九全栈或外部协作验收。
+- 维护边界：Spring Boot 3.5.x 与 Spring Cloud 2025.0.x 已结束开源维护；当前固定版本用于可复跑学习实验，若要承担生产持续维护，应单独规划 Boot 4/匹配 Cloud/Spring AI 2 的迁移和全部交易回归。
