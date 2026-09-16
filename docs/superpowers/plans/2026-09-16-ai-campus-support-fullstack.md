@@ -6,20 +6,20 @@
 
 **Architecture:** 从实验八验收提交建立单实验基线，交易服务负责按 JWT 用户 ID 过滤事实，AI 服务负责公开规则检索与受控模型解释，前端通过同源代理访问 Gateway。私人状态确定性呈现，模型仅接收公开规则与脱敏的通用询问。
 
-**Tech Stack:** JDK 17、Spring Boot 3.5.16、Spring Cloud 2025.0.3、Spring AI 1.1.8、MySQL 8.4、Elasticsearch 8.18.8、React 19.3、TypeScript、Vite 8.3.0、JUnit 5、Testcontainers、Playwright Chromium。
+**Tech Stack:** JDK 17、Spring Boot 4.1.1、Spring Cloud 2025.1.3、Spring AI 2.0.1、MySQL 8.4、Elasticsearch 8.18.8、React 19.3、TypeScript、Vite 8.3.0、JUnit 5、Testcontainers、Playwright Chromium。
 
 ## Global Constraints
 
 - 设计来源：`docs/superpowers/specs/2026-09-16-ai-campus-support-design.md`；任何范围变更先改设计与本计划。
 - `main` 只存放中心文档；`learning/ai-campus-support` 活动树只允许根 `.gitignore` 和 `labs/09-ai-campus-support/**`；`AGENTS.md` 保持忽略。
-- JDK 17、Maven Wrapper、Spring Boot `3.5.16`、Spring Cloud `2025.0.3`、Spring AI `1.1.8`；React `19.3`、Vite `8.3.0`、Node `20.19+` 或 `22.12+`；npm lockfile 锁版本。
+- JDK 17、Maven Wrapper、Spring Boot `4.1.1`、Spring Cloud `2025.1.3`、Spring AI `2.0.1`；React `19.3`、Vite `8.3.0`、Node `20.19+` 或 `22.12+`；npm lockfile 锁版本。
 - HTTP JSON 显式 `application/json; charset=UTF-8`，中文真实 HTTP 测试核对正文与 Content-Type。
 - 领域对象不依赖 Spring/数据库/模型 SDK；服务层不清洗协议数据；反序列化拒绝未知字段与非法值。
 - 私人资源只由交易服务按 JWT `user_id` 授权；他人与不存在单项同构 404，故障不得伪装 404；管理员不自动绕过。
 - AI 服务不连接交易/身份/商品数据库，没有写交易工具；模型不接收身份、UUID、证据、支付或私人自由文本。
 - 密钥只从环境读取；测试用本地受控模型替身；不记录问题全文、提示词、Token、私人状态或模型正文。
 - 测试先 RED 再 GREEN；Testcontainers 前运行 `docker info`，Docker 不可用先手动启动 Docker Desktop；skipped 不算完整验收。
-- Spring Boot 3.5.x 与 Spring Cloud 2025.0.x 已结束开源维护；本计划证明固定基线可复跑，不宣称适合生产持续补丁维护。将来如需生产版本，单独规划 Boot 4.x、匹配 Cloud 发布列车和 Spring AI 2.x 的完整回归迁移。
+- 实验九整体迁移至 Boot 4.1/Cloud 2025.1/Spring AI 2.0；不得只升级 AI BOM 或在同一 Reactor 混用 Boot 3 与 Boot 4。实验一至八的独立分支和既有验收提交保持原版本。
 - 每个提交只暂存该任务相关文件，保留其他工作树和本地改动；完成后执行 `git diff --check`。
 
 ## 文件职责图
@@ -45,7 +45,7 @@
 
 **Interfaces:**
 - Consumes: 实验八验收提交 `177cd25`。
-- Produces: 六模块 Maven 基线位于 `labs/09-ai-campus-support/`；Task 2-8 只在该目录修改。
+- Produces: 六模块 Maven 基线位于 `labs/09-ai-campus-support/`；Task 2-9 只在该目录修改。
 
 - [ ] **Step 1: 建立工作树前检查分支与忽略规则**
 
@@ -87,7 +87,70 @@ git diff --cached --check
 git commit -m "chore(ai): isolate experiment nine baseline"
 ```
 
-### Task 2: 交易服务提供本人资源列表与单项摘要
+### Task 2: 统一迁移至 Boot 4.1、Cloud 2025.1 与 Framework 7
+
+**Files:**
+- Modify: `labs/09-ai-campus-support/pom.xml`
+- Modify: affected module POMs under `labs/09-ai-campus-support/*/pom.xml`
+- Modify: Boot 4/Spring Framework 7 compilation failures and removed test APIs only where required
+- Create: `labs/09-ai-campus-support/platform-test-support/src/test/java/com/example/campusmarket/testsupport/PlatformVersionTest.java`
+- Create: `labs/09-ai-campus-support/docs/platform-migration.md`
+
+**Interfaces:**
+- Consumes: Task 1 的七项目 Reactor 和实验八全部既有测试。
+- Produces: 同一 Reactor 的 Spring Boot `4.1.1`、Spring Cloud `2025.1.3` 和 Spring Framework 7 基线；后续 AI 模块直接导入 Spring AI `2.0.1` BOM。身份、JWT、HTTP、数据库、消息、搜索和文件契约不变。
+
+- [ ] **Step 1: 写版本守卫并观察它在 Boot 3.5 基线上失败**
+
+```java
+@Test void experimentNineUsesSupportedPlatformGeneration() {
+    assertThat(SpringBootVersion.getVersion()).isEqualTo("4.1.1");
+    assertThat(SpringVersion.getVersion()).startsWith("7.");
+}
+```
+
+Run: `./mvnw.cmd -pl platform-test-support -am test -Dtest=PlatformVersionTest`；Expected: 实际 Boot 为 3.5.16，RED。
+
+- [ ] **Step 2: 更新统一依赖图并先做编译迁移**
+
+```xml
+<parent>
+  <groupId>org.springframework.boot</groupId>
+  <artifactId>spring-boot-starter-parent</artifactId>
+  <version>4.1.1</version>
+  <relativePath/>
+</parent>
+<properties>
+  <java.version>17</java.version>
+  <spring-cloud.version>2025.1.3</spring-cloud.version>
+  <spring-ai.version>2.0.1</spring-ai.version>
+</properties>
+```
+
+在 root dependencyManagement 同时导入 Cloud 和 Spring AI BOM。Run: `./mvnw.cmd -DskipTests package`，逐项修正 Boot 4 模块化 starter、被删除 API、Jackson 3/Jackson 2 边界和测试注解；不改业务语义，不删除测试，不使用兼容性校验绕过配置。
+
+- [ ] **Step 3: 跑原实验八完整单元与 Testcontainers 回归**
+
+```powershell
+$env:JAVA_HOME='C:\Program Files\Java\jdk-17'
+./mvnw.cmd clean test
+docker info
+./mvnw.cmd clean verify
+```
+
+Expected: 七项目 Reactor BUILD SUCCESS；既有 Surefire/Failsafe tests 0 failures、0 errors、0 skipped。若某个第三方库尚不兼容 Boot 4，记录具体依赖和失败证据，不用排除测试或降级安全断言绕过。
+
+- [ ] **Step 4: 记录迁移差异并提交**
+
+`docs/platform-migration.md` 记录版本、依赖坐标变化、源码兼容修改、全量测试计数和剩余限制，并明确实验一至八分支没有被修改。
+
+```powershell
+git add -- labs/09-ai-campus-support
+git diff --cached --check
+git commit -m "build(ai): migrate experiment nine to Spring Boot 4"
+```
+
+### Task 3: 交易服务提供本人资源列表与单项摘要
 
 **Files:**
 - Create: `labs/09-ai-campus-support/legacy-market-service/src/main/java/com/example/campusmarket/support/SupportStatusController.java`
@@ -144,7 +207,7 @@ git diff --cached --check
 git commit -m "feat(ai): expose authorized trade status summaries"
 ```
 
-### Task 3: 新增 AI 服务与精确 Gateway 路由
+### Task 4: 新增 AI 服务与精确 Gateway 路由
 
 **Files:**
 - Modify: `labs/09-ai-campus-support/pom.xml`, `labs/09-ai-campus-support/api-gateway/src/main/resources/application.yml`, `labs/09-ai-campus-support/api-gateway/src/main/java/com/example/campusmarket/gateway/security/GatewaySecurityConfiguration.java`
@@ -194,7 +257,7 @@ git diff --cached --check
 git commit -m "feat(ai): add isolated support service and gateway route"
 ```
 
-### Task 4: 版本化公开规则与独立向量索引
+### Task 5: 版本化公开规则与独立向量索引
 
 **Files:**
 - Create: `labs/09-ai-campus-support/policies/manifest.json`, `labs/09-ai-campus-support/policies/trade-policy-v1.md`
@@ -244,7 +307,7 @@ git diff --cached --check
 git commit -m "feat(ai): index reviewed campus policies"
 ```
 
-### Task 5: 授权状态客户端、受控回答和限流
+### Task 6: 授权状态客户端、受控回答和限流
 
 **Files:**
 - Create: `labs/09-ai-campus-support/ai-support-service/src/main/java/com/example/campusmarket/supportai/application/AnswerService.java`
@@ -259,8 +322,8 @@ git commit -m "feat(ai): index reviewed campus policies"
 - Test: `labs/09-ai-campus-support/ai-support-service/src/test/java/com/example/campusmarket/supportai/integration/AnswerHttpIT.java`
 
 **Interfaces:**
-- Consumes: `PolicyRetriever.find(question)` 与 Task 2 的单项 status GET；AI 侧端口 `TradeStatusReader.read(type,id,bearerToken): StatusView`、`AnswerModel.explain(template,chunks): String`。
-- Produces: `AnswerResponse(String answer,List<SourceView> sources,StatusView status)`；`SourceView(String sourceId,String title,String version)`；AI 模块自行定义只读 `StatusView` DTO，不依赖交易模块内部 Java 类。私人状态不进入模型请求。使用 Spring AI 1.1.8 BOM 和 `spring-ai-starter-model-openai`，base URL/model/API key 可配置。
+- Consumes: `PolicyRetriever.find(question)` 与 Task 3 的单项 status GET；AI 侧端口 `TradeStatusReader.read(type,id,bearerToken): StatusView`、`AnswerModel.explain(template,chunks): String`。
+- Produces: `AnswerResponse(String answer,List<SourceView> sources,StatusView status)`；`SourceView(String sourceId,String title,String version)`；AI 模块自行定义只读 `StatusView` DTO，不依赖交易模块内部 Java 类。私人状态不进入模型请求。使用 Spring AI 2.0.1 BOM 和 `spring-ai-starter-model-openai`，base URL/model/API key 可配置。
 
 - [ ] **Step 1: 写不泄漏与故障优先级失败测试**
 
@@ -296,7 +359,7 @@ public AnswerResponse answer(AnswerRequest request, String bearer) {
 
 `HttpTradeStatusReader` 只发 GET 到 `lb://legacy-market-service` 的单项摘要，原始 Bearer 仅在内部请求 Header 中传递，不记录；404 原样业务归类，连接/5xx 归 503。`PrivateQuestionClassifier` 只认白名单规则词（如“退款规则”“试用期限”“质保期限”），其它私人输入不调用模型。`SpringAiAnswerModel` 对上下文加不可信引用边界、禁止工具调用、固定 3 秒超时、并发上限与响应字节上限；禁用提示/响应观测属性。`SupportRateLimiter` 用 Redis 原子计数按匿名 IP 与私人 userId 分桶，每分钟固定上限 20/10，Redis 故障归 503，不放开私人无限调用。
 
-在 Task 3 的 `AnswerRequest` record 中按构造器校验提供接口，避免服务层再次清洗协议字段：
+在 Task 4 的 `AnswerRequest` record 中按构造器校验提供接口，避免服务层再次清洗协议字段：
 
 ```java
 public boolean hasPrivateResource() { return orderId != null || caseId != null; }
@@ -325,7 +388,7 @@ git diff --cached --check
 git commit -m "feat(ai): answer from reviewed rules and authorized status"
 ```
 
-### Task 6: 前端登录、资源选择与客服界面
+### Task 7: 前端登录、资源选择与客服界面
 
 **Files:**
 - Create: `labs/09-ai-campus-support/support-web/package.json`, `package-lock.json`, `index.html`, `vite.config.ts`, `tsconfig.json`
@@ -335,7 +398,7 @@ git commit -m "feat(ai): answer from reviewed rules and authorized status"
 - Test: `labs/09-ai-campus-support/support-web/src/auth/AuthProvider.test.tsx`, `src/support/SupportDesk.test.tsx`
 
 **Interfaces:**
-- Consumes: 身份服务的邮箱验证码/注册/登录 API、Task 2 三个本人列表、Task 5 `POST /api/ai/support/answers`。
+- Consumes: 身份服务的邮箱验证码/注册/登录 API、Task 3 三个本人列表、Task 6 `POST /api/ai/support/answers`。
 - Produces: 公开规则问答与登录后的资源选择/状态/来源分区；`AuthProvider` 只在 React 内存保留 `accessToken: string | null`。
 
 - [ ] **Step 1: 建前端测试工具并写先失败的登录状态测试**
@@ -393,7 +456,7 @@ git diff --cached --check
 git commit -m "feat(ai): build campus support web journey"
 ```
 
-### Task 7: 同源静态站点、演示邮件和真实浏览器旅程
+### Task 8: 同源静态站点、演示邮件和真实浏览器旅程
 
 **Files:**
 - Modify: `labs/09-ai-campus-support/compose.yaml`, `labs/09-ai-campus-support/identity-service/src/main/java/com/example/campusmarket/identity/infrastructure/LocalVerificationMailSender.java`, `SmtpVerificationMailSender.java`, `SmtpMailConfiguration.java`
@@ -402,7 +465,7 @@ git commit -m "feat(ai): build campus support web journey"
 - Test: `labs/09-ai-campus-support/identity-service/src/test/java/com/example/campusmarket/identity/api/DemoMailProfileTest.java`
 
 **Interfaces:**
-- Consumes: Task 3 AI Eureka 注册、Task 6 `dist/`、身份 SMTP 端口、Gateway URL。
+- Consumes: Task 4 AI Eureka 注册、Task 7 `dist/`、身份 SMTP 端口、Gateway URL。
 - Produces: 静态前端同源 `/api/**` 代理、显式 `demo-mail` 演示 Profile、实际构建前端的桌面/移动浏览器测试。
 
 - [ ] **Step 1: 写失败的代理与邮件 Profile 测试**
@@ -463,7 +526,7 @@ git diff --cached --check
 git commit -m "test(ai): verify real browser support journey"
 ```
 
-### Task 8: 实验级完整验收与学习闭环
+### Task 9: 实验级完整验收与学习闭环
 
 **Files:**
 - Modify: `labs/09-ai-campus-support/README.md`, `labs/09-ai-campus-support/TROUBLESHOOTING.md`, `labs/09-ai-campus-support/notes/learning-log.md`, `labs/09-ai-campus-support/interview/question-bank.md`
@@ -471,7 +534,7 @@ git commit -m "test(ai): verify real browser support journey"
 - Modify on `main` only after acceptance: `README.md`, `notes/learning-log.md`, `interview/question-bank.md`
 
 **Interfaces:**
-- Consumes: Task 1-7 所有验收命令和报告。
+- Consumes: Task 1-8 所有验收命令和报告。
 - Produces: 独立分支中可重复命令/故障证据；验收后 `main` 状态更新与独立分支入口。
 
 - [ ] **Step 1: 校验运行环境后执行新鲜完整命令**

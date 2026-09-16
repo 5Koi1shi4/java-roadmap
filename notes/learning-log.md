@@ -181,4 +181,4 @@
 - 设计与计划：已确认 [实验九设计](../docs/superpowers/specs/2026-09-16-ai-campus-support-design.md)和[实施计划](../docs/superpowers/plans/2026-09-16-ai-campus-support-fullstack.md)。AI 服务采用 Spring AI 1.1.8 与独立公开规则索引，交易服务按自身 JWT 用户身份授权，外部模型不接收私人原始问题或订单/案件 ID。
 - Git：从实验八验收提交 `177cd25` 建立本地独立工作树 `learning/ai-campus-support`；实验八及其他已验收分支保持不变。实验九尚处于实现阶段，远端入口和验收计数待完整验证后填写。
 - 基线证据：在迁移代码前，JDK 17 下运行实验八基线 `mvnw.cmd test` 退出 0，七个 Reactor 项目 BUILD SUCCESS。此命令只验证单元测试，不作为实验九全栈或外部协作验收。
-- 维护边界：Spring Boot 3.5.x 与 Spring Cloud 2025.0.x 已结束开源维护；当前固定版本用于可复跑学习实验，若要承担生产持续维护，应单独规划 Boot 4/匹配 Cloud/Spring AI 2 的迁移和全部交易回归。
+- 平台调整：确认 Boot 3.5/Cloud 2025.0 已结束开源维护后，实验九改为在独立分支整体迁移至 Spring Boot 4.1.1、Spring Cloud 2025.1.3 和 Spring AI 2.0.1；先通过原实验八的完整交易回归，再开发 AI 能力。实验一至八的分支与验收版本保持不变。

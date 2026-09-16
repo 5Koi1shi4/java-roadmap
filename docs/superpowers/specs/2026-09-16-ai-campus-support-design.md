@@ -10,14 +10,14 @@
 
 ## 2. 技术基线和依赖
 
-- JDK 17、Maven Wrapper、Spring Boot `3.5.16`、Spring Cloud BOM `2025.0.3` 保持实验八基线。
-- Spring AI 固定 `1.1.8`。其 1.1.x 系列对应 Spring Boot 3.5.x；2.0.x 对应 Spring Boot 4，不与当前基线混用。
+- JDK 17 和 Maven Wrapper 保持仓库基线；实验九在复制实验八代码后整体迁移至 Spring Boot `4.1.1`、Spring Cloud BOM `2025.1.3` 与 Spring Framework 7。实验一至八的独立分支及其固定版本不改动。
+- Spring AI 固定 `2.0.1`，与实验九的 Spring Boot 4.1.x 基线配套。不得在同一 Reactor 中混用 Boot 3.5/Spring AI 1.1 和 Boot 4.1/Spring AI 2.0 依赖图。
 - 前端固定 React `19.3`、TypeScript、Vite `8.3.0`，使用满足 Vite 要求的 Node.js（`20.19+` 或 `22.12+`）；版本由 lockfile 锁定，不依赖全局 npm 包。浏览器验收使用锁定版本的 Playwright Chromium。
 - 对话模型和嵌入模型使用可配置的外部 API 适配器；密钥只从运行环境获取，仓库只保存占位符。`test` 和 `verify` 使用本地受控 HTTP 模型替身，无真实密钥或公网模型调用。
 - 规则向量索引使用独立的 Elasticsearch 索引，不复用商品 SmartCN 索引；交易事实仍以 `market_db` 为唯一事实源，AI 服务不得连接 `market_db`、`identity_db` 或 `product_read_db`。
 - 通过 Testcontainers 验证 Elasticsearch、MySQL、真实 HTTP 和服务发现协作；需要 Docker 的完整验收不能以 skipped 测试代替。
 
-版本依据：[Spring AI 发布记录](https://spring.io/blog/2026/06/12/spring-ai-1-1-8-1-0-9-avaialble-now/)、[Spring AI 项目兼容说明](https://github.com/spring-projects/spring-ai)、[Spring AI 2.0 基线](https://spring.io/blog/2026/06/12/spring-ai-2-0-0-GA-available-now/)、[React 19.3](https://react.dev/blog/2026/09/09/react-19-3)、[Vite 8.3.0](https://github.com/vitejs/vite/releases/tag/v8.3.0)及[Vite Node 要求](https://vite.dev/guide/)。
+版本依据：[Spring Boot 4.1.1](https://spring.io/blog/2026/08/20/spring-boot-4-1-1-available-now/)、[Spring Cloud 2025.1.3](https://spring.io/blog/2026/08/20/spring-cloud-2025-1-3-has-been-released/)、[Spring AI 2.0.1 发布列表](https://spring.io/blog/category/releases/)、[Spring AI 2.0 基线](https://spring.io/blog/2026/06/12/spring-ai-2-0-0-GA-available-now/)、[React 19.3](https://react.dev/blog/2026/09/09/react-19-3)、[Vite 8.3.0](https://github.com/vitejs/vite/releases/tag/v8.3.0)及[Vite Node 要求](https://vite.dev/guide/)。
 
 ## 3. 服务边界
 
@@ -55,7 +55,7 @@ AI 服务只依赖三个接口：`PolicyRetriever` 返回版本化公开规则�
 
 ## 7. 测试与验收
 
-先写失败测试，再做最小实现。单元测试验证请求构造、规则版本和引用、资料不足、模型故障、严格解码、资源互斥、本人列表游标、状态确定性呈现与敏感字段过滤。真实 HTTP 集成测试验证匿名规则问答、本人订单/售后列表及单项查询、他人和不存在资源同构 404、无效身份 401、模型替身收到的数据最小集合、中文响应正文和 `application/json; charset=UTF-8`。故障测试验证交易服务、Elasticsearch、模型替身分别不可用时的状态、恢复及无误判 404；同时回归实验八的身份、商品搜索和交易路径。
+先写失败测试，再做最小实现。功能开发前先完成 Boot 4.1/Cloud 2025.1/Spring Framework 7 平台迁移，修正被移除或变更的自动配置、测试注解、依赖坐标与序列化行为，并以原实验八完整单元和 Testcontainers 套件证明身份、Gateway、商品搜索及交易行为未退化；不得为通过迁移而删除、禁用或跳过既有测试。随后用单元测试验证请求构造、规则版本和引用、资料不足、模型故障、严格解码、资源互斥、本人列表游标、状态确定性呈现与敏感字段过滤。真实 HTTP 集成测试验证匿名规则问答、本人订单/售后列表及单项查询、他人和不存在资源同构 404、无效身份 401、模型替身收到的数据最小集合、中文响应正文和 `application/json; charset=UTF-8`。故障测试验证交易服务、Elasticsearch、模型替身分别不可用时的状态、恢复及无误判 404；同时回归实验八的身份、商品搜索和交易路径。
 
 前端使用纯逻辑和组件测试验证请求参数、Access JWT 内存生命周期、状态/规则来源分离显示、错误提示与安全文本渲染；Playwright Chromium 在桌面与移动视口完成“注册/登录 → 规则问答 → 本人订单/售后选择 → 问答与状态 → 登出”的真实浏览器旅程，并验证键盘操作、401 重登录、他人资源不可见、模型/交易故障和页面恢复。浏览器验收必须访问实际构建的前端及同源 Gateway 代理，不能只对前端 API mock 宣称全栈通过。
 
