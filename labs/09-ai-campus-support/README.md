@@ -1,6 +1,10 @@
-# 实验八：Spring Cloud 渐进拆分（8.1 身份服务、8.2 商品读服务）
+# 实验九：AI 校园交易客服
 
-这是基于 JDK 17、Spring Boot 3.5.16、Spring Cloud 2025.0.3 的 Maven 聚合实验。身份服务独立签发 RS256 Token，Gateway、兼容交易单体和商品读服务分别通过 JWKS 验签，Eureka 提供实例发现。`identity_db`、`market_db` 与 `product_read_db` 使用独立账号，交易不变量继续由兼容单体维护。
+本目录从已验收的实验八提交建立隔离基线，将实现规则知识问答和本人订单、争议、质保状态的只读查询。实验九会先整体升级到 JDK 17、Spring Boot 4.1.1、Spring Cloud 2025.1.3 与 Spring AI 2.0.1，再增加 AI 服务和前端；这里保留的实验八说明用于核对升级前行为，不能把自动退款、仲裁或其他交易写操作交给模型。
+
+## 迁入基线
+
+身份服务独立签发 RS256 Token，Gateway、兼容交易单体和商品读服务分别通过 JWKS 验签，Eureka 提供实例发现。`identity_db`、`market_db` 与 `product_read_db` 使用独立账号，交易不变量继续由兼容单体维护。
 
 当前 8.1 身份拆分状态为“已验收”。2026-09-15 在 JDK 17、Docker Desktop 29.7.2 下，完整 `clean test` 与 `clean verify` 均 BUILD SUCCESS；fresh XML 汇总 196 项 Surefire、293 项 Failsafe/Testcontainers，共 489 项，全部 0 failures、0 errors、0 skipped。真实四应用旅程、身份/交易/Eureka 停机恢复、冷启动与 JWKS 刷新均在完整验收中运行。用 Dockerfile 指定的官方 `eclipse-temurin:17-jre` 重新构建并启动 Compose 后，四应用的 health、liveness、readiness 全部 UP，Eureka 3 项注册完成，Gateway 的 JWKS 返回 HTTP 200 与 1 把 RSA 公钥。实验七的已验收结果只作为迁入基线；原计划的 `7.1` 聊天、`7.2` 竞价、`7.3` 跑腿/代取及真实支付适配器继续暂停。
 

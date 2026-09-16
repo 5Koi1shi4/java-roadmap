@@ -15,7 +15,7 @@
     <artifactId>campus-market-cloud</artifactId>
     <version>0.0.1-SNAPSHOT</version>
     <name>campus-market-cloud</name>
-    <description>Campus market multi-module learning lab</description>
+    <description>Campus AI support learning lab</description>
     <packaging>pom</packaging>
 
     <modules>
