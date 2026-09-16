@@ -1,7 +1,10 @@
 package com.example.campusmarket.product.integration;
 
 import com.example.campusmarket.product.ProductReadApplication;
+import com.example.campusmarket.product.event.ProductReplayCompleteEvent;
+import com.example.campusmarket.product.event.ProductRabbitTopology;
 import com.example.campusmarket.testsupport.SplitDatabaseContainer;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -31,7 +34,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 })
 class ProductRabbitConsumerIT {
     private static final String PRODUCT_EXCHANGE = "campus.product.snapshot";
-    private static final String MANUAL_QUEUE = "campus.market.manual.failure";
+    private static final String MANUAL_QUEUE = ProductRabbitTopology.MANUAL_QUEUE;
 
     @Container
     static final RabbitMQContainer RABBIT = new RabbitMQContainer(DockerImageName.parse("rabbitmq:3.13-management"));
@@ -39,6 +42,20 @@ class ProductRabbitConsumerIT {
     @Autowired private RabbitTemplate publisher;
     @Autowired private RabbitAdmin admin;
     @Autowired private JdbcTemplate jdbc;
+
+    @BeforeEach
+    void cleanProductReadFixtures() {
+        publisher.execute(channel -> {
+            channel.queuePurge("campus.product.read");
+            channel.queuePurge(MANUAL_QUEUE);
+            return null;
+        });
+        jdbc.update("DELETE FROM product_index_outbox");
+        jdbc.update("DELETE FROM product_inbox");
+        jdbc.update("DELETE FROM product_projection");
+        jdbc.update("UPDATE product_projection_readiness SET state='WAITING', replay_id=NULL, "
+            + "source_high_watermark=0, index_high_watermark=0 WHERE id=1");
+    }
 
     @DynamicPropertySource
     static void dependencies(DynamicPropertyRegistry registry) {
@@ -79,6 +96,19 @@ class ProductRabbitConsumerIT {
         assertThat(count("product_projection", "listing_id", listingId)).isZero();
     }
 
+    @Test
+    void replayCompletionMarkerUsesProductQueueAndMakesEmptyProjectionReady() throws Exception {
+        publisher.convertAndSend(PRODUCT_EXCHANGE, ProductReplayCompleteEvent.EVENT_TYPE, marker(0));
+
+        await(() -> queueCount("campus.product.read") == 0
+            && "READY".equals(jdbc.queryForObject(
+                "SELECT state FROM product_projection_readiness WHERE id=1", String.class)));
+
+        assertThat(jdbc.queryForObject(
+            "SELECT source_high_watermark FROM product_projection_readiness WHERE id=1", Long.class))
+            .isZero();
+    }
+
     private long count(String table, String column, UUID id) {
         return jdbc.queryForObject("SELECT COUNT(*) FROM " + table + " WHERE " + column + "=?",
             Long.class, id.toString());
@@ -105,5 +135,13 @@ class ProductRabbitConsumerIT {
              "snapshot":{"title":"计算机教材","description":"完整教材","category":"教材",
                          "unitPriceFen":3000,"availableQuantity":%d,"status":"ON_SALE"}}
             """.formatted(eventId, listingId, version, quantity).getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static byte[] marker(long highWatermark) {
+        return """
+            {"eventType":"PRODUCT_REPLAY_COMPLETE","schemaVersion":1,
+             "replayId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+             "sourceHighWatermark":%d,"completedAt":"2026-09-15T00:00:00Z"}
+            """.formatted(highWatermark).getBytes(StandardCharsets.UTF_8);
     }
 }

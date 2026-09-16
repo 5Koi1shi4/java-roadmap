@@ -19,13 +19,11 @@ import java.time.Instant;
 public class SearchOutboxRepository {
     private final JdbcTemplate jdbc;
     private final ObjectMapper mapper;
-    private final SearchGateRepository gate;
 
     @Autowired
-    public SearchOutboxRepository(JdbcTemplate jdbc, ObjectMapper mapper, SearchGateRepository gate) {
+    public SearchOutboxRepository(JdbcTemplate jdbc, ObjectMapper mapper) {
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.mapper = Objects.requireNonNull(mapper, "ObjectMapper不能为空");
-        this.gate = Objects.requireNonNull(gate, "搜索门禁不能为空");
     }
 
     @Transactional
@@ -42,7 +40,6 @@ public class SearchOutboxRepository {
         }
         SearchSchema.requireEventType(eventType);
         try {
-            gate.assertWritable();
             ProductSnapshotEvent event = snapshotEvent(listingId, aggregateVersion, eventType);
             String payload = mapper.writeValueAsString(event);
             jdbc.update("""

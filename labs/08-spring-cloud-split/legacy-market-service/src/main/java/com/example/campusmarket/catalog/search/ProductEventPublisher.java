@@ -49,15 +49,31 @@ public final class ProductEventPublisher {
             throw new IllegalArgumentException("商品事件序列化失败", e);
         }
 
+        publishConfirmed(event.eventId().toString(), event.eventType(), payload);
+    }
+
+    /** 控制消息和快照使用同一持久队列、同一 correlated confirm 约束。 */
+    public void publishReplayComplete(java.util.UUID replayId, long sourceHighWatermark) {
+        ProductReplayCompleteEvent completion = ProductReplayCompleteEvent.of(replayId, sourceHighWatermark);
+        final byte[] payload;
+        try {
+            payload = mapper.writeValueAsBytes(completion);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("replay 完成屏障序列化失败", e);
+        }
+        publishConfirmed(replayId.toString(), ProductReplayCompleteEvent.TYPE, payload);
+    }
+
+    private void publishConfirmed(String messageId, String routingKey, byte[] payload) {
         MessageProperties properties = new MessageProperties();
         properties.setContentType(MessageProperties.CONTENT_TYPE_JSON);
         properties.setContentEncoding(StandardCharsets.UTF_8.name());
-        properties.setMessageId(event.eventId().toString());
-        properties.setType(event.eventType());
+        properties.setMessageId(messageId);
+        properties.setType(routingKey);
         properties.setDeliveryMode(MessageDeliveryMode.PERSISTENT);
         rabbitTemplate.invoke(operations -> {
-            CorrelationData correlation = new CorrelationData(event.eventId().toString());
-            operations.send(RabbitTopology.PRODUCT_EXCHANGE, event.eventType(),
+            CorrelationData correlation = new CorrelationData(messageId);
+            operations.send(RabbitTopology.PRODUCT_EXCHANGE, routingKey,
                 new Message(payload, properties), correlation);
             awaitConfirmed(correlation);
             return null;

@@ -4,6 +4,7 @@ import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.sql.Timestamp;
@@ -20,12 +21,15 @@ import java.util.UUID;
 public class ProductRebuildGateRepository {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
+    private final TransactionTemplate renewalTransaction;
 
     public ProductRebuildGateRepository(JdbcTemplate jdbc,
                                         PlatformTransactionManager transactionManager) {
         this.jdbc = Objects.requireNonNull(jdbc, "JDBC不能为空");
         this.transaction = new TransactionTemplate(
                 Objects.requireNonNull(transactionManager, "事务管理器不能为空"));
+        this.renewalTransaction = new TransactionTemplate(transactionManager);
+        this.renewalTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
     /** 尝试取得重建租约；仍有有效租约时不会覆盖当前 owner。 */
@@ -34,9 +38,8 @@ public class ProductRebuildGateRepository {
         long leaseMicros = micros(lease, false);
         Optional<GateClaim> acquired = transaction.execute(status -> {
             GateRow current = currentGate(true);
-            Instant now = databaseNow();
-            if ("REBUILDING".equals(current.mode())
-                    && current.leaseUntil() != null && current.leaseUntil().isAfter(now)) {
+            // 过期的重建必须先核对 ES alias 与持久清理事实，不能直接擦掉目标索引。
+            if ("REBUILDING".equals(current.mode())) {
                 return Optional.empty();
             }
 
@@ -76,7 +79,7 @@ public class ProductRebuildGateRepository {
         }
     }
 
-    /** 只允许同一代重建产生的清理任务在门禁打开时继续执行。 */
+    /** 门禁打开且任务属于当前或更早代时允许清理旧索引。 */
     public boolean isOpenForGeneration(long generation) {
         if (generation <= 0) {
             return false;
@@ -92,7 +95,7 @@ public class ProductRebuildGateRepository {
                             leaseUntil == null ? null : leaseUntil.toInstant());
                 });
             return current != null && "OPEN".equals(current.mode())
-                    && current.generation() == generation;
+                    && generation <= current.generation();
         } catch (EmptyResultDataAccessException failure) {
             return false;
         }
@@ -114,6 +117,58 @@ public class ProductRebuildGateRepository {
                 claim.generation()) == 1);
     }
 
+    /** 在创建 ES 索引前先保存其确定名称，关闭建索引和快照之间的崩溃窗口。 */
+    public boolean recordTarget(GateClaim claim, String rebuildIndex) {
+        requireClaim(claim);
+        if (rebuildIndex == null || rebuildIndex.isBlank() || rebuildIndex.length() > 200) {
+            throw new IllegalArgumentException("重建目标索引无效");
+        }
+        return transaction.execute(status -> jdbc.update("""
+            UPDATE product_rebuild_gate
+            SET rebuild_index=?,updated_at=CURRENT_TIMESTAMP(6)
+            WHERE id=1 AND mode='REBUILDING' AND intent='BUILDING'
+              AND rebuild_index IS NULL AND owner_id=? AND claim_token=?
+              AND generation=? AND lease_until > CURRENT_TIMESTAMP(6)
+            """, rebuildIndex, claim.ownerId(), claim.claimToken(), claim.generation()) == 1);
+    }
+
+    /** 领取过期同一代重建以核对别名；只替换 owner/token，不改 intent/target。 */
+    public Optional<RecoveryClaim> claimExpiredRecovery(String ownerId, Duration lease) {
+        validateOwner(ownerId);
+        long leaseMicros = micros(lease, false);
+        Optional<RecoveryClaim> result = transaction.execute(status -> {
+            RecoveryRow row = jdbc.queryForObject("""
+                SELECT mode,intent,rebuild_index,generation,lease_until
+                FROM product_rebuild_gate WHERE id=1 FOR UPDATE
+                """, (rs, number) -> new RecoveryRow(rs.getString("mode"),
+                    rs.getString("intent"), rs.getString("rebuild_index"),
+                    rs.getLong("generation"), rs.getTimestamp("lease_until")));
+            if (row == null || !"REBUILDING".equals(row.mode()) || row.leaseUntil() == null
+                    || row.leaseUntil().toInstant().isAfter(databaseNow())) {
+                return Optional.empty();
+            }
+            String token = UUID.randomUUID().toString();
+            int changed = jdbc.update("""
+                UPDATE product_rebuild_gate SET owner_id=?,claim_token=?,
+                    lease_until=TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6)),
+                    updated_at=CURRENT_TIMESTAMP(6)
+                WHERE id=1 AND mode='REBUILDING' AND generation=?
+                """, ownerId, token, leaseMicros, row.generation());
+            if (changed != 1) {
+                throw new IllegalStateException("过期重建恢复领取失败");
+            }
+            Timestamp until = jdbc.queryForObject(
+                    "SELECT lease_until FROM product_rebuild_gate WHERE id=1", Timestamp.class);
+            if (until == null) {
+                throw new IllegalStateException("重建恢复租约缺失");
+            }
+            return Optional.of(new RecoveryClaim(
+                    new GateClaim(ownerId, token, row.generation(), until.toInstant()),
+                    row.intent(), row.rebuildIndex()));
+        });
+        return result == null ? Optional.empty() : result;
+    }
+
     /** 标记已完成高水位补放，供别名切换前后审计并继续 fencing。 */
     public boolean markCutover(GateClaim claim, long sequenceNo) {
         requireClaim(claim);
@@ -129,11 +184,11 @@ public class ProductRebuildGateRepository {
             """, sequenceNo, claim.ownerId(), claim.claimToken(), claim.generation(), sequenceNo) == 1);
     }
 
-    /** 续租仍以数据库时间计算，旧 owner/token 不能续新代租约。 */
+    /** 续租独立提交，使只读一致性快照尚未结束时租约仍对其他连接可见。 */
     public boolean renew(GateClaim claim, Duration lease) {
         requireClaim(claim);
         long leaseMicros = micros(lease, false);
-        return transaction.execute(status -> jdbc.update("""
+        return renewalTransaction.execute(status -> jdbc.update("""
             UPDATE product_rebuild_gate
             SET lease_until=TIMESTAMPADD(MICROSECOND,?,CURRENT_TIMESTAMP(6)),
                 updated_at=CURRENT_TIMESTAMP(6)
@@ -230,6 +285,13 @@ public class ProductRebuildGateRepository {
     }
 
     private record GateRow(String mode, long generation, Instant leaseUntil) {
+    }
+
+    private record RecoveryRow(String mode, String intent, String rebuildIndex,
+                               long generation, Timestamp leaseUntil) {
+    }
+
+    public record RecoveryClaim(GateClaim claim, String intent, String rebuildIndex) {
     }
 
     public record GateClaim(String ownerId, String claimToken, long generation, Instant leaseUntil) {

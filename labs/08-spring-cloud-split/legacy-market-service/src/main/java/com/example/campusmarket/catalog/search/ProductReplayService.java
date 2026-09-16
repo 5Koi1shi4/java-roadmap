@@ -40,19 +40,24 @@ public final class ProductReplayService {
      * 返回本次已收到 broker confirm 的事件数；投影侧以 eventId/版本幂等收敛。
      */
     public int replayOnce(int limit) {
+        return replayBatch(limit).published();
+    }
+
+    /** 完成状态只在屏障已获 confirm 且 claim 已提交 IDLE 后返回 true。 */
+    public ReplayBatchResult replayBatch(int limit) {
         if (limit <= 0 || limit > 1000) {
             throw new IllegalArgumentException("replay 数量必须在 1 到 1000 之间");
         }
         if (!runLock.tryLock()) {
-            return 0;
+            return new ReplayBatchResult(0, false);
         }
         try {
             if (!publisher.brokerHealthy()) {
-                return 0;
+                return new ReplayBatchResult(0, false);
             }
             ReplayClaim claim = acquireClaim();
             if (claim == null) {
-                return 0;
+                return new ReplayBatchResult(0, false);
             }
             int published = 0;
             try {
@@ -61,7 +66,7 @@ public final class ProductReplayService {
                     List<ReplayRow> rows = load(claim.nextSequenceNo(), claim.highWatermark(), batchSize);
                     if (rows.isEmpty()) {
                         finish(claim);
-                        break;
+                        return new ReplayBatchResult(published, true);
                     }
                     for (ReplayRow row : rows) {
                         ProductSnapshotEvent event = decodeAndCheck(row);
@@ -73,11 +78,11 @@ public final class ProductReplayService {
                         published++;
                         if (claim.nextSequenceNo() > claim.highWatermark()) {
                             finish(claim);
-                            return published;
+                            return new ReplayBatchResult(published, true);
                         }
                     }
                 }
-                return published;
+                return new ReplayBatchResult(published, false);
             } catch (RuntimeException failure) {
                 release(claim);
                 throw failure;
@@ -87,13 +92,22 @@ public final class ProductReplayService {
         }
     }
 
+    public record ReplayBatchResult(int published, boolean complete) {
+        public ReplayBatchResult {
+            if (published < 0) {
+                throw new IllegalArgumentException("replay 发布数不能为负");
+            }
+        }
+    }
+
     private ReplayClaim acquireClaim() {
         return transactions.execute(status -> {
             ReplayRowState current = jdbc.queryForObject("""
-                SELECT high_watermark,next_sequence_no,owner_id,claim_token,lease_until,status
+                SELECT high_watermark,replay_id,next_sequence_no,owner_id,claim_token,lease_until,status
                 FROM product_replay_claim WHERE id=1 FOR UPDATE
                 """, (rs, rowNum) -> new ReplayRowState(rs.getLong("high_watermark"),
-                rs.getLong("next_sequence_no"), rs.getString("owner_id"), rs.getString("claim_token"),
+                rs.getString("replay_id"), rs.getLong("next_sequence_no"),
+                rs.getString("owner_id"), rs.getString("claim_token"),
                 rs.getTimestamp("lease_until"), rs.getString("status")));
             Timestamp databaseNow = jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class);
             boolean leaseActive = current.leaseUntil() != null && current.leaseUntil().after(databaseNow);
@@ -104,21 +118,24 @@ public final class ProductReplayService {
             boolean continuing = "RUNNING".equals(current.status()) && current.nextSequenceNo() > 0;
             long highWatermark = continuing ? current.highWatermark()
                 : jdbc.queryForObject("SELECT COALESCE(MAX(sequence_no),0) FROM search_outbox", Long.class);
+            UUID replayId = continuing && current.replayId() != null
+                ? UUID.fromString(current.replayId()) : UUID.randomUUID();
             long nextSequenceNo = continuing ? current.nextSequenceNo() : 1L;
             boolean continueSameOwner = continuing && leaseActive && owner.equals(current.ownerId())
                 && current.claimToken() != null;
             String token = continueSameOwner ? current.claimToken() : UUID.randomUUID().toString();
             int changed = jdbc.update("""
                 UPDATE product_replay_claim
-                SET high_watermark=?, next_sequence_no=?, owner_id=?, claim_token=?,
+                SET high_watermark=?, replay_id=?, next_sequence_no=?, owner_id=?, claim_token=?,
                     lease_until=TIMESTAMPADD(MICROSECOND, ?, CURRENT_TIMESTAMP(6)),
                     status='RUNNING', updated_at=CURRENT_TIMESTAMP(6)
                 WHERE id=1
-                """, highWatermark, nextSequenceNo, owner, token, CLAIM_LEASE_MICROS);
+                """, highWatermark, replayId.toString(), nextSequenceNo,
+                owner, token, CLAIM_LEASE_MICROS);
             if (changed != 1) {
                 return null;
             }
-            return new ReplayClaim(highWatermark, nextSequenceNo, owner, token);
+            return new ReplayClaim(highWatermark, replayId, nextSequenceNo, owner, token);
         });
     }
 
@@ -146,13 +163,18 @@ public final class ProductReplayService {
     }
 
     private void finish(ReplayClaim claim) {
-        transactions.executeWithoutResult(status -> jdbc.update("""
+        // confirm 先于 IDLE 状态；断在两者之间只会重发相同 replayId 的幂等屏障。
+        publisher.publishReplayComplete(claim.replayId(), claim.highWatermark());
+        int changed = transactions.execute(status -> jdbc.update("""
             UPDATE product_replay_claim
             SET status='IDLE', owner_id=NULL, claim_token=NULL, lease_until=NULL,
                 next_sequence_no=high_watermark+1, updated_at=CURRENT_TIMESTAMP(6)
             WHERE id=1 AND status='RUNNING' AND owner_id=? AND claim_token=?
               AND lease_until > CURRENT_TIMESTAMP(6)
             """, claim.ownerId(), claim.claimToken()));
+        if (changed != 1) {
+            throw new IllegalStateException("replay 完成屏障 ownership 已失效");
+        }
     }
 
     private void release(ReplayClaim claim) {
@@ -183,13 +205,13 @@ public final class ProductReplayService {
     private record ReplayRow(long sequenceNo, String id, UUID listingId, long aggregateVersion,
                              String eventType, String payload, int schemaVersion) { }
 
-    private record ReplayRowState(long highWatermark, long nextSequenceNo, String ownerId,
+    private record ReplayRowState(long highWatermark, String replayId, long nextSequenceNo, String ownerId,
                                   String claimToken, Timestamp leaseUntil, String status) { }
 
-    private record ReplayClaim(long highWatermark, long nextSequenceNo, String ownerId,
+    private record ReplayClaim(long highWatermark, UUID replayId, long nextSequenceNo, String ownerId,
                                String claimToken) {
         private ReplayClaim withNextSequence(long value) {
-            return new ReplayClaim(highWatermark, value, ownerId, claimToken);
+            return new ReplayClaim(highWatermark, replayId, value, ownerId, claimToken);
         }
     }
 }

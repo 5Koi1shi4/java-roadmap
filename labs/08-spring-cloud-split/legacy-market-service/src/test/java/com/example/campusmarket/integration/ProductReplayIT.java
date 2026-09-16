@@ -49,10 +49,11 @@ class ProductReplayIT extends Task12RabbitMySqlContainers {
 
     @BeforeEach
     void cleanFixtures() {
+        rabbit.execute(channel -> { channel.queuePurge(RabbitTopology.PRODUCT_QUEUE); return null; });
         jdbc.update("DELETE FROM listing_media WHERE listing_id IN (SELECT id FROM listing WHERE title LIKE 'publisher-%' OR title LIKE 'replay-%')");
         jdbc.update("DELETE FROM search_outbox WHERE listing_id IN (SELECT id FROM listing WHERE title LIKE 'publisher-%' OR title LIKE 'replay-%')");
         jdbc.update("DELETE FROM listing WHERE title LIKE 'publisher-%' OR title LIKE 'replay-%'");
-        jdbc.update("UPDATE product_replay_claim SET high_watermark=0,next_sequence_no=1,owner_id=NULL,claim_token=NULL,lease_until=NULL,status='IDLE'");
+        jdbc.update("UPDATE product_replay_claim SET high_watermark=0,replay_id=NULL,next_sequence_no=1,owner_id=NULL,claim_token=NULL,lease_until=NULL,status='IDLE'");
     }
 
     @Test
@@ -69,6 +70,7 @@ class ProductReplayIT extends Task12RabbitMySqlContainers {
 
         assertThat(replay.replayOnce(10)).isEqualTo(1);
         assertThat(receiveEvent()).isEqualTo(second.eventId());
+        receiveCompletionMarker();
         assertThat(rabbit.receive(RabbitTopology.PRODUCT_QUEUE, 100)).isNull();
 
         assertThat(dispatcher.dispatchOnce(1)).isEqualTo(1);
@@ -87,8 +89,37 @@ class ProductReplayIT extends Task12RabbitMySqlContainers {
 
         assertThat(replay.replayOnce(1)).isEqualTo(1);
         assertThat(receiveEvent()).isEqualTo(second.eventId());
+        receiveCompletionMarker();
         assertThat(jdbc.queryForObject("SELECT next_sequence_no > high_watermark FROM product_replay_claim",
             Boolean.class)).isTrue();
+    }
+
+    @Test
+    void emptySourceStillPublishesConfirmedProjectionBootstrapBarrier() throws Exception {
+        jdbc.update("DELETE FROM search_outbox");
+
+        assertThat(replay.replayOnce(10)).isZero();
+        Message marker = rabbit.receive(RabbitTopology.PRODUCT_QUEUE, 5_000);
+        assertThat(marker).isNotNull();
+        var body = mapper.readTree(marker.getBody());
+        assertThat(body.path("eventType").asText()).isEqualTo("PRODUCT_REPLAY_COMPLETE");
+        assertThat(body.path("schemaVersion").asInt()).isEqualTo(1);
+        assertThat(body.path("sourceHighWatermark").asLong()).isZero();
+        assertThat(UUID.fromString(body.path("replayId").asText())).isNotNull();
+        assertThat(body.path("completedAt").isTextual()).isTrue();
+        assertThat(body.path("completedAt").asText()).endsWith("Z");
+    }
+
+    private void receiveCompletionMarker() throws Exception {
+        Message marker = rabbit.receive(RabbitTopology.PRODUCT_QUEUE, 5_000);
+        assertThat(marker).isNotNull();
+        var body = mapper.readTree(marker.getBody());
+        assertThat(body.path("eventType").asText()).isEqualTo("PRODUCT_REPLAY_COMPLETE");
+        assertThat(body.path("schemaVersion").asInt()).isEqualTo(1);
+        assertThat(body.path("sourceHighWatermark").asLong()).isPositive();
+        assertThat(UUID.fromString(body.path("replayId").asText())).isNotNull();
+        assertThat(body.path("completedAt").isTextual()).isTrue();
+        assertThat(body.path("completedAt").asText()).endsWith("Z");
     }
 
     private UUID receiveEvent() {

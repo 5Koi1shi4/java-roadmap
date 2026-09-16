@@ -19,11 +19,13 @@ import java.util.List;
 public class ProductRabbitTopology {
     public static final String PRODUCT_EXCHANGE = "campus.product.snapshot";
     public static final String MANUAL_EXCHANGE = "campus.market.manual";
-    public static final String MANUAL_QUEUE = "campus.market.manual.failure";
+    public static final String MANUAL_QUEUE = "campus.product.manual.failure";
+    public static final String MANUAL_ROUTING_KEY = "PRODUCT_FAILURE";
 
     private static final List<String> EVENT_TYPES = List.of(
         "LISTING_CREATED", "LISTING_UPDATED", "LISTING_PUBLISHED",
-        "LISTING_OFF_SALE", "LISTING_SOLD_OUT", "INVENTORY_CHANGED");
+        "LISTING_OFF_SALE", "LISTING_SOLD_OUT", "INVENTORY_CHANGED",
+        ProductReplayCompleteEvent.EVENT_TYPE);
 
     @Bean
     DirectExchange productSnapshotExchange() {
@@ -38,7 +40,7 @@ public class ProductRabbitTopology {
     @Bean
     Queue productSnapshotQueue() {
         return QueueBuilder.durable(ProductRabbitListener.PRODUCT_QUEUE)
-            .deadLetterExchange(MANUAL_EXCHANGE).deadLetterRoutingKey("FAILURE").build();
+            .deadLetterExchange(MANUAL_EXCHANGE).deadLetterRoutingKey(MANUAL_ROUTING_KEY).build();
     }
 
     @Bean
@@ -60,6 +62,6 @@ public class ProductRabbitTopology {
     @Bean
     Binding productManualBinding(@Qualifier("productManualQueue") Queue productManualQueue,
                                  @Qualifier("productManualExchange") DirectExchange productManualExchange) {
-        return BindingBuilder.bind(productManualQueue).to(productManualExchange).with("FAILURE");
+        return BindingBuilder.bind(productManualQueue).to(productManualExchange).with(MANUAL_ROUTING_KEY);
     }
 }

@@ -1,6 +1,8 @@
 package com.example.campusmarket.product.api;
 
 import com.example.campusmarket.product.search.ProductSearchPort;
+import com.example.campusmarket.product.security.ProductProjectionReadinessHealthIndicator;
+import org.springframework.boot.actuate.health.Status;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -21,9 +23,12 @@ public final class SearchController {
     private static final MediaType JSON_UTF8 = MediaType.parseMediaType("application/json; charset=UTF-8");
 
     private final ProductSearchPort search;
+    private final ProductProjectionReadinessHealthIndicator projectionHealth;
 
-    public SearchController(ProductSearchPort search) {
+    public SearchController(ProductSearchPort search,
+                            ProductProjectionReadinessHealthIndicator projectionHealth) {
         this.search = Objects.requireNonNull(search, "搜索端口不能为空");
+        this.projectionHealth = Objects.requireNonNull(projectionHealth, "投影健康判定不能为空");
     }
 
     @GetMapping
@@ -35,13 +40,26 @@ public final class SearchController {
             @RequestParam(defaultValue = "20") int size,
             @RequestParam(required = false) String searchAfter) {
         try {
-            ProductSearchPort.SearchPage page = search.search(new ProductSearchPort.SearchRequest(
-                    keyword, category, minPriceFen, maxPriceFen, 0, size, searchAfter));
+            ProductSearchPort.SearchRequest request = new ProductSearchPort.SearchRequest(
+                    keyword, category, minPriceFen, maxPriceFen, 0, size, searchAfter);
+            if (!projectionAvailable()) {
+                return error(HttpStatus.SERVICE_UNAVAILABLE,
+                        "DEPENDENCY_UNAVAILABLE", "搜索服务暂时不可用");
+            }
+            ProductSearchPort.SearchPage page = search.search(request);
             return ResponseEntity.ok().contentType(JSON_UTF8).body(page);
         } catch (ProductSearchPort.SearchUnavailableException e) {
             return error(HttpStatus.SERVICE_UNAVAILABLE, "DEPENDENCY_UNAVAILABLE", "搜索服务暂时不可用");
         } catch (IllegalArgumentException e) {
             return error(HttpStatus.BAD_REQUEST, "INVALID_REQUEST", "搜索参数无效");
+        }
+    }
+
+    private boolean projectionAvailable() {
+        try {
+            return Status.UP.equals(projectionHealth.health().getStatus());
+        } catch (RuntimeException unavailable) {
+            return false;
         }
     }
 

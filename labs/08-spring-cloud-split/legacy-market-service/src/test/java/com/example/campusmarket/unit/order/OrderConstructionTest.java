@@ -25,7 +25,7 @@ class OrderConstructionTest {
             @Override public void commit(TransactionStatus status) { }
             @Override public void rollback(TransactionStatus status) { }
         };
-        assertThatThrownBy(() -> new JdbcInventoryRepository(null, transactions, new com.example.campusmarket.catalog.search.SearchOutboxRepository(new JdbcTemplate(), new com.fasterxml.jackson.databind.ObjectMapper(), new com.example.campusmarket.catalog.search.SearchGateRepository(new JdbcTemplate()))))
+        assertThatThrownBy(() -> new JdbcInventoryRepository(null, transactions, new com.example.campusmarket.catalog.search.SearchOutboxRepository(new JdbcTemplate(), new com.fasterxml.jackson.databind.ObjectMapper())))
             .isInstanceOf(NullPointerException.class);
         assertThatThrownBy(() -> new JdbcInventoryRepository(new JdbcTemplate(), transactions, null))
             .isInstanceOf(NullPointerException.class);

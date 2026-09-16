@@ -10,6 +10,7 @@ import com.example.campusmarket.product.search.ElasticsearchProductSearch;
 import com.example.campusmarket.product.search.ProductIndexCleanupWorker;
 import com.example.campusmarket.product.search.ProductSearchPort;
 import com.example.campusmarket.product.search.ProductSearchRebuildService;
+import com.example.campusmarket.product.search.ProductSearchRebuildRecoveryService;
 import com.example.campusmarket.testsupport.SplitDatabaseContainer;
 import org.apache.http.HttpHost;
 import org.flywaydb.core.Flyway;
@@ -20,6 +21,8 @@ import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.elasticsearch.ElasticsearchContainer;
 import org.testcontainers.images.builder.ImageFromDockerfile;
 import org.testcontainers.junit.jupiter.Container;
@@ -28,8 +31,10 @@ import org.testcontainers.utility.DockerImageName;
 
 import javax.sql.DataSource;
 import java.io.IOException;
+import java.sql.Timestamp;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Properties;
 import java.util.Set;
 import java.util.UUID;
@@ -55,6 +60,7 @@ class ProductRebuildIT {
     private ProductIndexCleanupRepository cleanup;
     private ProductSearchRebuildService rebuild;
     private ProductIndexCleanupWorker cleanupWorker;
+    private ProductSearchRebuildRecoveryService recovery;
 
     @BeforeAll
     static void startDependencies() {
@@ -87,6 +93,7 @@ class ProductRebuildIT {
         rebuild = new ProductSearchRebuildService(jdbc, new DataSourceTransactionManager(dataSource),
                 search, gate, cleanup);
         cleanupWorker = new ProductIndexCleanupWorker(cleanup, gate, search);
+        recovery = new ProductSearchRebuildRecoveryService(gate, cleanup, search);
     }
 
     @AfterAll
@@ -144,9 +151,12 @@ class ProductRebuildIT {
     }
 
     @Test
-    void expiredRebuildOwnerCannotFinishAfterGenerationTakeover() throws InterruptedException {
+    void expiredRebuildOwnerCannotFinishAfterRecoveredGenerationTakeover() throws InterruptedException {
         ProductRebuildGateRepository.GateClaim old = gate.acquire("rebuild-old", Duration.ofMillis(1)).orElseThrow();
         Thread.sleep(50);
+        assertThat(gate.acquire("rebuild-current", Duration.ofSeconds(30))).isEmpty();
+        assertThat(recovery.recoverOnce()).isEqualTo(
+                ProductSearchRebuildRecoveryService.RecoveryResult.RELEASED);
         ProductRebuildGateRepository.GateClaim current = gate.acquire("rebuild-current", Duration.ofSeconds(30))
                 .orElseThrow();
 
@@ -156,6 +166,92 @@ class ProductRebuildIT {
         assertThat(gate.finish(old)).isFalse();
         assertThat(gate.finish(current)).isTrue();
         assertThat(gate.isOpenForIndexing()).isTrue();
+    }
+
+    @Test
+    void expiredBuildKeepsTargetForRecoveryInsteadOfDiscardingItOnNextAcquire() {
+        ProductRebuildGateRepository.GateClaim interrupted = gate.acquire("rebuild-interrupted",
+                Duration.ofSeconds(30)).orElseThrow();
+        String target = search.newRebuildIndexName();
+        assertThat(gate.recordSnapshot(interrupted, target, 0)).isTrue();
+        jdbc.update("UPDATE product_rebuild_gate SET lease_until=TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP(6)) WHERE id=1");
+
+        assertThat(gate.acquire("rebuild-new", Duration.ofSeconds(30))).isEmpty();
+        assertThat(jdbc.queryForObject("SELECT rebuild_index FROM product_rebuild_gate WHERE id=1", String.class))
+                .isEqualTo(target);
+    }
+
+    @Test
+    void expiredBuildingTargetIsDurablyEnqueuedBeforeGateReopens() throws IOException {
+        ProductRebuildGateRepository.GateClaim old = gate.acquire("rebuild-crashed",
+                Duration.ofSeconds(30)).orElseThrow();
+        String target = search.newRebuildIndexName();
+        assertThat(gate.recordTarget(old, target)).isTrue();
+        search.createRebuildIndex(target);
+        expireGate();
+
+        assertThat(recovery.recoverOnce()).isEqualTo(
+                ProductSearchRebuildRecoveryService.RecoveryResult.RELEASED);
+        assertThat(gate.isOpenForIndexing()).isTrue();
+        assertThat(jdbc.queryForObject("SELECT status FROM product_index_cleanup_task WHERE index_name=?",
+                String.class, target)).isEqualTo("NEW");
+        assertThat(cleanupWorker.cleanupOnce("cleanup-recovery", 10, Duration.ofSeconds(30)))
+                .isEqualTo(1);
+        assertThat(elasticsearch.indices().exists(e -> e.index(target)).value()).isFalse();
+    }
+
+    @Test
+    void expiredCutoverWithBothAliasesAlreadySwitchedFinishesWithoutDeletingTarget() throws IOException {
+        ProductRebuildGateRepository.GateClaim old = gate.acquire("rebuild-cutover",
+                Duration.ofSeconds(30)).orElseThrow();
+        String target = search.newRebuildIndexName();
+        assertThat(gate.recordTarget(old, target)).isTrue();
+        search.createRebuildIndex(target);
+        assertThat(gate.recordSnapshot(old, target, 0)).isTrue();
+        assertThat(gate.markCutover(old, 0)).isTrue();
+        Set<String> oldIndexes = search.readAllAliasMembers();
+        for (String index : oldIndexes) {
+            cleanup.enqueue(index, old.generation());
+        }
+        search.replaceAliasesWithSingleTarget(target, oldIndexes);
+        expireGate();
+
+        assertThat(recovery.recoverOnce()).isEqualTo(
+                ProductSearchRebuildRecoveryService.RecoveryResult.FINISHED);
+        assertThat(gate.isOpenForIndexing()).isTrue();
+        assertThat(search.currentReadIndexes()).containsExactly(target);
+        assertThat(search.currentWriteIndexes()).containsExactly(target);
+        assertThat(cleanupWorker.cleanupOnce("cleanup-cutover", 10, Duration.ofSeconds(30)))
+                .isEqualTo(oldIndexes.size());
+        assertThat(elasticsearch.indices().exists(e -> e.index(target)).value()).isTrue();
+    }
+
+    @Test
+    void renewCommitsWhileConsistentReadOnlySnapshotTransactionRemainsOpen() throws Exception {
+        ProductRebuildGateRepository.GateClaim claim = gate.acquire("rebuild-snapshot",
+                Duration.ofSeconds(30)).orElseThrow();
+        TransactionTemplate snapshot = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+        snapshot.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
+        snapshot.setReadOnly(true);
+
+        snapshot.executeWithoutResult(status -> {
+            assertThat(gate.renew(claim, Duration.ofMinutes(2))).isTrue();
+            try (var connection = dataSource.getConnection();
+                 var statement = connection.prepareStatement(
+                         "SELECT lease_until FROM product_rebuild_gate WHERE id=1");
+                 var rows = statement.executeQuery()) {
+                assertThat(rows.next()).isTrue();
+                Timestamp committed = rows.getTimestamp(1);
+                assertThat(committed.toInstant()).isAfter(Instant.now().plusSeconds(90));
+            } catch (Exception failure) {
+                throw new IllegalStateException("独立连接无法观察到已提交的重建续租", failure);
+            }
+        });
+    }
+
+    private static void expireGate() {
+        jdbc.update("UPDATE product_rebuild_gate SET lease_until="
+                + "TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP(6)) WHERE id=1");
     }
 
     private static void projection(UUID listingId, long version, String title, String description, String category,

@@ -1,4 +1,4 @@
-# 8.1 身份拆分架构
+# 实验八渐进拆分架构（8.1 身份、8.2 商品读）
 
 8.1 的四应用架构和验收证据保留如下。8.2 增加独立 `product-read-service`：Gateway 的精确 `GET /api/search`、`GET /api/listings/search` 在 legacy 通配路由之前经 `lb://product-read-service` 转发；商品写入、库存、订单快照和其余交易命令仍由 legacy 执行。市场事务的完整 `schemaVersion=2` 快照经确认式 Rabbit 发布，读服务在 `product_read_db` 用 Inbox/版本条件投影/index Outbox 收敛，并维护独立 `campus-product-*` ES 别名。第五个服务直连仍验签，三库权限互不相通。详见 [8.2 商品读服务](product-read-service.md)。
 
@@ -10,4 +10,4 @@ Gateway 校验 Bearer Token，移除客户端伪造的身份与转发 Header，�
 
 身份数据库和交易数据库的账号相互隔离。身份领域模型不作为业务模块的生产 Java 依赖；测试支持模块仅在 test scope 提供临时 RSA 密钥及 HTTP/数据库夹具。交易业务中的库存、幂等、Outbox/Inbox、支付与售后事务继续在交易库内部完成。
 
-身份服务停止后，已经获取公钥的资源服务器可继续验证未过期 Token；这不表示可以继续登录，也不表示冷启动时可以跳过验签。Eureka 缓存、JWKS 缓存、目标停机恢复与冷启动 readiness 由真实网络故障测试验证；公钥最近成功探测窗口为 30 秒，注册中心为 45 秒，超过窗口后 readiness 返回 DOWN。Compose 的 `service_started` 只保证启动排序；本地 smoke 应按 README 的有界 PowerShell 轮询四应用 `/actuator/health`、liveness/readiness 和 Eureka。最终验收状态以 README 的新鲜测试证据为准。
+身份服务停止后，已经获取公钥的资源服务器可继续验证未过期 Token；这不表示可以继续登录，也不表示冷启动时可以跳过验签。Eureka 缓存、JWKS 缓存、目标停机恢复与冷启动 readiness 由真实网络故障测试验证；公钥最近成功探测窗口为 30 秒，注册中心为 45 秒，超过窗口后 readiness 返回 DOWN。Compose 的 `service_started` 只保证启动排序；本地 smoke 应按 README 的有界 PowerShell 轮询五应用 `/actuator/health`、liveness/readiness 和 Eureka。最终验收状态以 README 的新鲜测试证据为准。

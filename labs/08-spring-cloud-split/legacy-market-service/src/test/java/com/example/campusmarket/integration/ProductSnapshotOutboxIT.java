@@ -3,6 +3,7 @@ package com.example.campusmarket.integration;
 import com.example.campusmarket.catalog.application.InventoryPort;
 import com.example.campusmarket.catalog.application.ListingService;
 import com.example.campusmarket.catalog.search.SearchOutboxRepository;
+import com.example.campusmarket.catalog.search.SearchGateRepository;
 import com.example.campusmarket.legacy.LegacyMarketApplication;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -14,6 +15,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.test.context.ActiveProfiles;
 
 import java.util.List;
+import java.time.Duration;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -28,6 +30,8 @@ class ProductSnapshotOutboxIT extends SharedContainers {
     private ObjectMapper mapper;
     @Autowired
     private SearchOutboxRepository outbox;
+    @Autowired
+    private SearchGateRepository oldSearchGate;
     @Autowired
     private InventoryPort inventory;
     @Autowired
@@ -82,6 +86,24 @@ class ProductSnapshotOutboxIT extends SharedContainers {
         assertThat(snapshot.path("availableQuantity").asInt()).isEqualTo(3);
         assertThat(snapshot.path("status").asText()).isEqualTo("ON_SALE");
         assertThat(event.payload()).doesNotContain("private-object-key", "sellerId", "warranty", "token");
+    }
+
+    @Test
+    void oldSearchRebuildDoesNotBlockSourceProductPublish() {
+        Fixture fixture = insertListing("DRAFT", 1, 0, 0);
+        jdbc.update("INSERT INTO listing_media(id,listing_id,object_key,media_type,size_bytes,sort_order,created_at) "
+                + "VALUES (?,?,?,'image/jpeg',1,0,CURRENT_TIMESTAMP(6))",
+            UUID.randomUUID().toString(), fixture.listing().toString(), "private-" + fixture.listing());
+        SearchGateRepository.Lease lease = oldSearchGate.acquire("old-index-rebuild-test",
+                Duration.ofSeconds(30));
+        try {
+            listings.publish(fixture.seller(), fixture.listing());
+            assertThat(jdbc.queryForObject("SELECT status FROM listing WHERE id=?", String.class,
+                    fixture.listing().toString())).isEqualTo("ON_SALE");
+            assertThat(latestEvent(fixture.listing()).eventType()).isEqualTo("LISTING_PUBLISHED");
+        } finally {
+            oldSearchGate.release(lease);
+        }
     }
 
     @Test

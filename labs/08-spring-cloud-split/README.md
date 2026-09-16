@@ -1,12 +1,12 @@
 # 实验八：Spring Cloud 渐进拆分（8.1 身份服务、8.2 商品读服务）
 
-这是基于 JDK 17、Spring Boot 3.5.16、Spring Cloud 2025.0.3 的 Maven 聚合实验。身份服务独立签发 RS256 Token，Gateway 与兼容交易单体分别通过 JWKS 验签，Eureka 提供实例发现。`identity_db` 与 `market_db` 使用独立账号，交易不变量继续由兼容单体维护。
+这是基于 JDK 17、Spring Boot 3.5.16、Spring Cloud 2025.0.3 的 Maven 聚合实验。身份服务独立签发 RS256 Token，Gateway、兼容交易单体和商品读服务分别通过 JWKS 验签，Eureka 提供实例发现。`identity_db`、`market_db` 与 `product_read_db` 使用独立账号，交易不变量继续由兼容单体维护。
 
 当前 8.1 身份拆分状态为“已验收”。2026-09-15 在 JDK 17、Docker Desktop 29.7.2 下，完整 `clean test` 与 `clean verify` 均 BUILD SUCCESS；fresh XML 汇总 196 项 Surefire、293 项 Failsafe/Testcontainers，共 489 项，全部 0 failures、0 errors、0 skipped。真实四应用旅程、身份/交易/Eureka 停机恢复、冷启动与 JWKS 刷新均在完整验收中运行。用 Dockerfile 指定的官方 `eclipse-temurin:17-jre` 重新构建并启动 Compose 后，四应用的 health、liveness、readiness 全部 UP，Eureka 3 项注册完成，Gateway 的 JWKS 返回 HTTP 200 与 1 把 RSA 公钥。实验七的已验收结果只作为迁入基线；原计划的 `7.1` 聊天、`7.2` 竞价、`7.3` 跑腿/代取及真实支付适配器继续暂停。
 
-8.2 按已通过的设计推进独立商品读服务：交易事实与订单快照仍在兼容单体，商品完整快照经确认式 Rabbit 发布，读侧拥有第三库和独立 SmartCN 索引。当前 8.2 正在实施和验证；8.1 的 489 项是既有基线，不能当作 8.2 验收数。新模块的事实、路由、replay 和重建边界见 [商品读服务说明](docs/product-read-service.md)。
+8.2 独立商品读服务已验收：交易事实与订单快照仍在兼容单体，商品完整快照经确认式 Rabbit 发布，读侧拥有第三库和独立 SmartCN 索引。2026-09-16 在 JDK 17、Docker Desktop 29.7.2 下 fresh `clean test` 与 `clean verify` 均 BUILD SUCCESS；Surefire 228 项、Failsafe/Testcontainers 357 项，共 585 项，全部 0 failures、0 errors、0 skipped。真实五应用商品旅程、故障恢复、在线重建和官方 JRE 镜像的隔离 Compose smoke 均完成；Eureka 4/4、五应用十五个健康/探针结果 UP，Gateway JWKS HTTP 200。8.1 的 489 项仍是历史基线。详见 [商品读服务说明](docs/product-read-service.md)与 [8.2 验收记录](docs/acceptance-20260916.md)。
 
-## 8.1 边界与验收入口
+## 边界与验收入口
 
 本实验只支持全新环境，不支持生产不停机迁移。请先阅读 [架构](docs/architecture.md)、[迁移边界](docs/migration-boundary.md)、[排障](TROUBLESHOOTING.md)、[学习日志](notes/learning-log.md) 与 [面试追问](interview/question-bank.md)。身份服务实际 JWKS 地址为 `/api/auth/.well-known/jwks.json`；客户端只访问 Gateway 的 `/api/auth/**` 与 `/api/**`，不使用服务实例地址。
 
@@ -19,7 +19,7 @@ docker info
 git diff --check
 ```
 
-必须等 `docker info` 成功再执行完整验收；Docker 不可用或外部测试 skipped 均不算通过。2026-09-15 的 489 项结果来自 `clean verify` 清理旧报告后新产生的 XML；以下交易说明保留实验七业务范围，旧验收数只说明迁入基线。
+必须等 `docker info` 成功再执行完整验收；Docker 不可用或外部测试 skipped 均不算通过。2026-09-16 的 585 项结果来自 `clean verify` 清理旧报告后新产生的 XML；以下交易说明保留实验七业务范围，旧 8.1 验收数只说明历史基线。
 
 ## 你将运行到的能力
 
@@ -49,7 +49,8 @@ git diff --check
 | 模块 | 主要职责 | 代码入口 |
 |---|---|---|
 | `identity` | 邮箱验证码、注册登录、JWT、CAS 端口 | `AuthController`、`EmailVerificationService`、`ExternalIdentityProvider` |
-| `catalog` | 商品、库存、媒体、搜索与重建 | `ListingService`、`JdbcInventoryRepository`、`SearchRebuildService` |
+| `catalog` | 商品、库存、媒体的交易事实与源快照 Outbox | `ListingService`、`JdbcInventoryRepository`、`ProductSnapshotPublisherDispatcher` |
+| `product-read` | 独立商品投影、搜索、replay 屏障与索引恢复 | `ProductEventConsumer`、`SearchController`、`ProductSearchRebuildRecoveryService` |
 | `order` | 幂等下单、订单状态机、截止任务 | `CreateOrderService`、`OrderLifecycleService`、`DeadlineScheduler` |
 | `payment` | 模拟网关、回调、退款、对账与结算 | `PaymentService`、`RefundService`、`PaymentReconciliationScheduler` |
 | `dispute` | 交付、争议、证据、退回与硬期限 | `HandoffService`、`DisputeService`、`ReturnResolutionService` |
@@ -77,7 +78,7 @@ MySQL 是订单、库存、金额、截止时间和在售集合的事实源。Re
 ```powershell
 $keyDir = Join-Path $env:TEMP 'campus-market-cloud-keys'
 New-Item -ItemType Directory -Force $keyDir | Out-Null
-openssl genrsa -traditional -out (Join-Path $keyDir 'jwt-private-rsa.pem') 2048
+openssl genrsa -out (Join-Path $keyDir 'jwt-private-rsa.pem') 2048
 openssl pkcs8 -topk8 -nocrypt -in (Join-Path $keyDir 'jwt-private-rsa.pem') -out (Join-Path $keyDir 'jwt-private-key.pem')
 openssl rsa -in (Join-Path $keyDir 'jwt-private-rsa.pem') -pubout -out (Join-Path $keyDir 'jwt-public-key.pem')
 ```
@@ -311,9 +312,9 @@ git diff --check
 
 低内存主机必须串行执行，等待上一条命令完全结束且容器回收后再运行下一条。共享 Testcontainers 测试默认不自动启动 Rabbit listener、搜索调度器和各业务截止任务；验证调度的测试直接调用对应 `runOnce`，需要真实 Rabbit 投递的测试使用自己的监听器容器，避免已结束上下文污染后续 Outbox、队列和租约。
 
-截至 2026-09-11 的 Surefire 137 项、完整 `verify` 中 Failsafe/Testcontainers 251 项是实验七迁入基线的历史参考，不是实验八结果。本次实验八 `clean verify` 的 196/293 项覆盖真实 HTTP 旅程、三轮故障恢复、SmartCN、数据库权限与四应用停机恢复；分模块为 support 6、discovery 4、identity 24+17、legacy 137+267、Gateway 25+9，均为 0 failures、0 errors、0 skipped。完整验收报告来自同一次 fresh 运行，不接受 Docker 不可用或外部测试跳过。
+截至 2026-09-11 的 Surefire 137 项、Failsafe/Testcontainers 251 项是实验七迁入基线的历史参考；8.1 的 196/293 项见独立历史记录。8.2 的同一次 fresh `clean verify` XML 为 Surefire 228、Failsafe/Testcontainers 357，共 585 项，全部 0 failures、0 errors、0 skipped；分模块为 support 6、discovery 4、identity 24+17、legacy 138+280、product 31+47、Gateway 25+13。完整验收包含实验七交易回归、五应用真实 HTTP/Rabbit/ES/MySQL 故障旅程与读索引恢复，不接受 Docker 不可用或外部测试跳过。
 
-模块测试数、官方镜像启动结果和人工文档清单见 [8.1 验收记录](docs/acceptance-20260915.md)。
+模块测试数、官方镜像启动结果和人工文档清单见 [8.2 验收记录](docs/acceptance-20260916.md)；8.1 历史基线仍见 [8.1 验收记录](docs/acceptance-20260915.md)。
 
 ## 已知边界和扩展决策
 

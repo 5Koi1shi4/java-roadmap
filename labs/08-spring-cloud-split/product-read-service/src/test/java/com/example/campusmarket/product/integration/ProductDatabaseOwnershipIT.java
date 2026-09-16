@@ -85,7 +85,8 @@ class ProductDatabaseOwnershipIT {
                 "product_inbox",
                 "product_index_outbox",
                 "product_rebuild_gate",
-                "product_index_cleanup_task");
+                "product_index_cleanup_task",
+                "product_projection_readiness");
     }
 
     @Test
@@ -107,7 +108,12 @@ class ProductDatabaseOwnershipIT {
                 "ck_product_rebuild_gate_mode",
                 "ck_product_rebuild_gate_generation",
                 "ck_product_index_cleanup_status",
-                "ck_product_index_cleanup_attempt_count");
+                "ck_product_index_cleanup_attempt_count",
+                "ck_product_projection_readiness_id",
+                "ck_product_projection_readiness_state",
+                "ck_product_projection_readiness_source_high_watermark",
+                "ck_product_projection_readiness_index_high_watermark",
+                "ck_product_projection_readiness_replay_id");
 
         assertThat(queryStrings(
             "SELECT CONCAT(table_name, '.', constraint_name) "

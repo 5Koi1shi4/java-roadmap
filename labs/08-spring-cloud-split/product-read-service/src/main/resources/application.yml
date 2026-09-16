@@ -14,6 +14,9 @@ spring:
     listener:
       simple:
         acknowledge-mode: manual
+        concurrency: 1
+        max-concurrency: 1
+        prefetch: 1
   security:
     oauth2:
       resourceserver:
@@ -49,7 +52,7 @@ management:
         enabled: true
       group:
         readiness:
-          include: readinessState,db,rabbit,jwks,eureka,productSearch
+          include: readinessState,db,rabbit,jwks,eureka,productSearch,projection
           show-components: always
 
 eureka:

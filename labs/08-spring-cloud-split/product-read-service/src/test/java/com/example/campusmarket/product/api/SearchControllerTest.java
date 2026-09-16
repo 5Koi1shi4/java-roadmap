@@ -1,6 +1,8 @@
 package com.example.campusmarket.product.api;
 
 import com.example.campusmarket.product.search.ProductSearchPort;
+import com.example.campusmarket.product.security.ProductProjectionReadinessHealthIndicator;
+import org.springframework.boot.actuate.health.Health;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.web.servlet.MockMvc;
@@ -24,12 +26,36 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class SearchControllerTest {
 
     private ProductSearchPort search;
+    private ProductProjectionReadinessHealthIndicator projectionHealth;
     private MockMvc mvc;
 
     @BeforeEach
     void setUp() {
         search = mock(ProductSearchPort.class);
-        mvc = MockMvcBuilders.standaloneSetup(new SearchController(search)).build();
+        projectionHealth = mock(ProductProjectionReadinessHealthIndicator.class);
+        when(projectionHealth.health()).thenReturn(Health.up().build());
+        mvc = MockMvcBuilders.standaloneSetup(new SearchController(search, projectionHealth)).build();
+    }
+
+    @Test
+    void uninitializedProjectionReturnsSafe503InsteadOfEmptySuccessfulSearch() throws Exception {
+        when(projectionHealth.health()).thenReturn(Health.down().withDetail("state", "WAITING").build());
+
+        mvc.perform(get("/api/search").param("keyword", "教材"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.code").value("DEPENDENCY_UNAVAILABLE"));
+        verifyNoInteractions(search);
+    }
+
+    @Test
+    void manualFailureQueueKeepsSearchUnavailableEvenWithCommittedCheckpoint() throws Exception {
+        when(projectionHealth.health()).thenReturn(Health.down()
+                .withDetail("state", "READY").withDetail("manualFailureCount", 1).build());
+
+        mvc.perform(get("/api/search").param("keyword", "教材"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.code").value("DEPENDENCY_UNAVAILABLE"));
+        verifyNoInteractions(search);
     }
 
     @Test

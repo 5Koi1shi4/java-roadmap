@@ -1,10 +1,12 @@
 package com.example.campusmarket.product.integration;
 
 import com.example.campusmarket.product.event.ProductEventConsumer;
+import com.example.campusmarket.product.event.ProductReplayCompleteDecoder;
 import com.example.campusmarket.product.event.ProductSnapshotDecoder;
 import com.example.campusmarket.product.infrastructure.JdbcProductInbox;
 import com.example.campusmarket.product.infrastructure.JdbcProductIndexOutbox;
 import com.example.campusmarket.product.infrastructure.JdbcProductProjection;
+import com.example.campusmarket.product.infrastructure.JdbcProductReadinessRepository;
 import com.example.campusmarket.testsupport.SplitDatabaseContainer;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -31,6 +33,16 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class ProductProjectionIT {
     @Autowired private ProductEventConsumer consumer;
     @Autowired private JdbcTemplate jdbc;
+    @Autowired private JdbcProductReadinessRepository readiness;
+
+    @org.junit.jupiter.api.BeforeEach
+    void resetReadinessCheckpoint() {
+        jdbc.update("DELETE FROM product_index_outbox");
+        jdbc.update("DELETE FROM product_inbox");
+        jdbc.update("DELETE FROM product_projection");
+        jdbc.update("UPDATE product_projection_readiness SET state='WAITING', replay_id=NULL, "
+            + "source_high_watermark=0, index_high_watermark=0 WHERE id=1");
+    }
 
     @DynamicPropertySource
     static void productDatabase(DynamicPropertyRegistry registry) {
@@ -88,6 +100,63 @@ class ProductProjectionIT {
         assertThat(count("product_index_outbox", "listing_id", listingId)).isEqualTo(1);
     }
 
+    @Test
+    void firstSnapshotOnlyMarksCheckpointCatchingUp() {
+        UUID listingId = UUID.randomUUID();
+        consumer.accept(event(UUID.randomUUID(), listingId, 1, "首个教材"));
+
+        assertThat(readiness.inspect().state()).isEqualTo("CATCHING_UP");
+    }
+
+    @Test
+    void emptyReplayCompletionMakesFreshProjectionReady() {
+        consumer.accept(marker(0));
+
+        assertThat(readiness.inspect().state()).isEqualTo("READY");
+    }
+
+    @Test
+    void replayCompletionWithPendingIndexDoesNotBecomeReady() {
+        UUID listingId = UUID.randomUUID();
+        consumer.accept(event(UUID.randomUUID(), listingId, 1, "待索引教材"));
+
+        consumer.accept(marker(7));
+
+        JdbcProductReadinessRepository.ReadinessStatus state = readiness.inspect();
+        assertThat(state.state()).isEqualTo("CATCHING_UP");
+        assertThat(state.sourceHighWatermark()).isEqualTo(7);
+        assertThat(state.pendingIndexCount()).isEqualTo(1);
+    }
+
+    @Test
+    void replayCompletionAfterIndexOutboxIsPublishedBecomesReady() {
+        UUID listingId = UUID.randomUUID();
+        consumer.accept(event(UUID.randomUUID(), listingId, 1, "已索引教材"));
+        jdbc.update("UPDATE product_index_outbox SET status='PUBLISHED', owner_id=NULL, "
+            + "claim_token=NULL, lease_until=NULL");
+
+        consumer.accept(marker(7));
+
+        assertThat(readiness.inspect().state()).isEqualTo("READY");
+    }
+
+    @Test
+    void blockedCheckpointCannotBeMadeReadyByLaterCompletionMarker() {
+        readiness.markBlocked();
+
+        consumer.accept(marker(7));
+
+        assertThat(readiness.inspect().state()).isEqualTo("BLOCKED");
+    }
+
+    @Test
+    void invalidProtocolPersistsBlockedBeforeListenerCanDeadLetterIt() {
+        assertThatThrownBy(() -> consumer.accept("not-json".getBytes(StandardCharsets.UTF_8)))
+            .isInstanceOf(IllegalArgumentException.class);
+
+        assertThat(readiness.inspect().state()).isEqualTo("BLOCKED");
+    }
+
     private long count(String table, String column, UUID id) {
         return jdbc.queryForObject("SELECT COUNT(*) FROM " + table + " WHERE " + column + "=?",
             Long.class, id.toString());
@@ -103,10 +172,19 @@ class ProductProjectionIT {
             """.formatted(eventId, listingId, version, title).getBytes(StandardCharsets.UTF_8);
     }
 
+    private static byte[] marker(long highWatermark) {
+        return """
+            {"eventType":"PRODUCT_REPLAY_COMPLETE","schemaVersion":1,
+             "replayId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+             "sourceHighWatermark":%d,"completedAt":"2026-09-15T00:00:00Z"}
+            """.formatted(highWatermark).getBytes(StandardCharsets.UTF_8);
+    }
+
     @SpringBootConfiguration
     @EnableAutoConfiguration
-    @Import({ProductEventConsumer.class, ProductSnapshotDecoder.class, JdbcProductInbox.class,
-        JdbcProductProjection.class, JdbcProductIndexOutbox.class})
+    @Import({ProductEventConsumer.class, ProductSnapshotDecoder.class,
+        ProductReplayCompleteDecoder.class, JdbcProductInbox.class, JdbcProductProjection.class,
+        JdbcProductIndexOutbox.class, JdbcProductReadinessRepository.class})
     static class TestApplication {
     }
 }

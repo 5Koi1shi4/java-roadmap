@@ -9,7 +9,9 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /** Rabbit ACK 只发生在读库事务返回后；失败保留可重试或人工排查路径。 */
 class ProductRabbitListenerTest {
@@ -25,18 +27,40 @@ class ProductRabbitListenerTest {
 
         var calls = inOrder(consumer, channel);
         calls.verify(consumer).accept(message.getBody());
-        calls.verify(channel).basicAck(9L, false);
+        calls.verify(channel, times(1)).basicAck(9L, false);
+        verify(channel, never()).basicReject(9L, false);
+        verify(channel, never()).basicNack(9L, false, true);
     }
 
     @Test
-    void transientReadDatabaseFailureNacksForRetryWithoutAck() throws Exception {
+    void runtimeFailureIsRejectedAfterThreeBoundedAttempts() throws Exception {
         Message message = message();
         doThrow(new IllegalStateException("读库断开")).when(consumer).accept(message.getBody());
 
         listener.handle(message, channel);
 
-        verify(channel).basicNack(9L, false, true);
+        verify(consumer, times(3)).accept(message.getBody());
+        verify(consumer, times(1)).markBlockedAfterExhausted();
+        verify(channel).basicReject(9L, false);
+        verify(channel, never()).basicNack(9L, false, true);
         verify(channel, never()).basicAck(9L, false);
+    }
+
+    @Test
+    void runtimeFailureCanRecoverOnThirdAttemptAndAcknowledgesOnce() throws Exception {
+        Message message = message();
+        when(consumer.accept(message.getBody()))
+            .thenThrow(new IllegalStateException("读库短暂断开"))
+            .thenThrow(new IllegalStateException("读库仍未恢复"))
+            .thenReturn(true);
+
+        listener.handle(message, channel);
+
+        verify(consumer, times(3)).accept(message.getBody());
+        verify(consumer, never()).markBlockedAfterExhausted();
+        verify(channel, times(1)).basicAck(9L, false);
+        verify(channel, never()).basicReject(9L, false);
+        verify(channel, never()).basicNack(9L, false, true);
     }
 
     @Test
@@ -47,7 +71,9 @@ class ProductRabbitListenerTest {
 
         listener.handle(message, channel);
 
-        verify(channel).basicReject(9L, false);
+        verify(consumer, times(1)).accept(message.getBody());
+        verify(channel, times(1)).basicReject(9L, false);
+        verify(channel, never()).basicNack(9L, false, true);
         verify(channel, never()).basicAck(9L, false);
     }
 

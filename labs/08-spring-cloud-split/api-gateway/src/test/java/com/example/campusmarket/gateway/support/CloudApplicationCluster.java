@@ -40,6 +40,7 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -47,6 +48,7 @@ import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -110,6 +112,7 @@ public final class CloudApplicationCluster implements AutoCloseable {
     private final int gatewayPort;
     private final int rabbitHostPort;
     private final int elasticsearchHostPort;
+    private final Set<Integer> selectedPorts = new HashSet<>();
 
     private ConfigurableApplicationContext discovery;
     private ConfigurableApplicationContext identity;
@@ -565,6 +568,7 @@ public final class CloudApplicationCluster implements AutoCloseable {
         properties.put("campus.market.dispute.return-reconciliation.enabled", false);
         properties.put("campus.market.warranty.deadline.enabled", false);
         properties.put("campus.market.product.publisher.enabled", true);
+        properties.put("campus.market.product.bootstrap.enabled", true);
         properties.put("spring.task.scheduling.enabled", true);
         return properties;
     }
@@ -599,8 +603,6 @@ public final class CloudApplicationCluster implements AutoCloseable {
         properties.put("spring.security.oauth2.resourceserver.jwt.issuer-uri", "http://gateway.test");
         properties.put("campus.market.jwt.audience", "campus-market-api");
         properties.put("campus.market.product.index.enabled", true);
-        properties.put("management.endpoint.health.group.readiness.include",
-            "readinessState,jwks,eureka");
         return properties;
     }
 
@@ -713,11 +715,21 @@ public final class CloudApplicationCluster implements AutoCloseable {
             .addFirst(new MapPropertySource("cloud-journey-overrides", copy));
     }
 
-    private static int randomPort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) {
-            socket.setReuseAddress(true);
-            return socket.getLocalPort();
+    private int randomPort() throws IOException {
+        // 低位端口避开常见动态客户端端口段；服务启动前频繁的 Eureka/HTTP 连接不能抢占预选号。
+        for (int attempt = 0; attempt < 100; attempt++) {
+            int candidate = ThreadLocalRandom.current().nextInt(20_000, 30_000);
+            if (selectedPorts.contains(candidate)) {
+                continue;
+            }
+            try (ServerSocket socket = new ServerSocket(candidate)) {
+                selectedPorts.add(candidate);
+                return candidate;
+            } catch (IOException occupied) {
+                // 此端口已有监听者，继续选取不同的候选端口。
+            }
         }
+        throw new IOException("无法为 Cloud 旅程选取七个独立的低位端口");
     }
 
     private static String filesystemLocation(Path path) {

@@ -10,6 +10,7 @@ import org.springframework.amqp.core.QueueBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
+import org.springframework.beans.factory.annotation.Qualifier;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -25,6 +26,7 @@ public class RabbitTopology {
     public static final String MANUAL_QUEUE = "campus.market.manual.failure";
     public static final String PRODUCT_EXCHANGE = "campus.product.snapshot";
     public static final String PRODUCT_QUEUE = "campus.product.read";
+    public static final String PRODUCT_MANUAL_QUEUE = "campus.product.manual.failure";
 
     @Bean
     DirectExchange campusMarketEventExchange() {
@@ -61,9 +63,14 @@ public class RabbitTopology {
     @Bean
     Queue campusProductReadQueue() {
         return QueueBuilder.durable(PRODUCT_QUEUE)
-                .deadLetterExchange(MANUAL_EXCHANGE)
-                .deadLetterRoutingKey("FAILURE")
-                .build();
+            .deadLetterExchange(MANUAL_EXCHANGE)
+            .deadLetterRoutingKey("PRODUCT_FAILURE")
+            .build();
+    }
+
+    @Bean
+    Queue campusProductManualQueue() {
+        return QueueBuilder.durable(PRODUCT_MANUAL_QUEUE).quorum().build();
     }
 
     @Bean
@@ -90,6 +97,13 @@ public class RabbitTopology {
     }
 
     @Bean
+    Binding campusProductManualBinding(@Qualifier("campusProductManualQueue") Queue campusProductManualQueue,
+                                      @Qualifier("campusMarketManualExchange") DirectExchange campusMarketManualExchange) {
+        return BindingBuilder.bind(campusProductManualQueue)
+                .to(campusMarketManualExchange).with("PRODUCT_FAILURE");
+    }
+
+    @Bean
     Declarables campusProductSnapshotBindings(Queue campusProductReadQueue,
                                                DirectExchange campusProductSnapshotExchange) {
         List<Declarable> bindings = new ArrayList<>();
@@ -111,5 +125,5 @@ public class RabbitTopology {
 
     private static final List<String> PRODUCT_EVENT_TYPES = List.of(
         "LISTING_CREATED", "LISTING_UPDATED", "LISTING_PUBLISHED", "LISTING_OFF_SALE",
-        "LISTING_SOLD_OUT", "INVENTORY_CHANGED");
+        "LISTING_SOLD_OUT", "INVENTORY_CHANGED", "PRODUCT_REPLAY_COMPLETE");
 }

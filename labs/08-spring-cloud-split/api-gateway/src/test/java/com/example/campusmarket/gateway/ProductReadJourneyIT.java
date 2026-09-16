@@ -60,6 +60,7 @@ class ProductReadJourneyIT {
             .containsEntry("product-search", "lb://product-read-service")
             .containsEntry("product-listing-search", "lb://product-read-service");
         assertRegisteredPorts();
+        awaitProductReadinessWithProjectionBarrier();
 
         HttpResponse<String> directWithoutBearer = http.send(HttpRequest.newBuilder(
                 cluster.productReadBaseUri().resolve("/api/search?keyword=教材"))
@@ -119,6 +120,30 @@ class ProductReadJourneyIT {
             "PRODUCT-READ-SERVICE", "API-GATEWAY")) {
             assertThat(registered.get(name)).containsExactly(webPorts.get(name));
         }
+    }
+
+    private void awaitProductReadinessWithProjectionBarrier() throws Exception {
+        Instant deadline = Instant.now().plus(SEARCH_RECOVERY_WINDOW);
+        String last = "尚未请求";
+        while (Instant.now().isBefore(deadline)) {
+            HttpResponse<String> readiness = http.send(HttpRequest.newBuilder(
+                    cluster.productReadBaseUri().resolve("/actuator/health/readiness"))
+                .timeout(REQUEST_TIMEOUT).GET().build(),
+                HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+            last = readiness.body();
+            if (readiness.statusCode() == 200) {
+                JsonNode status = mapper.readTree(last);
+                JsonNode components = status.path("components");
+                if ("UP".equals(status.path("status").asText())
+                    && List.of("readinessState", "db", "rabbit", "jwks", "eureka",
+                        "productSearch", "projection").stream().allMatch(name ->
+                        "UP".equals(components.path(name).path("status").asText()))) {
+                    return;
+                }
+            }
+            Thread.sleep(250);
+        }
+        throw new AssertionError("商品读服务未在确认式投影屏障后就绪：" + last);
     }
 
     private Account registerAndLogin(String prefix) throws Exception {

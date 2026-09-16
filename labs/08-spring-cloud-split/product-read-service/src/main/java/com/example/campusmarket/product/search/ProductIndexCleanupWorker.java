@@ -1,5 +1,6 @@
 package com.example.campusmarket.product.search;
 
+import co.elastic.clients.elasticsearch._types.ElasticsearchException;
 import com.example.campusmarket.product.infrastructure.ProductIndexCleanupRepository;
 import com.example.campusmarket.product.infrastructure.ProductRebuildGateRepository;
 import org.springframework.stereotype.Component;
@@ -7,11 +8,16 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** 有界清理重建遗留索引；删除前再次读取 live alias，避免误删线上索引。 */
 @Component
 public class ProductIndexCleanupWorker {
     private static final Duration RETRY_DELAY = Duration.ofSeconds(1);
+    private static final Pattern HTTP_STATUS = Pattern.compile(
+            "HTTP(?:/[0-9.]+)?\\s+(\\d{3})|\\bstatus(?:[ _-]?code)?[^0-9]*(\\d{3})\\b",
+            Pattern.CASE_INSENSITIVE);
 
     private final ProductIndexCleanupRepository cleanup;
     private final ProductRebuildGateRepository gate;
@@ -55,9 +61,10 @@ public class ProductIndexCleanupWorker {
                     completed++;
                 }
             } catch (RuntimeException failure) {
-                if (claim.attemptCount() >= 3) {
+                if (isPermanentFailure(failure)) {
                     cleanup.markFailed(claim, message(failure));
                 } else {
+                    // 网络中断、503、408、429 等外部短暂故障必须无限期保留重试路径。
                     cleanup.markRetry(claim, RETRY_DELAY, message(failure));
                 }
             }
@@ -72,5 +79,40 @@ public class ProductIndexCleanupWorker {
     private static String message(RuntimeException failure) {
         String message = failure.getMessage();
         return message == null || message.isBlank() ? "索引清理失败" : message;
+    }
+
+    private static boolean isPermanentFailure(RuntimeException failure) {
+        Throwable current = failure;
+        while (current != null) {
+            if (current instanceof IllegalArgumentException) {
+                return true;
+            }
+            Integer status = statusCode(current);
+            if (status != null && status >= 400 && status < 500 && status != 408 && status != 429) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private static Integer statusCode(Throwable failure) {
+        if (failure instanceof ElasticsearchException elasticsearchException) {
+            return elasticsearchException.status();
+        }
+        String message = failure.getMessage();
+        if (message == null || message.isBlank()) {
+            return null;
+        }
+        Matcher matcher = HTTP_STATUS.matcher(message);
+        if (!matcher.find()) {
+            return null;
+        }
+        String value = matcher.group(1) == null ? matcher.group(2) : matcher.group(1);
+        try {
+            return Integer.valueOf(value);
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
     }
 }

@@ -2,6 +2,7 @@ package com.example.campusmarket.product.integration;
 
 import com.example.campusmarket.product.api.SearchController;
 import com.example.campusmarket.product.search.ProductSearchPort;
+import com.example.campusmarket.product.security.ProductProjectionReadinessHealthIndicator;
 import com.example.campusmarket.product.security.ProductResourceServerConfiguration;
 import com.example.campusmarket.testsupport.HttpAssertions;
 import com.example.campusmarket.testsupport.TestJwtFactory;
@@ -17,6 +18,7 @@ import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.SpringBootConfiguration;
+import org.springframework.boot.actuate.health.Health;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration;
 import org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration;
@@ -42,6 +44,8 @@ import java.util.Set;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /** 直接访问商品读服务也必须独立验 RS256/JWKS 与严格身份声明。 */
 @SpringBootTest(classes = ProductHttpSecurityIT.TestApplication.class,
@@ -186,6 +190,14 @@ class ProductHttpSecurityIT {
     @EnableAutoConfiguration(exclude = {DataSourceAutoConfiguration.class, FlywayAutoConfiguration.class})
     @Import({ProductResourceServerConfiguration.class, SearchController.class})
     static class TestApplication {
+        @Bean
+        ProductProjectionReadinessHealthIndicator projectionHealth() {
+            ProductProjectionReadinessHealthIndicator indicator =
+                    mock(ProductProjectionReadinessHealthIndicator.class);
+            when(indicator.health()).thenReturn(Health.up().build());
+            return indicator;
+        }
+
         @Bean
         ProductSearchPort search() {
             return new ProductSearchPort() {

@@ -9,6 +9,7 @@ import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -22,6 +23,7 @@ import java.util.concurrent.locks.ReentrantLock;
 public class ProductSearchRebuildService {
     private static final Duration REBUILD_LEASE = Duration.ofSeconds(60);
     private static final int MAX_CATCH_UP_ROUNDS = 1_000;
+    private static final int SNAPSHOT_PAGE_SIZE = 500;
 
     private final JdbcTemplate jdbc;
     private final TransactionTemplate snapshotTransaction;
@@ -69,13 +71,17 @@ public class ProductSearchRebuildService {
                 return RebuildResult.skipped();
             }
             claim = acquired.get();
-            targetIndex = search.createRebuildIndex();
+            targetIndex = search.newRebuildIndexName();
+            if (!gate.recordTarget(claim, targetIndex)) {
+                throw new IllegalStateException("重建目标记录 ownership 已失效");
+            }
+            search.createRebuildIndex(targetIndex);
 
-            Snapshot snapshot = readSnapshot();
+            Snapshot snapshot = readSnapshot(claim);
             if (!gate.recordSnapshot(claim, targetIndex, snapshot.sequenceNo())) {
                 throw new IllegalStateException("重建快照 ownership 已失效");
             }
-            indexSnapshot(targetIndex, snapshot.rows());
+            indexSnapshot(claim, targetIndex, snapshot.rows());
             if (!gate.renew(claim, REBUILD_LEASE)) {
                 throw new IllegalStateException("重建快照租约已失效");
             }
@@ -103,14 +109,18 @@ public class ProductSearchRebuildService {
             return new RebuildResult(true, targetIndex, snapshot.sequenceNo(), cutoverSequence,
                     claim.generation(), transition.previousIndexes());
         } catch (RuntimeException failure) {
+            boolean safeToRelease = targetIndex == null;
             if (!aliasSwitchAttempted && targetIndex != null) {
                 try {
-                    search.deleteIndex(targetIndex);
+                    if (!search.readAllAliasMembers().contains(targetIndex)) {
+                        cleanup.enqueue(targetIndex, claim.generation());
+                        safeToRelease = true;
+                    }
                 } catch (RuntimeException ignored) {
-                    // 清理由持久任务或下一次重建继续处理。
+                    // 无法证实目标不是 live alias 时保留门禁，供恢复器继续核对。
                 }
             }
-            if (!aliasSwitchAttempted && claim != null) {
+            if (!aliasSwitchAttempted && claim != null && safeToRelease) {
                 gate.release(claim);
             }
             throw failure;
@@ -119,20 +129,35 @@ public class ProductSearchRebuildService {
         }
     }
 
-    private Snapshot readSnapshot() {
+    private Snapshot readSnapshot(ProductRebuildGateRepository.GateClaim claim) {
         Snapshot snapshot = snapshotTransaction.execute(status -> {
             Long sequence = jdbc.queryForObject(
                     "SELECT COALESCE(MAX(sequence_no),0) FROM product_index_outbox", Long.class);
-            List<Projection> rows = jdbc.query("""
-                SELECT listing_id,aggregate_version,title,description,category,
-                       unit_price_fen,available_quantity,status
-                FROM product_projection
-                ORDER BY listing_id
-                """, (result, row) -> new Projection(
-                    result.getString("listing_id"), result.getLong("aggregate_version"),
-                    result.getString("title"), result.getString("description"),
-                    result.getString("category"), result.getLong("unit_price_fen"),
-                    result.getInt("available_quantity"), result.getString("status")));
+            List<Projection> rows = new ArrayList<>();
+            String cursor = "";
+            while (true) {
+                List<Projection> page = jdbc.query("""
+                    SELECT listing_id,aggregate_version,title,description,category,
+                           unit_price_fen,available_quantity,status
+                    FROM product_projection
+                    WHERE listing_id > ?
+                    ORDER BY listing_id
+                    LIMIT ?
+                    """, (result, row) -> new Projection(
+                        result.getString("listing_id"), result.getLong("aggregate_version"),
+                        result.getString("title"), result.getString("description"),
+                        result.getString("category"), result.getLong("unit_price_fen"),
+                        result.getInt("available_quantity"), result.getString("status")),
+                        cursor, SNAPSHOT_PAGE_SIZE);
+                rows.addAll(page);
+                if (!gate.renew(claim, REBUILD_LEASE)) {
+                    throw new IllegalStateException("重建快照租约已失效");
+                }
+                if (page.size() < SNAPSHOT_PAGE_SIZE) {
+                    break;
+                }
+                cursor = page.get(page.size() - 1).listingId();
+            }
             return new Snapshot(sequence == null ? 0L : sequence, rows);
         });
         if (snapshot == null) {
@@ -141,9 +166,14 @@ public class ProductSearchRebuildService {
         return snapshot;
     }
 
-    private void indexSnapshot(String targetIndex, List<Projection> rows) {
+    private void indexSnapshot(ProductRebuildGateRepository.GateClaim claim,
+                               String targetIndex, List<Projection> rows) {
+        int indexed = 0;
         for (Projection projection : rows) {
             writeProjection(targetIndex, projection);
+            if (++indexed % 10 == 0 && !gate.renew(claim, REBUILD_LEASE)) {
+                throw new IllegalStateException("重建快照租约已失效");
+            }
         }
     }
 

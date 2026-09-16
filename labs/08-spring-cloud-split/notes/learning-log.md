@@ -1,5 +1,13 @@
 # 实验八学习日志
 
+## 2026-09-16：8.2 商品读服务已验收
+
+- 独立商品读服务、第三库和 SmartCN 索引承接两条精确 Gateway GET 搜索；商品、库存、订单及支付售后交易事实仍在兼容单体。源事务写完整 `schemaVersion=2` 快照，Rabbit confirm 与稳定 replay ID 完成屏障保障读侧首次就绪，Inbox/版本投影/index Outbox/ES tombstone 与在线重建提供恢复路径。
+- 先红后绿处理审阅问题：零源事件未确认屏障时启动调度器不能误判 `IDLE` 完成；旧搜索重建关闭时商品发布和源快照仍应提交；只读一致性快照分批查询并用独立事务续租；商品专用死信积压时搜索返回 503。永久 ES 4xx/非法投影记录 `FAILED`，短暂 503/断连保留待办并使 readiness DOWN，恢复后可自动重试。
+- JDK 17.0.12、Docker Engine 29.7.2；串行 fresh `mvnw.cmd clean test`、`mvnw.cmd clean verify` 均退出 0、六模块 BUILD SUCCESS。最终 142 个 XML 汇总 Surefire 228、Failsafe/Testcontainers 357，共 585 项，全部 0 failures、0 errors、0 skipped。真实五应用旅程和故障恢复、原实验七三轮演练与旧搜索重建 35 项均在同次 `verify` 运行。
+- 官方 JRE 五应用与 SmartCN 镜像的隔离 Compose config/build/up 通过；五应用 health、十个探针均 UP，Eureka 4/4、Gateway JWKS HTTP 200；商品 Rabbit 主队列和专用人工失败队列均为 0。隔离容器、卷、网络及仓库外临时口令/密钥已清理，复查无残留。证据见 [8.2 验收记录](../docs/acceptance-20260916.md)。
+- legacy Failsafe 结束时 Eureka 后台线程触发 Surefire 30 秒强制结束 fork 的日志提示；reactor 仍退出 0，fresh XML 的 280 项 legacy 集成测试为 0 failures/errors/skipped。该提示属于测试进程退出阶段，未作为业务测试失败隐藏。
+
 ## 2026-09-15：8.2 商品读服务实施中
 
 - 用户通过“独立商品读服务、交易事实暂留兼容单体”设计并批准实施。实验分支新增第五应用、精确 Gateway GET 路由、`product_read_db` 第三库及最小权限，市场事务产生 `schemaVersion=2` 完整快照，Rabbit publisher confirm 与本机保留事件 replay，读侧 Inbox/版本条件投影/index Outbox。

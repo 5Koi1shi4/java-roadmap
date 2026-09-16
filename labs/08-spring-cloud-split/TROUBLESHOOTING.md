@@ -2,15 +2,15 @@
 
 ## 8.2 商品读服务
 
-第五应用 `product-read-service` 的宿主诊断端口为 18083，Eureka 注册名 `PRODUCT-READ-SERVICE`。搜索的两个精确 GET 路由只从 Gateway 发起；客户端 Token、issuer/audience/kid 与 legacy 一致，商品服务也独立验签。搜索安全 503 时先看产品 `/actuator/health/readiness` 中的 `jwks`、`eureka`、`db`、`rabbit`、`productSearch`，再看 Rabbit `campus.product.read` 队列、源 `search_outbox`、读侧 `product_index_outbox` 和 ES `campus-product-read/write` 别名。不能改成固定下游端口、跳过 JWT 或手工标记待办已发布。
+第五应用 `product-read-service` 的宿主诊断端口为 18083，Eureka 注册名 `PRODUCT-READ-SERVICE`。搜索的两个精确 GET 路由只从 Gateway 发起；客户端 Token、issuer/audience/kid 与 legacy 一致，商品服务也独立验签。搜索安全 503 时先看产品 `/actuator/health/readiness` 中的 `jwks`、`eureka`、`db`、`rabbit`、`productSearch`、`projection`。`projection` 的 WAITING 表示尚未收到源完成屏障，CATCHING_UP 表示屏障前索引待办未清，BLOCKED 或 `manualFailureCount>0` 表示商品专用死信 `campus.product.manual.failure` 有待人工检查。再核对 Rabbit `campus.product.read` 队列、源 `search_outbox`、读侧 `product_index_outbox` 和 ES `campus-product-read/write` 别名。不能改成固定下游端口、跳过 JWT 或手工标记待办已发布。
 
-Rabbit 停机后交易命令和源 Outbox 仍可提交。恢复 broker 后确认式 publisher 继续发布；保留事件可由本机 `ProductReplayService.replayOnce(limit)` 以固定高水位有界补放，读侧由 Inbox 和商品版本去重。ES 停机时投影和索引待办继续保留，恢复后 index scheduler 补投；零库存/下架须保持 tombstone。重建失败要检查 `product_rebuild_gate` 的 mode/intent/generation、别名目标和 `product_index_cleanup_task`，由有效 owner 恢复，不能直接删除 live 索引。更多操作边界见 [商品读服务说明](docs/product-read-service.md)。
+Rabbit 停机后交易命令和源 Outbox 仍可提交。恢复 broker 后确认式 publisher 继续发布；保留事件可由本机 `ProductReplayService.replayOnce(limit)` 以固定高水位有界补放，末尾确认式 `PRODUCT_REPLAY_COMPLETE` 屏障使读侧 checkpoint 具备高水位证据。投影库丢失后从源保留事件重新 replay，不能只重建 ES；商品死信需先核对失败原因并处理，再重新回放，不能清空状态强行就绪。ES 停机时投影和索引待办继续保留，恢复后 index scheduler 补投；零库存/下架须保持 tombstone。永久 ES 4xx/非法投影检查 `product_index_outbox.failure_class` 和 `last_error`，503/网络故障应维持 NEW 重试。重建失败要检查 `product_rebuild_gate` 的 mode/intent/generation、别名目标和 `product_index_cleanup_task`，由有效 owner 恢复，不能直接删除 live 索引。更多操作边界见 [商品读服务说明](docs/product-read-service.md)。
 
 本手册保留实验七交易基线的排障路径，并记录实验八身份拆分的边界。先确认失败发生在哪个事实边界，再做恢复；不要通过跳过测试、手工篡改状态或放宽 ACL 获得表面成功。
 
 ## 实验八：本地 Compose 启动
 
-Compose 只包含实验八四应用及其最小运行依赖：MySQL、Redis、RabbitMQ、安装 SmartCN 的 Elasticsearch 和 MinIO。Toxiproxy 由故障测试的 Testcontainers 独立创建，不需要也不应该作为本地常驻服务启动。以下命令只做本地 Compose 基础启动 smoke；注册、登录和业务旅程仍必须由真实 Testcontainers 夹具验收。先确认 JDK 17、Docker Engine 和各模块的 `target` JAR 已准备好，再执行：
+Compose 只包含实验八五应用及其最小运行依赖：MySQL、Redis、RabbitMQ、安装 SmartCN 的 Elasticsearch 和 MinIO。Toxiproxy 由故障测试的 Testcontainers 独立创建，不需要也不应该作为本地常驻服务启动。以下命令只做本地 Compose 基础启动 smoke；注册、登录和业务旅程仍必须由真实 Testcontainers 夹具验收。先确认 JDK 17、Docker Engine 和各模块的 `target` JAR 已准备好，再执行：
 
 ```powershell
 docker compose --env-file .env config --quiet
@@ -21,21 +21,21 @@ docker compose --env-file .env ps
 
 `config --quiet` 只验证 Compose 语法，不把展开后的口令打印到终端。查看某个服务的启动错误时使用 `docker compose --env-file .env logs <service>`，不要把 `.env`、JWT 私钥或 Token 粘贴到排障记录；根目录的 `.dockerignore` 会排除本地配置、密钥、日志、版本控制目录和非应用构建输出。若应用镜像提示 JAR 不存在，先在实验目录执行 `.\mvnw.cmd -DskipTests package`，再重新构建对应镜像；该打包步骤不是测试验收。
 
-Compose 只表达启动依赖顺序，应用自身仍可能需要几秒注册 Eureka。应先看 `docker compose ps` 和各应用日志，确认 `discovery-server` 已监听 8761，再按 README 中的有界 PowerShell 脚本轮询四个应用的 `/actuator/health`、liveness/readiness 和 Eureka 注册，最后从 Gateway 18080 发起请求。脚本最多等待 2 分钟；任一探针缺失或返回 DOWN 时保留应用日志并排查依赖，不能把 Compose 的 `service_started` 当作就绪。所有服务均为 `restart: "no"`；反复重启只会掩盖首次失败，应该先保存错误边界再处理。
+Compose 只表达启动依赖顺序，应用自身仍可能需要几秒注册 Eureka。应先看 `docker compose ps` 和各应用日志，确认 `discovery-server` 已监听 8761，再按 README 中的有界 PowerShell 脚本轮询五个应用的 `/actuator/health`、liveness/readiness 和 Eureka 注册，最后从 Gateway 18080 发起请求。脚本最多等待 2 分钟；任一探针缺失或返回 DOWN 时保留应用日志并排查依赖，不能把 Compose 的 `service_started` 当作就绪。所有服务均为 `restart: "no"`；反复重启只会掩盖首次失败，应该先保存错误边界再处理。
 
 PowerShell 7 的 `Invoke-WebRequest.Content` 对没有显式字符集的 Actuator/Eureka JSON 可能返回字节数组；README 脚本先按 UTF-8 解码，再匹配 `UP` 与服务名。若 HTTP 200 却被脚本误报缺失，应先检查响应体类型和解码结果，而不是延长 deadline 或绕过 readiness。
 
-## 实验八：双库初始化失败
+## 实验八：三库初始化失败
 
 MySQL 的 `docker/mysql/01-split-databases.sh` 只在 `mysql-data` 空卷第一次初始化时执行。若日志显示数据库或账号不存在、Flyway 迁移未执行，先检查 MySQL 是否健康以及 `.env` 中五个数据库口令是否已经替换；已有卷不会自动重新运行脚本。确认只需丢弃本地实验数据后，才可执行 `docker compose --env-file .env down -v`，再重新 `up -d`。
 
-identity 使用 `identity_db`/`identity_app`，legacy 使用 `market_db`/`market_app`；两者的 Flyway 分别使用 `identity_migrator`/`market_migrator`。运行账号只有本库必要 DML，迁移账号拥有本库 Flyway 所需 DML 与 DDL，不要通过 root、全局授权或跨库读取来绕过 `Access denied`。跨库权限被拒绝是设计边界，需修正服务连接或迁移配置。
+identity 使用 `identity_db`/`identity_app`，legacy 使用 `market_db`/`market_app`，product 使用 `product_read_db`/`product_app`；Flyway 分别使用 `identity_migrator`、`market_migrator`、`product_migrator`。运行账号只有本库必要 DML，迁移账号拥有本库 Flyway 所需 DML 与 DDL，不要通过 root、全局授权或跨库读取来绕过 `Access denied`。跨库权限被拒绝是设计边界，需修正服务连接或迁移配置。
 
 ## 实验八：密钥文件、JWKS 或 Gateway 路由
 
 identity 启动时会读取 `.env` 指向的仓库外 PKCS#8 私钥和 X.509 公钥，并校验二者匹配。出现 `JWT ... resource is not readable` 或密钥不匹配时，检查宿主机绝对路径、Compose bind mount 和文件格式；不要把密钥内容写入仓库或日志。
 
-固定 JWKS 路径是 `/api/auth/.well-known/jwks.json`。容器间使用 `http://identity-service:8080/api/auth/.well-known/jwks.json`，客户端诊断使用 Gateway 的 `http://localhost:18080/api/auth/.well-known/jwks.json`。Gateway 的 `/api/auth/**` 路由到 `identity-service`，其他 `/api/**` 路由到 `legacy-market-service`；不要把 `lb://` 改成固定下游端口来规避 Eureka 注册问题。核对 Gateway、identity 和 legacy 的 issuer、audience、`kid` 必须一致；不要输出 Token。
+固定 JWKS 路径是 `/api/auth/.well-known/jwks.json`。容器间使用 `http://identity-service:8080/api/auth/.well-known/jwks.json`，客户端诊断使用 Gateway 的 `http://localhost:18080/api/auth/.well-known/jwks.json`。Gateway 的 `/api/auth/**` 路由到 `identity-service`，精确 `GET /api/search` 与 `GET /api/listings/search` 路由到 `product-read-service`，其他 `/api/**` 路由到 `legacy-market-service`；不要把 `lb://` 改成固定下游端口来规避 Eureka 注册问题。核对 Gateway、identity、legacy 和 product 的 issuer、audience、`kid` 必须一致；不要输出 Token。
 
 ## 实验八：基础依赖健康检查
 
@@ -43,9 +43,9 @@ identity 启动时会读取 `.env` 指向的仓库外 PKCS#8 私钥和 X.509 公
 
 ## 实验八：Eureka 与路由
 
-路由目标不可用时先检查 Eureka 注册表是否包含 `IDENTITY-SERVICE`、`LEGACY-MARKET-SERVICE` 和 `API-GATEWAY`，实例端口是否为当前应用实际端口，以及每个客户端 `EUREKA_DEFAULT_ZONE` 是否指向同一个注册中心。注册中心地址是配置，业务实例地址由发现获得；不要把失败的 `lb://` 路由改成固定业务端口来让旅程通过。
+路由目标不可用时先检查 Eureka 注册表是否包含 `IDENTITY-SERVICE`、`LEGACY-MARKET-SERVICE`、`PRODUCT-READ-SERVICE` 和 `API-GATEWAY`，实例端口是否为当前应用实际端口，以及每个客户端 `EUREKA_DEFAULT_ZONE` 是否指向同一个注册中心。注册中心地址是配置，业务实例地址由发现获得；不要把失败的 `lb://` 路由改成固定业务端口来让旅程通过。
 
-Gateway 只配置身份与业务两条显式路由。依赖故障应返回脱敏中文 UTF-8 503，不传出主机、端口、服务 ID 或下游堆栈。Eureka 停机后短期缓存可用与冷启动无注册信息是不同情形，应分别验证。
+Gateway 配置身份、商品搜索和兼容交易的显式路由。依赖故障应返回脱敏中文 UTF-8 503，不传出主机、端口、服务 ID 或下游堆栈。Eureka 停机后短期缓存可用与冷启动无注册信息是不同情形，应分别验证。
 
 ## 实验八：JWKS 与身份失败
 
@@ -57,7 +57,7 @@ Gateway 和 legacy 的 readiness 同时报告 `jwks`、`eureka` 组件。JWKS �
 
 若仅在 `ApplicationBaselineIT` 或 `Task13FencingIT` 的无 Web 测试上下文出现 `Included health contributor 'jwks' ... does not exist`，原因是此模式不创建 Servlet 资源服务器健康组件。这两个测试上下文只校验 `readinessState`；真实 Web 服务仍必须包含并验证 `jwks`、`eureka`。
 
-## 实验八：双库权限与迁移
+## 实验八：三库权限与迁移
 
 身份和交易分别配置本库 DataSource 与 Flyway 迁移账号。运行账号只有必要 DML 权限，迁移账号拥有本库 Flyway 所需 DML 与 DDL 权限。跨库读取被拒绝是预期边界；不要授予全局权限或恢复跨库外键来解决启动错误。实验只支持全新环境，不能复用实验七单库 Flyway 历史冒充迁移完成。
 
@@ -194,5 +194,7 @@ git diff --check
 ```
 
 `CampusMarketJourneyIT` 依次运行教材旅程（MySQL、Redis、SmartCN Elasticsearch）和质保旅程（MySQL、Redis、MinIO）。`RecoveryDrillIT` 依次运行 RabbitMQ、Elasticsearch、MinIO 三个核心阶段；`RecoveryInvariantStagesIT` 补充每轮 ACL 与搜索集合阶段。每轮都必须看到故障证据，并在恢复后证明库存非负、退款未超额、单次结算、无过期未决租约、证据 ACL 未放宽、MySQL 与搜索在售集合一致。
+
+2026-09-16 实验八 8.2 的 fresh `clean test` 与 `clean verify` 六模块均 BUILD SUCCESS，XML 为 Surefire 228 项、Failsafe/Testcontainers 357 项，共 585 项，全部 0 failures、0 errors、0 skipped。五应用与商品读故障恢复、读索引重建、三库权限、冷启动投影屏障和原实验七业务回归都在完整运行中；官方 JDK17 JRE 镜像的隔离 Compose 检查五应用 health、十个探针、Eureka 4/4、Gateway JWKS 200 和商品专用队列清空。详见 [8.2 验收记录](docs/acceptance-20260916.md)。
 
 截至 2026-09-11 的 Surefire 137 项、Failsafe/Testcontainers 251 项是实验七迁入基线的历史参考，不是实验八结果。2026-09-15 实验八 8.1 的 `clean verify` 六模块 BUILD SUCCESS，fresh XML 为 Surefire 196 项、Failsafe/Testcontainers 293 项，共 489 项，全部 0 failures、0 errors、0 skipped；真实注册旅程、四应用探针、停机恢复和原业务故障演练均覆盖。正式 JDK17 JRE 镜像的 Compose 启动也验证了四应用八个探针、Eureka 3/3 注册和 Gateway RSA JWKS。以后重跑仍须以 Docker 可用、无 skipped 且 SmartCN/支付/竞态/恢复实际执行的新报告判定。
