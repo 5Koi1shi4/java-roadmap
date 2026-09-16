@@ -164,3 +164,13 @@
 - 上传目标为既有远程 `https://github.com/5Koi1shi4/java-roadmap.git`，实验分支 `learning/spring-cloud-split` 与文档中心 `main`；自动审批要求用户明确确认具体仓库/分支后才能外发源码，故本次尚未推送。
 
 - 上传授权补充：用户明确确认上述仓库与分支，并要求检查与替换敏感信息。已将文档中的本机路径和用户名替换为 `<workspace>`、`<user-home>`，同时清理文档中心尚未推送的 13 个提交（不改动已发布历史）。实验分支的 21 个新增提交与文档中心历史经常见凭据、私钥及本机个人路径规则扫描，无剩余命中；配置使用环境变量/占位符，测试凭据仅用于临时容器，RSA 测试密钥运行时生成。
+
+## 2026-09-16
+
+- 今日目标：按已通过的 8.2 设计完成独立商品读服务，交易事实和订单快照暂留兼容单体；执行新鲜实验级验收并同步独立实验分支与 main 文档中心。
+- 实现与取舍：第五应用只读 `product_read_db`、独立 SmartCN 索引与两条精确 Gateway GET 搜索；市场事务写完整 `schemaVersion=2` 源快照，Rabbit confirm、保留事件 replay 完成屏障、Inbox/版本投影/index Outbox 与恢复门禁保证失效后可收敛。旧搜索重建不再阻断商品源事务，投影未收到可靠屏障或专用失败队列积压时搜索返回 503。
+- 新鲜测试：JDK 17.0.12、Docker Engine 29.7.2 下 `mvnw.cmd clean test` 与 `mvnw.cmd clean verify` 均六模块 BUILD SUCCESS、退出 0；最终 142 个 XML 汇总 Surefire 228、Failsafe/Testcontainers 357，共 585 项，全部 0 failures、0 errors、0 skipped。真实五应用商品旅程、故障恢复、在线重建与原实验七交易回归均运行。
+- 镜像启动：官方 JDK17 JRE 五应用和 SmartCN 镜像的隔离 Compose smoke 验证五应用 health、十个探针 UP，Eureka 4/4、Gateway JWKS HTTP 200，商品主队列和人工失败队列为 0；隔离容器、卷、网络及仓库外临时密钥已回收。
+- Git：实验验收提交 `c72c7f1` 在 `learning/spring-cloud-split`，活动树仅 `.gitignore` 与 `labs/08-spring-cloud-split/**`；敏感信息与暂存差异检查通过，远端从 `ea5cf49` 快进至 `c72c7f1`。main 只更新路线、计划和验收复盘，不合并实验代码。
+- 镜像路由补证：第二组仓库外临时 RSA 密钥签发短时本地 Token，经隔离 Compose Gateway 的两条精确商品搜索 GET 均 HTTP 200、空库结果；临时 Token、密钥、容器和卷已再次回收。
+- 补证提交：仅更新实验验收记录与实验学习日志的 `177cd25` 从 `c72c7f1` 快进推送到远端实验分支；8.2 的最终公开入口包含该镜像路由结果。

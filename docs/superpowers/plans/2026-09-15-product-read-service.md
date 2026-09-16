@@ -115,9 +115,9 @@ WHERE listing_id=? AND aggregate_version < ?;
 
 **Interfaces:** Produce existing `GET /api/search`/`GET /api/listings/search` request and `SearchPage` JSON contract; dispatcher indexes versioned `ON_SALE && quantity>0`, otherwise external-version tombstone; rebuild from product DB with snapshot/high-water/alias switch.
 
-- [ ] **Step 1:** 写失败 ES/Testcontainers IT：SmartCN 中文结果、分类/价格/searchAfter、库存零与下架删失、旧事件不能复活；重建时消费版本前进、补放后原子切换；HTTP 无效/未知 kid 返回 401、读服务/ES 失败为中文 UTF-8 503，直接访问读服务也验签。运行定点 IT 见缺少行为的失败。
-- [ ] **Step 2:** 从 legacy 中复制并按产品读库改造 `ProductSearchPort`、`ElasticsearchProductSearch`、`SearchAliasCoordinator` 与重建算法；重建只读 `product_projection` 和 `product_index_outbox`，不查询 `market_db`。读侧 dispatcher 使用本库时间、owner/claim token fencing、外部版本和持久清理任务。Controller 保持现有请求/响应字段及显式 charset；资源服务器沿用 8.1 JWT 验证契约和 JWKS 缓存，不接受用户 Header。
-- [ ] **Step 3:** 定点 IT、产品模块 `test`、`git diff --check` 通过后提交 `feat(cloud): serve and rebuild independent product search`。
+- [x] **Step 1:** 先写失败 ES/Testcontainers IT，再验证 SmartCN 中文结果、分类/价格/searchAfter、售罄/下架删失、旧事件不复活、快照高水位补放与原子别名切换；无效 Token/未知 kid 为 401，依赖故障为中文 UTF-8 503，直连也验签。
+- [x] **Step 2:** 产品读侧实现 `ProductSearchPort`、`ElasticsearchProductSearch`、index Outbox dispatcher、数据库重建门禁/恢复器和持久清理调度；仅查询 `product_projection` 与 `product_index_outbox`，以本库时间、owner/token/generation fencing、外部版本和 tombstone 收敛。快照在同一 RR 事务内分页，续租用独立事务提交；Controller 保留现有 JSON/charset，使用同一 projection health 门禁，资源服务器沿用 8.1 JWT/JWKS 契约。
+- [x] **Step 3:** 产品定点真实 MySQL/ES/Rabbit/JWT 测试与完整模块回归通过，`git diff --check` 通过；索引/重建阶段提交 `97ff832`、`8390829`，最终恢复与验收提交 `c72c7f1`。
 
 ## Task 7: 五应用真实旅程与故障恢复
 
@@ -125,17 +125,17 @@ WHERE listing_id=? AND aggregate_version < ?;
 
 **Interfaces:** Cluster starts Eureka, identity, legacy, product read and Gateway on distinct random ports with real MySQL/Rabbit/SmartCN ES; client requests only Gateway.
 
-- [ ] **Step 1:** 写真实 HTTP 失败旅程：登录、创建草稿/媒体、发布、等待搜索中文结果、下单使库存归零、验证搜索删失且订单快照未改变；Eureka 注册新服务、两条 GET 经 `lb://product-read-service`，直接产品端口无 Token 为 401。故障 IT 停 Rabbit、产品服务、ES 后恢复，检查交易写入不中断、搜索安全 503、积压最终清零、readiness 和未过期 Token 行为。运行定点 `verify` 见预期失败。
-- [ ] **Step 2:** 将 Cluster 加入读库迁移、Rabbit/ES 容器及产品应用上下文、随机端口和受控停机/重启；避免加载别的模块 application.yml 或在产品服务启动时扫描市场 DataSource。测试断言真实 `application/json; charset=UTF-8` 与中文错误，所有外部协作测试保持未 skipped。
-- [ ] **Step 3:** 运行 Gateway 定点旅程和现有四应用旅程，再运行 `mvnw.cmd -pl api-gateway -am verify`，只提交任务文件 `test(cloud): verify five-application product recovery`。
+- [x] **Step 1:** 先写失败真实 HTTP 旅程，后验证登录、草稿/媒体/发布、中文搜索、下单售罄删失且订单快照不变；Eureka 与两条精确 GET 路由、产品直连 401、Rabbit/产品进程/ES 故障期间写入保留、搜索 503 与恢复收敛。
+- [x] **Step 2:** Cluster 启动五个独立 Spring 上下文与真实 MySQL/Rabbit/SmartCN ES，产品读库单独迁移；测试端口采用有界独立随机端口，受控停机/重启与 UTF-8 中文错误断言均通过，未跳过外部协作测试。
+- [x] **Step 3:** Gateway 定点五应用旅程/故障恢复、原四应用旅程通过，完整 `clean verify` 中 Gateway 13 项 Failsafe 为 0 failures/errors/skipped；旅程提交 `4f18ac2`、`f89eed9`，最终复核 `c72c7f1`。
 
 ## Task 8: 本地运行、文档与完整验收
 
-**Files:** Modify `compose.yaml`, `.env.example`, `README.md`, `docs/architecture.md`, `docs/migration-boundary.md`, `TROUBLESHOOTING.md`, `notes/learning-log.md`, `interview/question-bank.md`; main 文档中心只在验收后修改 `README.md` 与 `notes/learning-log.md`。
+**Files:** Modify `compose.yaml`, `.env.example`, `README.md`, `docs/architecture.md`, `docs/migration-boundary.md`, `TROUBLESHOOTING.md`, `notes/learning-log.md`, `interview/question-bank.md`; main 文档中心在验收后更新 `README.md`、`notes/learning-log.md` 与本计划的完成状态。
 
 **Interfaces:** Compose 启动 Eureka、Gateway、identity、legacy、product read 五应用和当前所需固定依赖；文档明确 8.2 只拆搜索读取及 replay 操作。
 
-- [ ] **Step 1:** 更新第五应用 Dockerfile jar 配置、环境变量、最小启动依赖与健康探针；示例凭据保持 `<replace-me>`，不加入真实密钥、Token、`.env`。运行 `docker compose config` 与隔离 Compose smoke，确认五应用 readiness、Eureka 4/4 注册及两个搜索路由。
-- [ ] **Step 2:** 写中文运行、排障、事实/投影边界、replay 操作与故障记录，补学习日志和面试追问；用 `rg` 扫描凭据、私钥和本机路径；`git diff --check` 后只提交文档/Compose 文件。
-- [ ] **Step 3:** 只读 `docker info` 成功后在 JDK 17 下串行运行 fresh `mvnw.cmd clean test` 和 `mvnw.cmd clean verify`；核对新产生的 Surefire/Failsafe XML 数量及 0 failures/errors/skipped、全部实验七交易回归与新五应用 IT。若失败按 systematic-debugging 找根因、补失败测试并修复，不把 skipped 当成功。
-- [ ] **Step 4:** 复查活动树仅 `.gitignore` 与 `labs/08-spring-cloud-split/**`，`git diff --check`；将验收证据提交实验分支，并在 `main` 文档中心更新路线状态与数量。远端推送沿用用户已给的具体仓库/分支授权，提交前扫描敏感信息。
+- [x] **Step 1:** 第五应用官方 JDK17 JRE Dockerfile、jar、环境与 readiness 已配置；示例只保留占位符。隔离 Compose config/build/up 后五应用 health 和十个探针 UP、Eureka 4/4、JWKS 200；第二组仓库外临时签名 Token 经镜像 Gateway 请求两条精确 GET 搜索均 200。
+- [x] **Step 2:** 中文运行、排障、事实/投影与 replay 边界、学习日志和面试追问已更新；仓库内私钥/常见 Token/个人路径扫描及 `git diff --check` 通过，文档/Compose 阶段提交 `a17e0bf`，最终验收记录见 `c72c7f1`。
+- [x] **Step 3:** `docker info` 确认 Engine 29.7.2；JDK 17.0.12 串行 fresh `mvnw.cmd clean test` 与 `mvnw.cmd clean verify` 均六模块 BUILD SUCCESS、退出 0。142 个 fresh XML 为 Surefire 228、Failsafe/Testcontainers 357，共 585 项，全部 0 failures/errors/skipped；实验七回归和新五应用 IT 均运行。
+- [x] **Step 4:** 实验 HEAD 的 419 个文件仅在根 `.gitignore` 与 `labs/08-spring-cloud-split/**`，暂存差异与敏感信息扫描通过；验收提交 `c72c7f1` 从远端 `ea5cf49` 快进推送，镜像路由补证 `177cd25` 再次快进推送。main 仅更新路线、此计划和复盘文档，不合并实验代码。
