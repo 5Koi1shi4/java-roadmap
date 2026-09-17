@@ -129,15 +129,18 @@ class PolicyIndexIT {
                 .numCandidates(corpusV1.chunkCount() * 4))
             .size(corpusV1.chunkCount()), Map.class);
         assertThat(rawResponse.hits().hits())
+            .anySatisfy(hit -> assertThat(hit.score()).isGreaterThanOrEqualTo(0.70d))
             .anySatisfy(hit -> assertThat(hit.score()).isLessThan(0.70d));
 
         assertThat(index.similaritySearch("threshold-question", 5))
-            .hasSizeLessThanOrEqualTo(5)
+            .isNotEmpty()
+            .hasSize(4)
             .allSatisfy(chunk -> assertThat(chunk.score()).isGreaterThanOrEqualTo(0.70d));
         assertThatThrownBy(() -> index.similaritySearch("threshold-question", 6))
             .isInstanceOf(IllegalArgumentException.class);
         assertThat(retriever.find("threshold-question"))
-            .hasSizeLessThanOrEqualTo(5)
+            .isNotEmpty()
+            .hasSize(4)
             .allSatisfy(chunk -> assertThat(chunk.score()).isGreaterThanOrEqualTo(0.70d));
     }
 
@@ -174,6 +177,7 @@ class PolicyIndexIT {
         String physicalIndex = singleIndex.readIndexName();
         elasticsearch.update(update -> update.index(physicalIndex).id("0")
             .doc(Map.of("version", "v2")), Map.class);
+        elasticsearch.indices().refresh(refresh -> refresh.index(physicalIndex));
 
         assertThat(singleIndex.similaritySearch("version-question", 5)).isEmpty();
     }
@@ -209,17 +213,33 @@ class PolicyIndexIT {
     @Test
     void failedValidationAfterGenerationWasWrittenKeepsPreviouslyValidatedAlias()
             throws IOException {
+        index = new ElasticsearchPolicyIndex(elasticsearch,
+            PolicyIndexIT::thresholdTestEmbedding);
+        PolicyRetriever previousRetriever = new PolicyRetriever(corpusV1, index);
         assertThat(index.rebuild(corpusV1)).isTrue();
         String previousIndex = index.readIndexName();
+        assertThat(previousRetriever.find("threshold-question"))
+            .isNotEmpty()
+            .allSatisfy(chunk -> assertThat(chunk.version()).isEqualTo(corpusV1.version()));
 
-        assertThat(index.rebuild(corpusV1, newIndex -> {
+        PolicyCorpus corpusV2 = corpusV1.withVersion("v2");
+
+        assertThat(index.rebuild(corpusV2, newIndex -> {
             elasticsearch.delete(delete -> delete.index(newIndex).id("0"));
             elasticsearch.indices().refresh(refresh -> refresh.index(newIndex));
         }))
             .isFalse();
         assertThat(index.readIndexName()).isEqualTo(previousIndex);
         assertThat(index.aliasVersion()).isEqualTo(corpusV1.version());
-        assertThat(index.readiness()).isEqualTo(ElasticsearchPolicyIndex.Readiness.UP);
+        List<PolicyChunk> retained = previousRetriever.find("threshold-question");
+        assertThat(retained)
+            .isNotEmpty()
+            .hasSize(4)
+            .allSatisfy(chunk -> {
+                assertThat(chunk.version()).isEqualTo("v1");
+                assertThat(chunk.text()).doesNotContain("v2");
+            });
+        assertThat(retained).extracting(PolicyChunk::title).contains("退款规则");
     }
 
     private static List<Float> thresholdTestEmbedding(String text) {

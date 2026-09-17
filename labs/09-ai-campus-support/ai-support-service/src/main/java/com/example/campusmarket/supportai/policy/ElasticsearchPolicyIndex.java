@@ -520,12 +520,12 @@ public final class ElasticsearchPolicyIndex {
         return value.toString();
     }
 
-    /** Elasticsearch cosine kNN 返回 1 + cosine，相似度门槛使用归一化到 [0, 1] 的值。 */
+    /** Elasticsearch cosine kNN 已返回 [0, 1] 分数，检索门槛直接使用该值。 */
     private static double score(Double rawScore) {
         if (rawScore == null || !Double.isFinite(rawScore)) {
             return 0.0d;
         }
-        return Math.max(0.0d, Math.min(1.0d, rawScore - 1.0d));
+        return Math.max(0.0d, Math.min(1.0d, rawScore));
     }
 
     private static String sha256(byte[] value) {
