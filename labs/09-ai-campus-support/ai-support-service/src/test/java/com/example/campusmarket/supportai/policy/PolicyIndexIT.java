@@ -5,6 +5,7 @@ import co.elastic.clients.json.jackson.JacksonJsonpMapper;
 import co.elastic.clients.transport.ElasticsearchTransport;
 import co.elastic.clients.transport.rest5_client.low_level.Rest5Client;
 import co.elastic.clients.transport.rest5_client.Rest5ClientTransport;
+import co.elastic.clients.elasticsearch.core.SearchResponse;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -19,9 +20,11 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** 验证规则索引的版本闸门、阈值过滤与故障恢复。 */
 @Testcontainers
@@ -85,8 +88,16 @@ class PolicyIndexIT {
         index.rebuild(corpusV1);
         PolicyCorpus corpusV2 = corpusV1.withVersion("v2");
 
+        PolicyRetriever mismatchedRetriever = new PolicyRetriever(corpusV2, index);
+        assertThatThrownBy(() -> mismatchedRetriever.find("退款"))
+            .isInstanceOf(PolicyRetriever.PolicyUnavailableException.class);
+        assertThat(index.readiness()).isEqualTo(ElasticsearchPolicyIndex.Readiness.DOWN);
+
         assertThat(index.find("退款", corpusV2.version())).isEmpty();
         assertThat(index.readiness()).isEqualTo(ElasticsearchPolicyIndex.Readiness.DOWN);
+
+        assertThat(index.find("退款", corpusV1.version())).isNotNull();
+        assertThat(index.readiness()).isEqualTo(ElasticsearchPolicyIndex.Readiness.UP);
     }
 
     @Test
@@ -103,6 +114,86 @@ class PolicyIndexIT {
     }
 
     @Test
+    void lowScoringEsCandidateIsReturnedThenFilteredAndResultsAreCapped() throws IOException {
+        index = new ElasticsearchPolicyIndex(elasticsearch,
+            PolicyIndexIT::thresholdTestEmbedding);
+        retriever = new PolicyRetriever(corpusV1, index);
+        assertThat(index.rebuild(corpusV1)).isTrue();
+
+        List<Float> queryVector = thresholdTestEmbedding("threshold-question");
+        SearchResponse<Map> rawResponse = elasticsearch.search(search -> search
+            .index(index.readIndexName())
+            .knn(knn -> knn.field(ElasticsearchPolicyIndex.VECTOR_FIELD)
+                .queryVector(queryVector)
+                .k(corpusV1.chunkCount())
+                .numCandidates(corpusV1.chunkCount() * 4))
+            .size(corpusV1.chunkCount()), Map.class);
+        assertThat(rawResponse.hits().hits())
+            .anySatisfy(hit -> assertThat(hit.score()).isLessThan(0.70d));
+
+        assertThat(index.similaritySearch("threshold-question", 5))
+            .hasSizeLessThanOrEqualTo(5)
+            .allSatisfy(chunk -> assertThat(chunk.score()).isGreaterThanOrEqualTo(0.70d));
+        assertThatThrownBy(() -> index.similaritySearch("threshold-question", 6))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThat(retriever.find("threshold-question"))
+            .hasSizeLessThanOrEqualTo(5)
+            .allSatisfy(chunk -> assertThat(chunk.score()).isGreaterThanOrEqualTo(0.70d));
+    }
+
+    @Test
+    void retrieverCannotRelaxPublicSafetyBounds() {
+        assertThatThrownBy(() -> new PolicyRetriever(corpusV1, index, 0.69d, 5))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new PolicyRetriever(corpusV1, index, 0.70d, 6))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void aliasVersionDoesNotTrustCachedDocumentVersion() throws IOException {
+        PolicyCorpus singleChunk = new PolicyCorpus("v1", List.of(
+            new PolicyChunk("inline", "单条规则", "v1", "单条公开规则正文", 0.0d)));
+        ElasticsearchPolicyIndex singleIndex = new ElasticsearchPolicyIndex(elasticsearch,
+            text -> fixedVector(1.0f, 0.0f));
+        assertThat(singleIndex.rebuild(singleChunk)).isTrue();
+        String physicalIndex = singleIndex.readIndexName();
+        elasticsearch.update(update -> update.index(physicalIndex).id("0")
+            .doc(Map.of("corpusVersion", "v2")), Map.class);
+        elasticsearch.indices().refresh(refresh -> refresh.index(physicalIndex));
+
+        assertThat(singleIndex.aliasVersion()).isEqualTo("v2");
+    }
+
+    @Test
+    void directIndexRejectsDocumentWithStaleVersion() throws IOException {
+        PolicyCorpus singleChunk = new PolicyCorpus("v1", List.of(
+            new PolicyChunk("inline", "单条规则", "v1", "单条公开规则正文", 0.0d)));
+        ElasticsearchPolicyIndex singleIndex = new ElasticsearchPolicyIndex(elasticsearch,
+            text -> fixedVector(1.0f, 0.0f));
+        assertThat(singleIndex.rebuild(singleChunk)).isTrue();
+        String physicalIndex = singleIndex.readIndexName();
+        elasticsearch.update(update -> update.index(physicalIndex).id("0")
+            .doc(Map.of("version", "v2")), Map.class);
+
+        assertThat(singleIndex.similaritySearch("version-question", 5)).isEmpty();
+    }
+
+    @Test
+    void directIndexRejectsPrivateDocument() throws IOException {
+        PolicyCorpus singleChunk = new PolicyCorpus("v1", List.of(
+            new PolicyChunk("inline", "单条规则", "v1", "单条公开规则正文", 0.0d)));
+        ElasticsearchPolicyIndex singleIndex = new ElasticsearchPolicyIndex(elasticsearch,
+            text -> fixedVector(1.0f, 0.0f));
+        assertThat(singleIndex.rebuild(singleChunk)).isTrue();
+        String physicalIndex = singleIndex.readIndexName();
+        elasticsearch.update(update -> update.index(physicalIndex).id("0")
+            .doc(Map.of("visibility", "PRIVATE")), Map.class);
+        elasticsearch.indices().refresh(refresh -> refresh.index(physicalIndex));
+
+        assertThat(singleIndex.similaritySearch("visibility-question", 5)).isEmpty();
+    }
+
+    @Test
     void failedRebuildKeepsPreviouslyValidatedAlias() {
         index.rebuild(corpusV1);
         String previousIndex = index.readIndexName();
@@ -113,6 +204,36 @@ class PolicyIndexIT {
         assertThat(index.readIndexName()).isEqualTo(previousIndex);
         assertThat(index.aliasVersion()).isEqualTo(corpusV1.version());
         assertThat(index.readiness()).isEqualTo(ElasticsearchPolicyIndex.Readiness.UP);
+    }
+
+    @Test
+    void failedValidationAfterGenerationWasWrittenKeepsPreviouslyValidatedAlias()
+            throws IOException {
+        assertThat(index.rebuild(corpusV1)).isTrue();
+        String previousIndex = index.readIndexName();
+
+        assertThat(index.rebuild(corpusV1, newIndex -> {
+            elasticsearch.delete(delete -> delete.index(newIndex).id("0"));
+            elasticsearch.indices().refresh(refresh -> refresh.index(newIndex));
+        }))
+            .isFalse();
+        assertThat(index.readIndexName()).isEqualTo(previousIndex);
+        assertThat(index.aliasVersion()).isEqualTo(corpusV1.version());
+        assertThat(index.readiness()).isEqualTo(ElasticsearchPolicyIndex.Readiness.UP);
+    }
+
+    private static List<Float> thresholdTestEmbedding(String text) {
+        if ("threshold-question".equals(text)
+            || text.startsWith("校园交易公开规则")
+            || text.startsWith("退款规则")
+            || text.startsWith("售后争议规则\n\n买家收到商品")) {
+            return fixedVector(1.0f, 0.0f);
+        }
+        return fixedVector(-1.0f, 0.0f);
+    }
+
+    private static List<Float> fixedVector(float first, float second) {
+        return List.of(first, second, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
     }
 
     private static void deletePolicyIndexes() throws IOException {

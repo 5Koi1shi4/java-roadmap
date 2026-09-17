@@ -24,6 +24,9 @@ import java.util.stream.Collectors;
 public final class PolicyCorpus {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String PUBLIC = "PUBLIC";
+    private static final Set<String> MANIFEST_FIELDS = Set.of("version", "sources");
+    private static final Set<String> SOURCE_FIELDS = Set.of(
+        "sourceId", "title", "version", "path", "visibility", "sha256");
 
     private final String version;
     private final List<Source> sources;
@@ -70,6 +73,10 @@ public final class PolicyCorpus {
         try {
             Path root = policiesDirectory.toAbsolutePath().normalize();
             JsonNode document = JSON.readTree(Files.readAllBytes(manifest));
+            if (document == null || !document.isObject()) {
+                throw invalid("规则清单必须是 JSON 对象");
+            }
+            rejectUnknownFields(document, MANIFEST_FIELDS, "规则清单");
             String corpusVersion = text(document, "version", "规则清单缺少 version");
             JsonNode sourceNodes = document.get("sources");
             if (sourceNodes == null || !sourceNodes.isArray() || sourceNodes.isEmpty()) {
@@ -80,11 +87,18 @@ public final class PolicyCorpus {
             List<PolicyChunk> chunks = new ArrayList<>();
             Set<String> sourceIds = new HashSet<>();
             for (JsonNode sourceNode : sourceNodes) {
-                String visibility = sourceNode.path("visibility").asText(PUBLIC);
-                boolean publicSource = sourceNode.path("public").asBoolean(
-                    PUBLIC.equalsIgnoreCase(visibility));
-                if (!publicSource || !PUBLIC.equalsIgnoreCase(visibility)) {
-                    continue;
+                if (sourceNode == null || !sourceNode.isObject()) {
+                    throw invalid("规则来源必须是 JSON 对象");
+                }
+                rejectUnknownFields(sourceNode, SOURCE_FIELDS, "规则来源");
+                JsonNode visibilityNode = sourceNode.get("visibility");
+                if (visibilityNode == null || !visibilityNode.isTextual()
+                        || visibilityNode.asText().isBlank()) {
+                    throw invalid("规则来源 visibility 必须明确为 PUBLIC");
+                }
+                String visibility = visibilityNode.asText().trim();
+                if (!PUBLIC.equals(visibility)) {
+                    throw invalid("规则来源 visibility 非法: " + visibility);
                 }
                 String sourceId = text(sourceNode, "sourceId", "规则来源缺少 sourceId");
                 String title = text(sourceNode, "title", "规则来源缺少 title");
@@ -221,6 +235,17 @@ public final class PolicyCorpus {
             throw invalid(message);
         }
         return value.asText().trim();
+    }
+
+    private static void rejectUnknownFields(JsonNode object, Set<String> allowedFields,
+                                             String objectName) {
+        var fields = object.fieldNames();
+        while (fields.hasNext()) {
+            String field = fields.next();
+            if (!allowedFields.contains(field)) {
+                throw invalid(objectName + "包含未知字段: " + field);
+            }
+        }
     }
 
     private static String sha256(byte[] bytes) {

@@ -27,10 +27,11 @@ public final class PolicyRetriever {
                            double minimumScore, int limit) {
         this.corpus = Objects.requireNonNull(corpus, "规则语料不能为空");
         this.index = Objects.requireNonNull(index, "规则索引不能为空");
-        if (!Double.isFinite(minimumScore) || minimumScore < 0.0d) {
+        if (!Double.isFinite(minimumScore) || minimumScore < DEFAULT_MIN_SCORE
+                || minimumScore > 1.0d) {
             throw new IllegalArgumentException("规则相似度门槛无效");
         }
-        if (limit <= 0) {
+        if (limit <= 0 || limit > DEFAULT_LIMIT) {
             throw new IllegalArgumentException("规则检索数量必须为正数");
         }
         this.minimumScore = minimumScore;
@@ -42,17 +43,19 @@ public final class PolicyRetriever {
         if (question == null || question.isBlank()) {
             return List.of();
         }
-        if (!corpus.version().equals(index.aliasVersion())) {
-            throw new PolicyUnavailableException("规则索引版本不可用");
-        }
         Set<String> sourceIds = corpus.sources().stream()
             .filter(PolicyCorpus.Source::publicSource)
             .map(PolicyCorpus.Source::sourceId)
             .collect(Collectors.toUnmodifiableSet());
-        return index.similaritySearch(question, limit).stream()
+        List<PolicyChunk> matches = index.find(question, corpus.version());
+        if (!corpus.version().equals(index.aliasVersion())) {
+            throw new PolicyUnavailableException("规则索引版本不可用");
+        }
+        return matches.stream()
             .filter(chunk -> sourceIds.contains(chunk.sourceId()))
             .filter(chunk -> corpus.version().equals(chunk.version()))
             .filter(chunk -> chunk.score() >= minimumScore)
+            .limit(limit)
             .toList();
     }
 

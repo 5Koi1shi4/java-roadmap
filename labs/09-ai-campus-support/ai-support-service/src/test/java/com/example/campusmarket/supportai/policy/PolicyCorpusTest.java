@@ -53,6 +53,46 @@ class PolicyCorpusTest {
         }
     }
 
+    @Test
+    void rejectsUnknownManifestFields() throws Exception {
+        assertThatThrownBy(() -> loadManifestVariant(manifest ->
+                manifest.replace("  \"sources\"", "  \"unexpected\": true,\n  \"sources\"")))
+            .isInstanceOf(PolicyCorpus.InvalidCorpusException.class)
+            .hasMessageContaining("未知");
+    }
+
+    @Test
+    void rejectsMissingVisibilityInsteadOfDefaultingToPublic() throws Exception {
+        assertThatThrownBy(() -> loadManifestVariant(manifest ->
+                manifest.replace("      \"visibility\": \"PUBLIC\",\n", "")))
+            .isInstanceOf(PolicyCorpus.InvalidCorpusException.class)
+            .hasMessageContaining("visibility");
+    }
+
+    @Test
+    void rejectsIllegalVisibilityInsteadOfSilentlySkippingSource() throws Exception {
+        assertThatThrownBy(() -> loadManifestVariant(manifest ->
+                manifest.replace("\"visibility\": \"PUBLIC\"", "\"visibility\": \"PRIVATE\"")))
+            .isInstanceOf(PolicyCorpus.InvalidCorpusException.class)
+            .hasMessageContaining("visibility");
+    }
+
+    private PolicyCorpus loadManifestVariant(java.util.function.UnaryOperator<String> transform)
+            throws Exception {
+        Path temp = Files.createTempDirectory("policy-manifest-");
+        try {
+            Files.copy(POLICIES.resolve("trade-policy-v1.md"),
+                temp.resolve("trade-policy-v1.md"));
+            Files.writeString(temp.resolve("manifest.json"),
+                transform.apply(Files.readString(POLICIES.resolve("manifest.json"))));
+            return PolicyCorpus.load(temp.resolve("manifest.json"), temp);
+        } finally {
+            Files.deleteIfExists(temp.resolve("trade-policy-v1.md"));
+            Files.deleteIfExists(temp.resolve("manifest.json"));
+            Files.deleteIfExists(temp);
+        }
+    }
+
     private static Path locatePolicies() {
         List<Path> candidates = List.of(Path.of("policies"), Path.of("..", "policies"));
         return candidates.stream()

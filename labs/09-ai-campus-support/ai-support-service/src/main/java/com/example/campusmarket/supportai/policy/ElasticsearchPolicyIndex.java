@@ -26,6 +26,7 @@ public final class ElasticsearchPolicyIndex {
     public static final String READ_ALIAS = "campus-policy-read";
     public static final String VECTOR_FIELD = "embedding";
     public static final double MIN_SCORE = 0.70d;
+    public static final int MAX_RESULTS = 5;
 
     private final ElasticsearchClient client;
     private final EmbeddingProvider embeddings;
@@ -60,6 +61,12 @@ public final class ElasticsearchPolicyIndex {
         default int dimensions() {
             return -1;
         }
+    }
+
+    /** 仅供同包故障测试在完整 generation 写入后注入校验失败。 */
+    @FunctionalInterface
+    interface AfterIndexingHook {
+        void apply(String indexName) throws IOException;
     }
 
     public enum Readiness {
@@ -138,7 +145,15 @@ public final class ElasticsearchPolicyIndex {
 
     /** 构建、校验并发布一个完整的新版本；任何失败都不改变现有读别名。 */
     public boolean rebuild(PolicyCorpus corpus) {
+        return rebuild(corpus, ignored -> { });
+    }
+
+    /**
+     * 构建、校验并发布一个完整的新版本；hook 只用于验证写入后校验失败的恢复路径。
+     */
+    boolean rebuild(PolicyCorpus corpus, AfterIndexingHook afterIndexing) {
         Objects.requireNonNull(corpus, "规则语料不能为空");
+        Objects.requireNonNull(afterIndexing, "索引完成回调不能为空");
         String previousIndex = readIndexName();
         String newIndex = indexName(corpus.version());
         try {
@@ -148,6 +163,7 @@ public final class ElasticsearchPolicyIndex {
                 indexChunk(newIndex, corpus, i, corpus.chunks().get(i), dimensions);
             }
             client.indices().refresh(refresh -> refresh.index(newIndex));
+            afterIndexing.apply(newIndex);
             validateIndex(newIndex, corpus);
             replaceReadAlias(newIndex);
             knownIndex = newIndex;
@@ -182,13 +198,29 @@ public final class ElasticsearchPolicyIndex {
             readiness = Readiness.DOWN;
             return List.of();
         }
-        return similaritySearch(question, 5);
+        try {
+            List<PolicyChunk> result = similaritySearch(question, MAX_RESULTS);
+            versionMismatch = false;
+            readiness = Readiness.UP;
+            return result;
+        } catch (RuntimeException failure) {
+            readiness = Readiness.DOWN;
+            throw failure;
+        }
     }
 
-    /** 在当前独立读别名中执行 kNN 检索。 */
+    /**
+     * 在当前独立读别名中执行受保护的 kNN 检索。
+     *
+     * <p>该方法仍保留为公开适配器 API，但不能绕过当前版本、公开来源、相似度门槛
+     * 或结果数量上限。</p>
+     */
     public List<PolicyChunk> similaritySearch(String question, int limit) {
         if (question == null || question.isBlank() || limit <= 0) {
             return List.of();
+        }
+        if (limit > MAX_RESULTS) {
+            throw new IllegalArgumentException("规则检索结果最多为 " + MAX_RESULTS + " 条");
         }
         String index = readIndexName();
         if (index == null) {
@@ -196,23 +228,42 @@ public final class ElasticsearchPolicyIndex {
             throw new PolicyUnavailableException("规则索引尚未就绪");
         }
         try {
+            String currentVersion = readAliasVersion(index);
+            if (currentVersion == null) {
+                readiness = Readiness.DOWN;
+                return List.of();
+            }
             List<Float> vector = vector(embeddings.embed(question));
+            int candidateLimit = Math.max(limit * 4, 20);
             SearchResponse<Map> response = client.search(search -> search
                     .index(readAlias)
                     .knn(knn -> knn.field(VECTOR_FIELD).queryVector(vector)
-                        .k(limit).numCandidates(Math.max(limit * 4, 20)))
-                    .size(limit), Map.class);
+                        .k(candidateLimit).numCandidates(candidateLimit))
+                    .size(candidateLimit), Map.class);
             List<PolicyChunk> result = new ArrayList<>();
             for (Hit<Map> hit : response.hits().hits()) {
                 Map source = hit.source();
                 if (source == null) {
                     continue;
                 }
-                String version = text(source.get("corpusVersion"));
-                String scoreVersion = version;
-                double score = hit.score() == null ? 0.0d : hit.score();
+                String corpusVersion = text(source.get("corpusVersion"));
+                String documentVersion = text(source.get("version"));
+                String visibility = text(source.get("visibility"));
+                double score = score(hit.score());
+                if (!currentVersion.equals(corpusVersion)
+                        || !currentVersion.equals(documentVersion)
+                        || !"PUBLIC".equals(visibility)
+                        || score < MIN_SCORE) {
+                    continue;
+                }
                 result.add(new PolicyChunk(text(source.get("sourceId")), text(source.get("title")),
-                    scoreVersion, text(source.get("text")), score));
+                    documentVersion, text(source.get("text")), score));
+                if (result.size() == limit) {
+                    break;
+                }
+            }
+            if (!versionMismatch) {
+                readiness = Readiness.UP;
             }
             return List.copyOf(result);
         } catch (IOException | RuntimeException failure) {
@@ -232,19 +283,14 @@ public final class ElasticsearchPolicyIndex {
             readiness = Readiness.DOWN;
             return null;
         }
-        if (index.equals(knownIndex) && knownVersion != null) {
-            return knownVersion;
-        }
         try {
-            SearchResponse<Map> response = client.search(search -> search.index(index)
-                .size(1), Map.class);
-            if (response.hits().hits().isEmpty() || response.hits().hits().get(0).source() == null) {
+            String currentVersion = readAliasVersion(index);
+            if (currentVersion == null) {
                 readiness = Readiness.DOWN;
                 return null;
             }
-            Map source = response.hits().hits().get(0).source();
             knownIndex = index;
-            knownVersion = text(source.get("corpusVersion"));
+            knownVersion = currentVersion;
             knownChunkCount = indexedChunkCount(index);
             if (!versionMismatch) {
                 readiness = Readiness.UP;
@@ -254,6 +300,15 @@ public final class ElasticsearchPolicyIndex {
             readiness = Readiness.DOWN;
             return null;
         }
+    }
+
+    private String readAliasVersion(String index) throws IOException {
+        SearchResponse<Map> response = client.search(search -> search.index(index)
+            .size(1), Map.class);
+        if (response.hits().hits().isEmpty() || response.hits().hits().get(0).source() == null) {
+            return null;
+        }
+        return text(response.hits().hits().get(0).source().get("corpusVersion"));
     }
 
     public Readiness readiness() {
@@ -315,6 +370,7 @@ public final class ElasticsearchPolicyIndex {
                 .properties("sourceId", p -> p.keyword(k -> k))
                 .properties("title", p -> p.keyword(k -> k))
                 .properties("version", p -> p.keyword(k -> k))
+                .properties("visibility", p -> p.keyword(k -> k))
                 .properties("text", p -> p.text(t -> t.index(false)))
                 .properties("chunkId", p -> p.keyword(k -> k))
                 .properties("sourceHash", p -> p.keyword(k -> k))
@@ -331,11 +387,15 @@ public final class ElasticsearchPolicyIndex {
         }
         PolicyCorpus.Source source = corpus.source(chunk.sourceId())
             .orElseThrow(() -> new IllegalArgumentException("规则来源不存在: " + chunk.sourceId()));
+        if (!source.publicSource()) {
+            throw new IllegalArgumentException("规则索引只允许 PUBLIC 来源: " + chunk.sourceId());
+        }
         Map<String, Object> document = new HashMap<>();
         document.put("corpusVersion", corpus.version());
         document.put("sourceId", chunk.sourceId());
         document.put("title", chunk.title());
         document.put("version", chunk.version());
+        document.put("visibility", "PUBLIC");
         document.put("text", chunk.text());
         document.put("chunkId", Integer.toString(number));
         document.put("sourceHash", source.sha256());
@@ -364,10 +424,12 @@ public final class ElasticsearchPolicyIndex {
             }
             PolicyChunk expected = corpus.chunks().get(number);
             PolicyCorpus.Source expectedSource = corpus.source(expected.sourceId()).orElseThrow();
-            if (!corpus.version().equals(text(source.get("corpusVersion")))
+            if (!expectedSource.publicSource()
+                    || !corpus.version().equals(text(source.get("corpusVersion")))
                     || !expected.sourceId().equals(text(source.get("sourceId")))
                     || !expected.title().equals(text(source.get("title")))
                     || !expected.version().equals(text(source.get("version")))
+                    || !"PUBLIC".equals(text(source.get("visibility")))
                     || !expected.text().equals(text(source.get("text")))
                     || !expectedSource.sha256().equals(text(source.get("sourceHash")))
                     || !sha256(expected.text().getBytes(StandardCharsets.UTF_8))
@@ -456,6 +518,14 @@ public final class ElasticsearchPolicyIndex {
             throw new IllegalStateException("规则索引字段缺失");
         }
         return value.toString();
+    }
+
+    /** Elasticsearch cosine kNN 返回 1 + cosine，相似度门槛使用归一化到 [0, 1] 的值。 */
+    private static double score(Double rawScore) {
+        if (rawScore == null || !Double.isFinite(rawScore)) {
+            return 0.0d;
+        }
+        return Math.max(0.0d, Math.min(1.0d, rawScore - 1.0d));
     }
 
     private static String sha256(byte[] value) {
