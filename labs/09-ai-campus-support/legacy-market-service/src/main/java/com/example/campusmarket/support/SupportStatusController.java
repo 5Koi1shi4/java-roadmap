@@ -20,7 +20,7 @@ import org.springframework.http.converter.HttpMessageNotReadableException;
 
 import java.util.UUID;
 
-/** HTTP read boundary for support status summaries; all ACLs are delegated to SQL. */
+/** 支持状态摘要的 HTTP 只读边界；所有访问控制都委托给 SQL。 */
 @RestController
 @Profile("!test")
 @RequestMapping(path = "/api/support", produces = "application/json; charset=UTF-8")

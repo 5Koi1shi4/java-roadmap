@@ -8,7 +8,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 
-/** Application boundary for the read-only support status surface. */
+/** 只读支持状态接口的应用边界。 */
 @Service
 @Profile("!test")
 public final class SupportStatusService {

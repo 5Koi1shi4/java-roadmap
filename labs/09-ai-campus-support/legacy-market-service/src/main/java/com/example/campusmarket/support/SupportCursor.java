@@ -15,21 +15,18 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * A short-lived-looking cursor is not enough for an ACL endpoint: the cursor
- * must not be transferable between users or resource types.  The signed
- * payload therefore carries both bindings as well as the keyset position.
+ * ACL 接口的游标不能只依赖短时效；游标不得在用户或资源类型之间转用。
+ * 签名载荷同时绑定用户、资源类型和 keyset 位置。
  */
 @Component
 public final class SupportCursor {
     private static final int MAX_BYTES = 512;
     private static final String VERSION = "v1";
     private static final Set<String> TYPES = Set.of("orders", "disputes", "warranties");
-    private static final String DEFAULT_SECRET =
-        "campus-market-support-cursor-local-secret-change-me-please";
 
     private final byte[] secret;
 
-    public SupportCursor(@Value("${campus.market.support.cursor-secret:" + DEFAULT_SECRET + "}") String secret) {
+    public SupportCursor(@Value("${campus.market.support.cursor-secret}") String secret) {
         Objects.requireNonNull(secret, "游标密钥不能为空");
         byte[] encoded = secret.getBytes(StandardCharsets.UTF_8);
         if (encoded.length < 32) {

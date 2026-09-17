@@ -1,0 +1,4 @@
+campus:
+  market:
+    support:
+      cursor-secret: test-only-support-cursor-secret-32-bytes-minimum

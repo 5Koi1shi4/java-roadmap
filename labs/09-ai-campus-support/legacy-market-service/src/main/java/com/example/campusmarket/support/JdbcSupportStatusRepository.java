@@ -11,11 +11,9 @@ import java.util.Objects;
 import java.util.UUID;
 
 /**
- * Read-only JDBC access for support status summaries.
+ * 支持状态摘要的只读 JDBC 访问。
  *
- * <p>The participant predicate is deliberately part of every query.  The
- * caller never receives an unscoped row that could be filtered later by an
- * application service.</p>
+ * <p>每条查询都明确包含参与者谓词，调用方不会先拿到未授权行再由应用服务过滤。</p>
  */
 @Repository
 @Profile("!test")

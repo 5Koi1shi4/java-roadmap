@@ -26,18 +26,18 @@ import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.web.util.UriComponentsBuilder;
 
-import java.sql.Timestamp;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Set;
 import java.util.UUID;
-import java.nio.file.Path;
-import java.net.URISyntaxException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** Real MySQL/HTTP ACL contract for the read-only support status surface. */
+/** 通过真实 MySQL/HTTP 验证只读支持状态接口的访问控制契约。 */
 @SpringBootTest(classes = LegacyMarketApplication.class,
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("local")
@@ -66,6 +66,8 @@ class SupportStatusAclIT extends Task11MySqlContainers {
     @DynamicPropertySource
     static void flywayLocations(DynamicPropertyRegistry registry) {
         registry.add("spring.flyway.locations", () -> "filesystem:" + legacyMigrationDirectory());
+        registry.add("campus.market.support.cursor-secret",
+            () -> "test-only-support-cursor-secret-32-bytes-minimum");
     }
 
     private static Path legacyMigrationDirectory() {
@@ -170,6 +172,39 @@ class SupportStatusAclIT extends Task11MySqlContainers {
         ResponseEntity<String> cursorForOtherUser = exchange(secondUri, UUID.randomUUID(),
             Set.of("ROLE_USER"));
         assertThat(cursorForOtherUser.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+
+        Instant disputeNewest = newest.minus(3, ChronoUnit.SECONDS);
+        disputeAt(firstId, buyer, disputeNewest);
+        disputeAt(firstId, buyer, disputeNewest.minus(1, ChronoUnit.SECONDS));
+        warrantyAt(firstId, buyer, seller, disputeNewest.minus(2, ChronoUnit.SECONDS));
+        warrantyAt(firstId, buyer, seller, disputeNewest.minus(3, ChronoUnit.SECONDS));
+
+        ResponseEntity<String> firstDispute = exchange("/api/support/disputes?limit=1", buyer,
+            Set.of("ROLE_USER"));
+        JsonNode firstDisputePage = mapper.readTree(firstDispute.getBody());
+        String disputeCursor = firstDisputePage.get("nextCursor").asText();
+        String disputeCursorUri = UriComponentsBuilder.fromPath("/api/support/disputes")
+            .queryParam("limit", 1).queryParam("cursor", disputeCursor).build().toUriString();
+        ResponseEntity<String> disputeCursorForOtherUser = exchange(disputeCursorUri,
+            UUID.randomUUID(), Set.of("ROLE_USER"));
+
+        ResponseEntity<String> firstWarranty = exchange("/api/support/warranties?limit=1", buyer,
+            Set.of("ROLE_USER"));
+        JsonNode firstWarrantyPage = mapper.readTree(firstWarranty.getBody());
+        String warrantyCursor = firstWarrantyPage.get("nextCursor").asText();
+        String warrantyCursorUri = UriComponentsBuilder.fromPath("/api/support/warranties")
+            .queryParam("limit", 1).queryParam("cursor", warrantyCursor).build().toUriString();
+        ResponseEntity<String> warrantyCursorForOtherUser = exchange(warrantyCursorUri,
+            UUID.randomUUID(), Set.of("ROLE_USER"));
+
+        assertThat(firstDispute.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(firstDisputePage.get("items")).hasSize(1);
+        assertThat(disputeCursor).isNotBlank();
+        assertThat(disputeCursorForOtherUser.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(firstWarranty.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(firstWarrantyPage.get("items")).hasSize(1);
+        assertThat(warrantyCursor).isNotBlank();
+        assertThat(warrantyCursorForOtherUser.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
     }
 
     @Test
@@ -179,19 +214,9 @@ class SupportStatusAclIT extends Task11MySqlContainers {
         UUID seller = UUID.randomUUID();
         UUID stranger = UUID.randomUUID();
         UUID order = order(buyer, seller);
-        UUID dispute = UUID.randomUUID();
-        UUID warranty = UUID.randomUUID();
         Instant opened = Instant.now().minus(10, ChronoUnit.SECONDS).truncatedTo(ChronoUnit.MICROS);
-        jdbc.update("INSERT INTO dispute_case(id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,admin_deadline,decision,approved_quantity,version,opened_at,created_at,updated_at) "
-                + "VALUES (?,?,?,1,'QUALITY','OPEN',?,NULL,NULL,NULL,0,?,?,?)",
-            dispute.toString(), order.toString(), buyer.toString(),
-            Timestamp.from(opened.plus(1, ChronoUnit.DAYS)), Timestamp.from(opened),
-            Timestamp.from(opened), Timestamp.from(opened));
-        jdbc.update("INSERT INTO warranty_case(id,order_id,idempotency_key,buyer_id,seller_id,warranty_days,warranty_scope_snapshot,manufacturer_warranty_proof_snapshot,manufacturer_warranty_expires_at,disputed_quantity,reason,status,seller_deadline,admin_deadline,decision,compensation_amount_fen,version,opened_at,closed_at,created_at,updated_at) "
-                + "VALUES (?,?,?,?,?,7,'scope',NULL,NULL,1,'QUALITY','OPEN',?,NULL,NULL,0,0,?,NULL,?,?)",
-            warranty.toString(), order.toString(), "support-" + warranty, buyer.toString(), seller.toString(),
-            Timestamp.from(opened.plus(2, ChronoUnit.DAYS)), Timestamp.from(opened),
-            Timestamp.from(opened), Timestamp.from(opened));
+        UUID dispute = disputeAt(order, buyer, opened);
+        UUID warranty = warrantyAt(order, buyer, seller, opened);
 
         ResponseEntity<String> ownDispute = exchange("/api/support/disputes/" + dispute, buyer,
             Set.of("ROLE_USER"));
@@ -199,17 +224,34 @@ class SupportStatusAclIT extends Task11MySqlContainers {
             Set.of("ROLE_USER"));
         ResponseEntity<String> ownWarranty = exchange("/api/support/warranties/" + warranty, seller,
             Set.of("ROLE_USER"));
-        ResponseEntity<String> otherWarranty = exchange("/api/support/warranties?limit=10", stranger,
+        ResponseEntity<String> ownDisputeList = exchange("/api/support/disputes?limit=10", buyer,
             Set.of("ROLE_USER"));
-        JsonNode warrantyList = mapper.readTree(otherWarranty.getBody());
+        ResponseEntity<String> otherDisputeList = exchange("/api/support/disputes?limit=10", stranger,
+            Set.of("ROLE_USER"));
+        ResponseEntity<String> ownWarrantyList = exchange("/api/support/warranties?limit=10", seller,
+            Set.of("ROLE_USER"));
+        ResponseEntity<String> otherWarrantyList = exchange("/api/support/warranties?limit=10", stranger,
+            Set.of("ROLE_USER"));
+        JsonNode ownDisputes = mapper.readTree(ownDisputeList.getBody());
+        JsonNode otherDisputes = mapper.readTree(otherDisputeList.getBody());
+        JsonNode ownWarranties = mapper.readTree(ownWarrantyList.getBody());
+        JsonNode otherWarranties = mapper.readTree(otherWarrantyList.getBody());
 
         assertThat(ownDispute.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(mapper.readTree(ownDispute.getBody()).get("type").asText()).isEqualTo("disputes");
         assertThat(otherDispute.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
         assertThat(ownWarranty.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(mapper.readTree(ownWarranty.getBody()).get("type").asText()).isEqualTo("warranties");
-        assertThat(otherWarranty.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(warrantyList.get("items")).isEmpty();
+        assertThat(ownDisputeList.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(ownDisputes.get("items")).hasSize(1);
+        assertThat(ownDisputes.get("items").get(0).get("id").asText()).isEqualTo(dispute.toString());
+        assertThat(otherDisputeList.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(otherDisputes.get("items")).isEmpty();
+        assertThat(ownWarrantyList.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(ownWarranties.get("items")).hasSize(1);
+        assertThat(ownWarranties.get("items").get(0).get("id").asText()).isEqualTo(warranty.toString());
+        assertThat(otherWarrantyList.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(otherWarranties.get("items")).isEmpty();
     }
 
     @Test
@@ -264,6 +306,26 @@ class SupportStatusAclIT extends Task11MySqlContainers {
             order.toString(), buyer.toString(), seller.toString(), listing.toString(), "support fixture", "support",
             Timestamp.from(createdAt), Timestamp.from(createdAt));
         return order;
+    }
+
+    private UUID disputeAt(UUID order, UUID initiator, Instant opened) {
+        UUID dispute = UUID.randomUUID();
+        jdbc.update("INSERT INTO dispute_case(id,order_id,initiator_id,disputed_quantity,reason,status,seller_deadline,admin_deadline,decision,approved_quantity,version,opened_at,created_at,updated_at) "
+                + "VALUES (?,?,?,1,'QUALITY','OPEN',?,NULL,NULL,NULL,0,?,?,?)",
+            dispute.toString(), order.toString(), initiator.toString(),
+            Timestamp.from(opened.plus(1, ChronoUnit.DAYS)), Timestamp.from(opened),
+            Timestamp.from(opened), Timestamp.from(opened));
+        return dispute;
+    }
+
+    private UUID warrantyAt(UUID order, UUID buyer, UUID seller, Instant opened) {
+        UUID warranty = UUID.randomUUID();
+        jdbc.update("INSERT INTO warranty_case(id,order_id,idempotency_key,buyer_id,seller_id,warranty_days,warranty_scope_snapshot,manufacturer_warranty_proof_snapshot,manufacturer_warranty_expires_at,disputed_quantity,reason,status,seller_deadline,admin_deadline,decision,compensation_amount_fen,version,opened_at,closed_at,created_at,updated_at) "
+                + "VALUES (?,?,?,?,?,7,'scope',NULL,NULL,1,'QUALITY','OPEN',?,NULL,NULL,0,0,?,NULL,?,?)",
+            warranty.toString(), order.toString(), "support-" + warranty, buyer.toString(), seller.toString(),
+            Timestamp.from(opened.plus(2, ChronoUnit.DAYS)), Timestamp.from(opened),
+            Timestamp.from(opened), Timestamp.from(opened));
+        return warranty;
     }
 
     private ResponseEntity<String> exchange(String uri, UUID userId, Set<String> roles) {
