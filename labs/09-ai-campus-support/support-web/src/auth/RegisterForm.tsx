@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useRef, useState, type FormEvent } from 'react';
 import { ApiError, issueVerification, loginAccount, registerAccount } from '../api/client';
 import { useAuth } from './AuthProvider';
 
@@ -16,6 +16,7 @@ export function RegisterForm({ onSwitchLogin, onRegistered }: RegisterFormProps)
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const emailRef = useRef(email);
 
   async function sendCode() {
     if (!email.trim()) {
@@ -25,8 +26,12 @@ export function RegisterForm({ onSwitchLogin, onRegistered }: RegisterFormProps)
     setError(null);
     setStatus(null);
     setBusy(true);
+    const requestedEmail = email.trim();
     try {
-      await issueVerification({ email: email.trim(), purpose: 'REGISTER' });
+      await issueVerification({ email: requestedEmail, purpose: 'REGISTER' });
+      if (emailRef.current.trim() !== requestedEmail) {
+        return;
+      }
       setVerificationSent(true);
       setStatus('验证码已发送，请查收邮箱。');
     } catch (reason: unknown) {
@@ -68,7 +73,16 @@ export function RegisterForm({ onSwitchLogin, onRegistered }: RegisterFormProps)
           type="email"
           autoComplete="username"
           value={email}
-          onChange={(event) => setEmail(event.target.value)}
+          onChange={(event) => {
+            const nextEmail = event.target.value;
+            emailRef.current = nextEmail;
+            if (verificationSent && nextEmail !== email) {
+              setVerificationSent(false);
+              setCode('');
+              setStatus(null);
+            }
+            setEmail(nextEmail);
+          }}
           required
         />
       </div>

@@ -1,4 +1,4 @@
-import { useCallback, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { ApiError, askSupport, type AnswerResponse } from '../api/client';
 import { LoginForm } from '../auth/LoginForm';
 import { RegisterForm } from '../auth/RegisterForm';
@@ -18,11 +18,46 @@ export function SupportDesk() {
   const [result, setResult] = useState<AnswerResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [reauthRequired, setReauthRequired] = useState(false);
+  const requestVersion = useRef(0);
+  const activeToken = useRef(accessToken);
+  const previousToken = useRef(accessToken);
+  activeToken.current = accessToken;
+
+  useEffect(() => {
+    if (previousToken.current === accessToken) {
+      return;
+    }
+    previousToken.current = accessToken;
+    requestVersion.current += 1;
+    setQuestion('');
+    setSelectedResource(null);
+    setResult(null);
+    setError(null);
+    setLoading(false);
+    setReauthRequired(false);
+  }, [accessToken]);
 
   const handleUnauthorized = useCallback(() => {
+    requestVersion.current += 1;
     logout();
+    setQuestion('');
     setSelectedResource(null);
+    setResult(null);
     setError('登录已失效，请重新登录。');
+    setLoading(false);
+    setReauthRequired(true);
+  }, [logout]);
+
+  const handleLogout = useCallback(() => {
+    requestVersion.current += 1;
+    logout();
+    setQuestion('');
+    setSelectedResource(null);
+    setResult(null);
+    setError(null);
+    setLoading(false);
+    setReauthRequired(false);
   }, [logout]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -39,12 +74,22 @@ export function SupportDesk() {
         : selectedResource?.kind === 'warranty'
           ? { question: cleanedQuestion, caseId: selectedResource.id, caseType: 'WARRANTY' as const }
           : { question: cleanedQuestion };
+    const currentRequestVersion = ++requestVersion.current;
+    const requestToken = accessToken;
     setLoading(true);
     setError(null);
+    setResult(null);
+    setReauthRequired(false);
     try {
       const answer = await askSupport(request, accessToken);
+      if (currentRequestVersion !== requestVersion.current || requestToken !== activeToken.current) {
+        return;
+      }
       setResult(answer);
     } catch (reason: unknown) {
+      if (currentRequestVersion !== requestVersion.current || requestToken !== activeToken.current) {
+        return;
+      }
       const apiError = reason instanceof ApiError ? reason : null;
       if (apiError?.status === 401) {
         handleUnauthorized();
@@ -52,7 +97,9 @@ export function SupportDesk() {
         setError(apiError?.userMessage ?? '服务暂不可用');
       }
     } finally {
-      setLoading(false);
+      if (currentRequestVersion === requestVersion.current && requestToken === activeToken.current) {
+        setLoading(false);
+      }
     }
   }
 
@@ -71,10 +118,7 @@ export function SupportDesk() {
             <>
               <span className="session-label">已登录，可查询本人资源</span>
               <button className="quiet-button" type="button" onClick={() => {
-                logout();
-                setSelectedResource(null);
-                setResult(null);
-                setError(null);
+                handleLogout();
               }}>
                 退出登录
               </button>
@@ -112,7 +156,7 @@ export function SupportDesk() {
               {error ? (
                 <div className="desk-error" role="alert">
                   <p>{error}</p>
-                  {loading ? null : <button className="quiet-button retry-button" type="submit">重试</button>}
+                  {loading || reauthRequired ? null : <button className="quiet-button retry-button" type="submit">重试</button>}
                 </div>
               ) : null}
               <div className="form-actions">
@@ -151,12 +195,18 @@ export function SupportDesk() {
               {authMode === 'login' ? (
                 <LoginForm
                   onSwitchRegister={() => setAuthMode('register')}
-                  onSuccess={() => setError(null)}
+                  onSuccess={() => {
+                    setError(null);
+                    setReauthRequired(false);
+                  }}
                 />
               ) : (
                 <RegisterForm
                   onSwitchLogin={() => setAuthMode('login')}
-                  onRegistered={() => setError(null)}
+                  onRegistered={() => {
+                    setError(null);
+                    setReauthRequired(false);
+                  }}
                 />
               )}
             </section>

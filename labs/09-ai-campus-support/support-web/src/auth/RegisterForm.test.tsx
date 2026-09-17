@@ -45,4 +45,24 @@ describe('注册流程', () => {
       '/api/auth/login'
     ]);
   });
+
+  test('验证码发送后修改邮箱会清除验证码上下文', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ status: 'sent', expiresIn: 600 }), { status: 200 })
+    );
+
+    render(<AuthProvider><RegisterForm /></AuthProvider>);
+    const email = screen.getByRole('textbox', { name: '校园邮箱' });
+    fireEvent.change(email, { target: { value: 'first@stu.example.edu.cn' } });
+    fireEvent.click(screen.getByRole('button', { name: '发送验证码' }));
+    await waitFor(() => expect(screen.getByText('验证码已发送，请查收邮箱。')).toBeVisible());
+
+    const code = screen.getByRole('textbox', { name: '注册验证码' });
+    fireEvent.change(code, { target: { value: '123456' } });
+    fireEvent.change(email, { target: { value: 'second@stu.example.edu.cn' } });
+
+    expect(code).toHaveValue('');
+    expect(screen.getByRole('button', { name: '完成注册' })).toBeDisabled();
+    expect(screen.queryByText('验证码已发送，请查收邮箱。')).not.toBeInTheDocument();
+  });
 });
