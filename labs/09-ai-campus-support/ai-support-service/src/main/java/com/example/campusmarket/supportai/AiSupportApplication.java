@@ -6,9 +6,9 @@ import com.example.campusmarket.supportai.application.PrivateQuestionClassifier;
 import com.example.campusmarket.supportai.application.TradeStatusReader;
 import com.example.campusmarket.supportai.policy.ElasticsearchPolicyIndex;
 import com.example.campusmarket.supportai.policy.PolicyCorpus;
+import com.example.campusmarket.supportai.policy.PolicyIndexBootstrap;
 import com.example.campusmarket.supportai.policy.PolicyRetriever;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -45,20 +45,21 @@ class SupportAiConfiguration {
     }
 
     @Bean
-    @ConditionalOnBean(ElasticsearchClient.class)
     ElasticsearchPolicyIndex elasticsearchPolicyIndex(ElasticsearchClient client) {
         return new ElasticsearchPolicyIndex(client);
     }
 
     @Bean
-    @ConditionalOnBean({PolicyCorpus.class, ElasticsearchPolicyIndex.class})
     PolicyRetriever policyRetriever(PolicyCorpus corpus, ElasticsearchPolicyIndex index) {
         return new PolicyRetriever(corpus, index);
     }
 
     @Bean
-    @ConditionalOnBean({PolicyRetriever.class, TradeStatusReader.class,
-        PrivateQuestionClassifier.class, AnswerModel.class})
+    PolicyIndexBootstrap policyIndexBootstrap(PolicyCorpus corpus, ElasticsearchPolicyIndex index) {
+        return new PolicyIndexBootstrap(corpus, index);
+    }
+
+    @Bean
     AnswerService answerService(PolicyRetriever retriever, TradeStatusReader statusReader,
                                 PrivateQuestionClassifier classifier, AnswerModel model) {
         return new AnswerService(retriever, statusReader, classifier, model);

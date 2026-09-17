@@ -7,9 +7,9 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.mail.javamail.JavaMailSenderImpl;
 
-/** 仅在非 local/test profile 创建生产 SMTP 客户端，配置缺失时启动即失败。 */
+/** 在 demo-mail 或非 local/test profile 创建 SMTP 客户端，配置缺失时启动即失败。 */
 @Configuration(proxyBeanMethods = false)
-@Profile("!local & !test")
+@Profile({"demo-mail", "!local & !test"})
 @EnableConfigurationProperties(SmtpMailProperties.class)
 public class SmtpMailConfiguration {
     @Bean

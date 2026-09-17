@@ -11,7 +11,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /** 仅供 local/test 使用的验证码适配器；生产 profile 不会装配此 Bean。 */
 @Component
-@Profile({"local", "test"})
+@Profile({"local & !demo-mail", "test"})
 public final class LocalVerificationMailSender implements VerificationMailSender {
     private final Map<String, String> latestCodes = new ConcurrentHashMap<>();
 

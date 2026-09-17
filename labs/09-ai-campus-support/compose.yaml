@@ -46,7 +46,7 @@ services:
       RABBITMQ_DEFAULT_USER: "${RABBITMQ_DEFAULT_USER}"
       RABBITMQ_DEFAULT_PASS: "${RABBITMQ_DEFAULT_PASS}"
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      test: ["CMD", "gosu", "rabbitmq", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -121,10 +121,12 @@ services:
         condition: service_healthy
       discovery-server:
         condition: service_started
+      mailpit:
+        condition: service_started
     ports:
       - "127.0.0.1:18081:8080"
     environment:
-      SPRING_PROFILES_ACTIVE: local
+      SPRING_PROFILES_ACTIVE: local,demo-mail
       SERVER_PORT: "8080"
       SPRING_DATASOURCE_URL: "jdbc:mysql://mysql:3306/identity_db?sslMode=DISABLED&allowPublicKeyRetrieval=true&serverTimezone=UTC"
       SPRING_DATASOURCE_USERNAME: identity_app
@@ -143,6 +145,9 @@ services:
       CAMPUS_MARKET_JWT_KEY_ID: identity-key-1
       CAMPUS_MARKET_JWT_PRIVATE_KEY: "file:/run/secrets/jwt-private-key.pem"
       CAMPUS_MARKET_JWT_PUBLIC_KEY: "file:/run/secrets/jwt-public-key.pem"
+      CAMPUS_MARKET_SMTP_HOST: mailpit
+      CAMPUS_MARKET_SMTP_PORT: "1025"
+      CAMPUS_MARKET_SMTP_FROM: no-reply@stu.example.edu.cn
     volumes:
       - type: bind
         source: "${JWT_PRIVATE_KEY_FILE}"
@@ -152,6 +157,15 @@ services:
         source: "${JWT_PUBLIC_KEY_FILE}"
         target: /run/secrets/jwt-public-key.pem
         read_only: true
+    networks:
+      - campus-cloud
+
+  mailpit:
+    image: axllent/mailpit:v1.30.0
+    restart: "no"
+    ports:
+      - "127.0.0.1:1026:1025"
+      - "127.0.0.1:8026:8025"
     networks:
       - campus-cloud
 
@@ -207,6 +221,7 @@ services:
       CAMPUS_MARKET_PAYMENT_PROVIDER: simulated
       CAMPUS_MARKET_PAYMENT_PROVIDER_URL: http://legacy-market-service:8080/simulated-provider
       CAMPUS_MARKET_PAYMENT_SIGNING_SECRET: "${CAMPUS_MARKET_PAYMENT_SIGNING_SECRET}"
+      CAMPUS_MARKET_SUPPORT_CURSOR_SECRET: "${CAMPUS_MARKET_SUPPORT_CURSOR_SECRET}"
       CAMPUS_MARKET_PAYMENT_SIMULATION_ENABLED: "true"
       CAMPUS_MARKET_PRODUCT_PUBLISHER_ENABLED: "true"
       CAMPUS_MARKET_PRODUCT_BOOTSTRAP_ENABLED: "true"
@@ -280,6 +295,8 @@ services:
         condition: service_started
       product-read-service:
         condition: service_started
+      ai-support-service:
+        condition: service_started
     ports:
       - "127.0.0.1:18080:8080"
     environment:
@@ -289,6 +306,59 @@ services:
       CAMPUS_MARKET_IDENTITY_JWKS_URI: http://identity-service:8080/api/auth/.well-known/jwks.json
       CAMPUS_MARKET_JWT_ISSUER: "${CAMPUS_MARKET_JWT_ISSUER}"
       CAMPUS_MARKET_JWT_AUDIENCE: "${CAMPUS_MARKET_JWT_AUDIENCE}"
+    networks:
+      - campus-cloud
+
+  ai-support-service:
+    build:
+      context: .
+      dockerfile: docker/apps/Dockerfile
+      args:
+        APP_JAR: ai-support-service/target/ai-support-service-0.0.1-SNAPSHOT.jar
+    restart: "no"
+    depends_on:
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      discovery-server:
+        condition: service_started
+      identity-service:
+        condition: service_started
+      legacy-market-service:
+        condition: service_started
+    ports:
+      - "127.0.0.1:18084:8080"
+    environment:
+      SERVER_PORT: "8080"
+      SPRING_DATA_REDIS_URL: redis://redis:6379
+      SPRING_ELASTICSEARCH_URIS: http://elasticsearch:9200
+      EUREKA_DEFAULT_ZONE: http://discovery-server:8761/eureka/
+      EUREKA_INSTANCE_HOSTNAME: ai-support-service
+      CAMPUS_MARKET_IDENTITY_JWKS_URI: http://identity-service:8080/api/auth/.well-known/jwks.json
+      CAMPUS_MARKET_JWT_ISSUER: "${CAMPUS_MARKET_JWT_ISSUER}"
+      CAMPUS_MARKET_JWT_AUDIENCE: "${CAMPUS_MARKET_JWT_AUDIENCE}"
+      CAMPUS_MARKET_AI_BASE_URL: "${CAMPUS_MARKET_AI_BASE_URL:-http://host.docker.internal:18089/v1}"
+      CAMPUS_MARKET_AI_API_KEY: "${CAMPUS_MARKET_AI_API_KEY:-demo-model-key}"
+      CAMPUS_MARKET_AI_MODEL: "${CAMPUS_MARKET_AI_MODEL:-demo-support-model}"
+      CAMPUS_MARKET_AI_POLICY_DIRECTORY: /app/policies
+    volumes:
+      - ./policies:/app/policies:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - campus-cloud
+
+  support-web:
+    build:
+      context: .
+      dockerfile: docker/support-web/Dockerfile
+    restart: "no"
+    depends_on:
+      api-gateway:
+        condition: service_started
+    ports:
+      - "127.0.0.1:18000:8080"
     networks:
       - campus-cloud
 

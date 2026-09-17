@@ -8,9 +8,9 @@ Rabbit 停机后交易命令和源 Outbox 仍可提交。恢复 broker 后确认
 
 本手册保留实验七交易基线的排障路径，并记录实验八身份拆分的边界。先确认失败发生在哪个事实边界，再做恢复；不要通过跳过测试、手工篡改状态或放宽 ACL 获得表面成功。
 
-## 实验八：本地 Compose 启动
+## 实验九：本地 Compose 启动
 
-Compose 只包含实验八五应用及其最小运行依赖：MySQL、Redis、RabbitMQ、安装 SmartCN 的 Elasticsearch 和 MinIO。Toxiproxy 由故障测试的 Testcontainers 独立创建，不需要也不应该作为本地常驻服务启动。以下命令只做本地 Compose 基础启动 smoke；注册、登录和业务旅程仍必须由真实 Testcontainers 夹具验收。先确认 JDK 17、Docker Engine 和各模块的 `target` JAR 已准备好，再执行：
+Compose 在实验八服务之上加入 AI 客服、静态前端和 Mailpit，并保留 MySQL、Redis、RabbitMQ、安装 SmartCN 的 Elasticsearch与 MinIO。Toxiproxy 仍由故障测试单独创建。先确认 JDK 17、Docker Engine、各模块 `target` JAR 和前端依赖已准备好，再执行：
 
 ```powershell
 docker compose --env-file .env config --quiet
@@ -21,7 +21,7 @@ docker compose --env-file .env ps
 
 `config --quiet` 只验证 Compose 语法，不把展开后的口令打印到终端。查看某个服务的启动错误时使用 `docker compose --env-file .env logs <service>`，不要把 `.env`、JWT 私钥或 Token 粘贴到排障记录；根目录的 `.dockerignore` 会排除本地配置、密钥、日志、版本控制目录和非应用构建输出。若应用镜像提示 JAR 不存在，先在实验目录执行 `.\mvnw.cmd -DskipTests package`，再重新构建对应镜像；该打包步骤不是测试验收。
 
-Compose 只表达启动依赖顺序，应用自身仍可能需要几秒注册 Eureka。应先看 `docker compose ps` 和各应用日志，确认 `discovery-server` 已监听 8761，再按 README 中的有界 PowerShell 脚本轮询五个应用的 `/actuator/health`、liveness/readiness 和 Eureka 注册，最后从 Gateway 18080 发起请求。脚本最多等待 2 分钟；任一探针缺失或返回 DOWN 时保留应用日志并排查依赖，不能把 Compose 的 `service_started` 当作就绪。所有服务均为 `restart: "no"`；反复重启只会掩盖首次失败，应该先保存错误边界再处理。
+Compose 只表达启动依赖顺序，应用自身仍可能需要几秒注册 Eureka。应先看 `docker compose ps` 和各应用日志，再按 README 的有界检查确认 JVM 服务健康及 Eureka 注册，并从 `http://localhost:18000` 验证静态站点和同源 `/api/**`。任一探针缺失或返回 DOWN 时保留日志并排查依赖，不能把 `service_started` 当作就绪。
 
 PowerShell 7 的 `Invoke-WebRequest.Content` 对没有显式字符集的 Actuator/Eureka JSON 可能返回字节数组；README 脚本先按 UTF-8 解码，再匹配 `UP` 与服务名。若 HTTP 200 却被脚本误报缺失，应先检查响应体类型和解码结果，而不是延长 deadline 或绕过 readiness。
 
@@ -35,7 +35,7 @@ identity 使用 `identity_db`/`identity_app`，legacy 使用 `market_db`/`market
 
 identity 启动时会读取 `.env` 指向的仓库外 PKCS#8 私钥和 X.509 公钥，并校验二者匹配。出现 `JWT ... resource is not readable` 或密钥不匹配时，检查宿主机绝对路径、Compose bind mount 和文件格式；不要把密钥内容写入仓库或日志。
 
-固定 JWKS 路径是 `/api/auth/.well-known/jwks.json`。容器间使用 `http://identity-service:8080/api/auth/.well-known/jwks.json`，客户端诊断使用 Gateway 的 `http://localhost:18080/api/auth/.well-known/jwks.json`。Gateway 的 `/api/auth/**` 路由到 `identity-service`，精确 `GET /api/search` 与 `GET /api/listings/search` 路由到 `product-read-service`，其他 `/api/**` 路由到 `legacy-market-service`；不要把 `lb://` 改成固定下游端口来规避 Eureka 注册问题。核对 Gateway、identity、legacy 和 product 的 issuer、audience、`kid` 必须一致；不要输出 Token。
+固定 JWKS 路径是 `/api/auth/.well-known/jwks.json`。容器间使用 `http://identity-service:8080/api/auth/.well-known/jwks.json`，客户端诊断使用 Gateway 的 `http://localhost:18080/api/auth/.well-known/jwks.json`。Gateway 的 `/api/auth/**` 路由到 `identity-service`，精确搜索 GET 路由到 `product-read-service`，精确客服 POST 路由到 `ai-support-service`，其他 `/api/**` 路由到 `legacy-market-service`；不要把 `lb://` 改成固定下游端口来规避 Eureka 注册问题。核对各验签服务的 issuer、audience、`kid` 必须一致；不要输出 Token。
 
 ## 实验八：基础依赖健康检查
 
@@ -49,7 +49,7 @@ Gateway 配置身份、商品搜索和兼容交易的显式路由。依赖故障
 
 ## 实验八：JWKS 与身份失败
 
-身份服务实际 JWKS 端点是 `/api/auth/.well-known/jwks.json`。分别检查 Gateway 和 legacy 的 `spring.security.oauth2.resourceserver.jwt.jwk-set-uri`，并核对 issuer、固定 audience、当前 `kid` 与 RS256 公钥。local/test profile 使用受控内存邮件适配器，不读取 SMTP 配置；`.env.example` 中的 SMTP 占位符仅供非 local 部署填写。不要输出 Token、私钥或密码做排障记录。
+身份服务实际 JWKS 端点是 `/api/auth/.well-known/jwks.json`。分别检查 Gateway、legacy 与 AI 服务的 JWKS 配置，并核对 issuer、固定 audience、当前 `kid` 与 RS256 公钥。单独的 local/test profile 使用内存邮件适配器；Compose 的 `local,demo-mail` 使用 Mailpit SMTP。不要输出验证码、Token、私钥或密码做排障记录。
 
 缺失或无效 Token 返回 401，普通用户访问管理员 API 返回 403。身份停机不等于已有 Token 立即失效：已缓存公钥可以验证未过期 Token，但登录仍不可用；冷启动不能跳过验签。未知 `kid` 不做递归认证重试。
 

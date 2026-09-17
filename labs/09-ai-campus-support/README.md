@@ -75,7 +75,7 @@ MySQL 是订单、库存、金额、截止时间和在售集合的事实源。Re
 
 复制 `.env.example` 为 `.env`，仅填写本地值，不提交 `.env`。其中数据库口令、RabbitMQ/MinIO 凭据、验证码签名和模拟支付签名必须替换为本机值；`CAMPUS_MARKET_IDENTITY_VERIFICATION_SECRET` 至少为 32 字节（UTF-8）。JWT 密钥文件放在仓库外，并在 `.env` 中填写两个绝对路径。`CAMPUS_MARKET_JWT_ISSUER` 使用本地约定值 `http://gateway.test`，`CAMPUS_MARKET_JWT_AUDIENCE` 必须填写固定值 `campus-market-api`。示例文件只有占位符，不能直接启动。
 
-本地 Compose 使用 `local` profile 的受控内存邮件适配器保存最近验证码，不公开验证码读取接口，也不会发送真实邮件；因此本地启动不需要可用 SMTP，`.env.example` 中的 SMTP 行在 local profile 下可以保留占位符。非 local/test 的身份服务部署必须按既有 Task5 邮件适配器提供 `CAMPUS_MARKET_SMTP_HOST`、`CAMPUS_MARKET_SMTP_PORT`、`CAMPUS_MARKET_SMTP_USERNAME`、`CAMPUS_MARKET_SMTP_PASSWORD` 和 `CAMPUS_MARKET_SMTP_FROM`，真实邮件测试不属于本地 Compose 验证。
+本地 Compose 显式启用 `local,demo-mail`，由 SMTP 适配器把验证码发送到仅绑定本机的 Mailpit；手动演示可在 `http://localhost:8026` 查看邮件，自动浏览器验收只通过 Mailpit 官方 API 读取测试邮件。其他单独启用 `local` 的运行方式仍使用受控内存适配器。非 local/test 的身份服务部署必须提供真实 SMTP 配置。
 
 可用 OpenSSL 在仓库外生成一对仅供本地实验的 RSA 密钥。私钥必须是 PKCS#8，公钥必须是 X.509：
 
@@ -87,7 +87,7 @@ openssl pkcs8 -topk8 -nocrypt -in (Join-Path $keyDir 'jwt-private-rsa.pem') -out
 openssl rsa -in (Join-Path $keyDir 'jwt-private-rsa.pem') -pubout -out (Join-Path $keyDir 'jwt-public-key.pem')
 ```
 
-在本目录按以下顺序构建并启动五个独立应用。第一次启动前必须先打包，Compose 只使用各模块的 `target` JAR；不再使用旧的单体 `spring-boot:run` 命令。下面是本地 Compose 的基础启动 smoke；它不替代 Testcontainers 的完整注册旅程：
+在本目录构建并启动六个 JVM 应用、AI 客服服务及静态前端。第一次启动前必须先打包，Compose 只使用各模块的 `target` JAR；不再使用旧的单体 `spring-boot:run` 命令。下面是本地 Compose 的基础启动 smoke；完整浏览器验收使用 `support-web` 的 `npm run test:e2e`：
 
 ```powershell
 docker info
@@ -199,7 +199,7 @@ if ($missingHealth.Count -gt 0 -or $missingProbes.Count -gt 0 -or $missingRegist
 $services.Keys | ForEach-Object { "$_ : health, liveness, readiness UP" }
 ```
 
-Compose 的依赖顺序是 discovery（8761）先启动，identity（18081）、legacy（18082）与 product（18083）在三库及各自基础设施健康后启动，Gateway（18080）最后启动。宿主机端口如下：
+Compose 的依赖顺序是 discovery（8761）先启动，identity（18081）、legacy（18082）与 product（18083）在各自基础设施健康后启动，AI（18084）完成策略索引后注册，Gateway（18080）和静态站点（18000）随后可用。宿主机端口如下：
 
 | 服务 | 容器端口 | 宿主机端口 | 用途 |
 |---|---:|---:|---|
@@ -208,13 +208,16 @@ Compose 的依赖顺序是 discovery（8761）先启动，identity（18081）、
 | identity-service | 8080 | 18081 | 身份服务诊断入口 |
 | legacy-market-service | 8080 | 18082 | 兼容交易服务诊断入口 |
 | product-read-service | 8080 | 18083 | 商品读服务诊断入口 |
+| ai-support-service | 8080 | 18084 | AI 客服诊断入口 |
+| support-web | 8080 | 18000 | 浏览器同源入口与 `/api/**` 代理 |
+| Mailpit | 1025/8025 | 1026/8026 | 演示 SMTP 与本地邮件界面 |
 | MySQL | 3306 | 3313 | `identity_db`、`market_db`、`product_read_db` |
 | Redis | 6379 | 6383 | 验证码和限流 |
 | RabbitMQ | 5672/15672 | 5673/15673 | 事件与管理界面 |
 | Elasticsearch | 9200 | 9203 | SmartCN 搜索读模型 |
 | MinIO | 9000/9001 | 9010/9011 | 私有对象和控制台 |
 
-五个应用的关键环境变量已在 Compose 中显式配置：discovery 使用 `SERVER_PORT`；identity 使用 `SPRING_PROFILES_ACTIVE=local`、本库 `SPRING_DATASOURCE_*`/`SPRING_FLYWAY_*`、`SPRING_DATA_REDIS_URL`、`EUREKA_DEFAULT_ZONE`、`CAMPUS_MARKET_JWT_*` 和密钥 bind mount；legacy 使用本库数据源/Flyway、Redis、`SPRING_RABBITMQ_*`、`SPRING_ELASTICSEARCH_URIS`、MinIO `CAMPUS_MARKET_STORAGE_*`、支付模拟 `CAMPUS_MARKET_PAYMENT_*`、JWKS、Eureka 和商品 publisher 开关；product 使用第三库数据源/Flyway、RabbitMQ、Elasticsearch、JWKS、Eureka 和 index scheduler 开关；Gateway 使用 `SERVER_PORT`、JWKS、issuer/audience 和 `EUREKA_DEFAULT_ZONE`。所有口令和宿主机密钥路径只从 `.env` 读取。
+应用的关键环境变量已在 Compose 中显式配置：identity 使用 `SPRING_PROFILES_ACTIVE=local,demo-mail` 并连接 Mailpit；legacy、product、Gateway 保留实验八的数据库、消息、搜索、JWT 与 Eureka 边界；AI 使用 Redis、Elasticsearch、JWKS、模型地址和只读规则目录。静态站点只代理 Gateway，不接触内部服务密钥。所有口令和宿主机密钥路径只从 `.env` 读取。
 
 应用间只使用 Compose 服务名：Eureka 为 `http://discovery-server:8761/eureka/`，identity 的固定 JWKS 为 `http://identity-service:8080/api/auth/.well-known/jwks.json`，legacy、product 和 Gateway 均通过该地址验签。客户端只访问 Gateway；例如先检查 Gateway 暴露的 JWKS：
 
@@ -254,7 +257,7 @@ Content-Type: application/json; charset=UTF-8
 {"email":"buyer@stu.example.edu.cn","purpose":"REGISTER"}
 ```
 
-本地 `LocalVerificationMailSender` 只保存最近验证码，不写入日志，也没有生产验证码读取端点；上面的请求只能证明发送请求被接受。Compose 基础启动和 JWKS 检查不能完成注册。完整注册、登录及后续业务 HTTP 旅程必须使用 `CloudJourneyIT` 的真实 Testcontainers 夹具读取测试邮件内容，并在 fresh 验收中单独计数；不要为本地 Compose 增加验证码读取接口。注册后使用 `/api/auth/login` 获取 JWT；业务接口携带 `Authorization: Bearer <token>`。商品搜索示例为 `GET /api/search?keyword=Java&size=20`，后续页使用响应中的 `nextSearchAfter`。
+Compose 的 `demo-mail` Profile 把验证码发送到 Mailpit，但仍不增加生产验证码读取端点，也不把验证码写入日志。手动注册从 Mailpit 本地界面读取验证码；自动 Playwright 夹具通过 Mailpit 官方 API 读取且不写入报告。注册后使用 `/api/auth/login` 获取 JWT；业务接口携带 `Authorization: Bearer <token>`。
 
 要求幂等的写命令必须带 `Idempotency-Key`。同一键和相同请求摘要重放原始 UTF-8 终态响应；同键异参返回 409，失败事务不能遗留阻塞性幂等记录。所有金额均是人民币整数分并保存为 `BIGINT`，禁止浮点金额。
 

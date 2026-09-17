@@ -11,7 +11,7 @@ import java.util.Objects;
 
 /** 生产验证码邮件适配器；不记录验证码、密码或收件人。 */
 @Component
-@Profile("!local & !test")
+@Profile({"demo-mail", "!local & !test"})
 public final class SmtpVerificationMailSender implements VerificationMailSender {
     private final JavaMailSender mailSender;
     private final SmtpMailProperties properties;

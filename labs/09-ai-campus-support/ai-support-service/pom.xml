@@ -81,11 +81,6 @@
             <artifactId>junit-jupiter</artifactId>
             <scope>test</scope>
         </dependency>
-        <dependency>
-            <groupId>co.elastic.clients</groupId>
-            <artifactId>elasticsearch-rest5-client</artifactId>
-            <scope>test</scope>
-        </dependency>
     </dependencies>
 
     <build>

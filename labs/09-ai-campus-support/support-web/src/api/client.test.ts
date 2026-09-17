@@ -1,9 +1,14 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
-import { askSupport, listResources, type AnswerRequest } from './client';
+import { askSupport, listResources, mapStatus, type AnswerRequest } from './client';
 
 describe('支持服务客户端', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+  });
+
+  test('401 与 403 提供不同且可行动的中文提示', () => {
+    expect(mapStatus(401).userMessage).toBe('登录已失效，请重新登录。');
+    expect(mapStatus(403).userMessage).toBe('无权访问该资源，请确认账号权限。');
   });
 
   test('询问私人资源时发送显式 ID 和 Bearer，并禁用缓存', async () => {
@@ -23,7 +28,7 @@ describe('支持服务客户端', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/ai/support/answers', {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
+        'Content-Type': 'application/json; charset=UTF-8',
         Authorization: 'Bearer short-test-token'
       },
       body: JSON.stringify(request),

@@ -5,6 +5,8 @@ import com.example.campusmarket.supportai.infrastructure.SupportRateLimiter;
 import com.example.campusmarket.supportai.policy.PolicyRetriever;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.ObjectProvider;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -27,6 +29,7 @@ import java.util.UUID;
 @RestController
 @RequestMapping("/api/ai/support")
 public class SupportAnswerController {
+    private static final Logger LOGGER = LoggerFactory.getLogger(SupportAnswerController.class);
     private static final MediaType JSON_UTF8 = new MediaType(
         "application", "json", StandardCharsets.UTF_8);
 
@@ -98,13 +101,15 @@ public class SupportAnswerController {
 
     @ExceptionHandler(AnswerService.DependencyUnavailableException.class)
     ResponseEntity<ErrorResponse> dependencyUnavailable(
-        AnswerService.DependencyUnavailableException ignored) {
+        AnswerService.DependencyUnavailableException exception) {
+        LOGGER.warn("AI support dependency unavailable: {}", exception.getMessage());
         return error(HttpStatus.SERVICE_UNAVAILABLE, "DEPENDENCY_UNAVAILABLE", "支持服务暂时不可用");
     }
 
     @ExceptionHandler(PolicyRetriever.PolicyUnavailableException.class)
     ResponseEntity<ErrorResponse> policyUnavailable(
-        PolicyRetriever.PolicyUnavailableException ignored) {
+        PolicyRetriever.PolicyUnavailableException exception) {
+        LOGGER.warn("AI support policy unavailable: {}", exception.getMessage());
         return error(HttpStatus.SERVICE_UNAVAILABLE, "DEPENDENCY_UNAVAILABLE", "支持服务暂时不可用");
     }
 

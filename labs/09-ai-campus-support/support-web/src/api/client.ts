@@ -77,8 +77,9 @@ export class ApiError extends Error {
 export function mapStatus(status: number): ApiError {
   switch (status) {
     case 401:
+      return new ApiError(status, 'UNAUTHENTICATED', '登录已失效，请重新登录。');
     case 403:
-      return new ApiError(status, status === 401 ? 'UNAUTHENTICATED' : 'FORBIDDEN', '无权查看');
+      return new ApiError(status, 'FORBIDDEN', '无权访问该资源，请确认账号权限。');
     case 404:
       return new ApiError(status, 'RESOURCE_NOT_FOUND', '资源不存在');
     case 429:
@@ -104,7 +105,7 @@ export async function askSupport(
   const response = await fetch('/api/ai/support/answers', {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
+      'Content-Type': 'application/json; charset=UTF-8',
       ...(token ? { Authorization: `Bearer ${token}` } : {})
     },
     body: JSON.stringify(request),
@@ -128,7 +129,7 @@ export async function listResources(
 export async function issueVerification(request: VerificationRequest): Promise<void> {
   const response = await fetch('/api/auth/email-verifications', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json; charset=UTF-8' },
     body: JSON.stringify(request),
     cache: 'no-store'
   });
@@ -138,7 +139,7 @@ export async function issueVerification(request: VerificationRequest): Promise<v
 export async function registerAccount(request: RegisterRequest): Promise<void> {
   const response = await fetch('/api/auth/register', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json; charset=UTF-8' },
     body: JSON.stringify(request),
     cache: 'no-store'
   });
@@ -148,7 +149,7 @@ export async function registerAccount(request: RegisterRequest): Promise<void> {
 export async function loginAccount(request: LoginRequest): Promise<LoginResponse> {
   const response = await fetch('/api/auth/login', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json; charset=UTF-8' },
     body: JSON.stringify(request),
     cache: 'no-store'
   });
