@@ -1,6 +1,18 @@
 spring:
   application:
     name: ai-support-service
+  ai:
+    chat:
+      observations:
+        log-prompt: false
+        log-completion: false
+        include-error-logging: false
+    openai:
+      base-url: ${CAMPUS_MARKET_AI_BASE_URL:https://api.openai.com}
+      api-key: ${CAMPUS_MARKET_AI_API_KEY:}
+      chat:
+        options:
+          model: ${CAMPUS_MARKET_AI_MODEL:gpt-4o-mini}
   jackson:
     deserialization:
       fail-on-unknown-properties: true
@@ -44,12 +56,21 @@ campus:
   market:
     jwt:
       audience: ${CAMPUS_MARKET_JWT_AUDIENCE:campus-market-api}
+    ai:
+      enabled: ${CAMPUS_MARKET_AI_ENABLED:true}
+      timeout: ${CAMPUS_MARKET_AI_TIMEOUT:3s}
+      max-concurrency: ${CAMPUS_MARKET_AI_MAX_CONCURRENCY:8}
+      max-response-bytes: ${CAMPUS_MARKET_AI_MAX_RESPONSE_BYTES:16384}
+      policy-directory: ${CAMPUS_MARKET_AI_POLICY_DIRECTORY:policies}
 
 ---
 spring:
   config:
     activate:
       on-profile: test
+  ai:
+    openai:
+      api-key: ${CAMPUS_MARKET_AI_API_KEY:test-disabled}
   cloud:
     discovery:
       enabled: false
@@ -57,3 +78,8 @@ spring:
 eureka:
   client:
     enabled: false
+
+campus:
+  market:
+    ai:
+      enabled: ${CAMPUS_MARKET_AI_ENABLED:false}
