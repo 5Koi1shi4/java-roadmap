@@ -1,0 +1,13 @@
+{
+  "version": "v1",
+  "sources": [
+    {
+      "sourceId": "trade-policy",
+      "title": "校园交易公开规则",
+      "version": "v1",
+      "path": "trade-policy-v1.md",
+      "visibility": "PUBLIC",
+      "sha256": "0cbd0e644989e8ba86321353566b9ba473e8c92d2fd4836d85def925f6d8d723"
+    }
+  ]
+}
