@@ -114,6 +114,7 @@ public class GatewaySecurityConfiguration {
                 .pathMatchers(HttpMethod.GET, "/api/auth/.well-known/jwks.json").permitAll()
                 .pathMatchers("/actuator/health", "/actuator/health/liveness",
                     "/actuator/health/readiness", "/health").permitAll()
+                .pathMatchers(HttpMethod.POST, "/api/ai/support/answers").permitAll()
                 .pathMatchers("/api/admin/**").hasRole("ADMIN")
                 .pathMatchers("/api/**").authenticated()
                 .anyExchange().denyAll())

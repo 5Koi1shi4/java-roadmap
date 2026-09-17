@@ -33,6 +33,11 @@ spring:
               predicates:
                 - Path=/api/listings/search
                 - Method=GET
+            - id: ai-support-answer
+              uri: lb://ai-support-service
+              predicates:
+                - Path=/api/ai/support/answers
+                - Method=POST
             - id: legacy-api
               uri: lb://legacy-market-service
               predicates:

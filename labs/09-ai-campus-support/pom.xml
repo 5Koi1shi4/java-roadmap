@@ -25,6 +25,7 @@
         <module>legacy-market-service</module>
         <module>api-gateway</module>
         <module>product-read-service</module>
+        <module>ai-support-service</module>
     </modules>
 
     <properties>

@@ -13,7 +13,7 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** 验证 Gateway 只暴露设计中声明的两条服务路由。 */
+/** 验证 Gateway 只暴露设计中声明的显式服务路由。 */
 @SpringBootTest(
     classes = ApiGatewayApplication.class,
     webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
@@ -35,18 +35,26 @@ class ExplicitRoutesTest {
             .block(Duration.ofSeconds(5));
 
         assertThat(routes).isNotNull().extracting(RouteDefinition::getId)
-            .containsExactly("identity-api", "product-search", "product-listing-search", "legacy-api");
+            .containsExactly("identity-api", "product-search", "product-listing-search",
+                "ai-support-answer", "legacy-api");
         assertThat(routes.get(0).getUri().toString()).isEqualTo("lb://identity-service");
         assertThat(routes.get(1).getUri().toString()).isEqualTo("lb://product-read-service");
-        assertGetPathRoute(routes.get(1), "/api/search");
+        assertMethodPathRoute(routes.get(1), "/api/search");
         assertThat(routes.get(2).getUri().toString()).isEqualTo("lb://product-read-service");
-        assertGetPathRoute(routes.get(2), "/api/listings/search");
-        assertThat(routes.get(3).getUri().toString()).isEqualTo("lb://legacy-market-service");
+        assertMethodPathRoute(routes.get(2), "/api/listings/search");
+        assertThat(routes.get(3).getUri().toString()).isEqualTo("lb://ai-support-service");
+        assertMethodPathRoute(routes.get(3), "/api/ai/support/answers", "POST");
+        assertThat(routes.get(4).getUri().toString()).isEqualTo("lb://legacy-market-service");
         assertThat(environment.getProperty(
             "spring.cloud.gateway.discovery.locator.enabled", Boolean.class)).isFalse();
     }
 
-    private static void assertGetPathRoute(RouteDefinition route, String expectedPath) {
+    private static void assertMethodPathRoute(RouteDefinition route, String expectedPath) {
+        assertMethodPathRoute(route, expectedPath, "GET");
+    }
+
+    private static void assertMethodPathRoute(RouteDefinition route, String expectedPath,
+                                              String expectedMethod) {
         assertThat(route.getPredicates()).extracting(PredicateDefinition::getName)
             .contains("Path", "Method");
         PredicateDefinition path = route.getPredicates().stream()
@@ -58,6 +66,6 @@ class ExplicitRoutesTest {
             .filter(predicate -> predicate.getName().equals("Method"))
             .findFirst()
             .orElseThrow();
-        assertThat(method.getArgs()).containsValue("GET");
+        assertThat(method.getArgs()).containsValue(expectedMethod);
     }
 }
