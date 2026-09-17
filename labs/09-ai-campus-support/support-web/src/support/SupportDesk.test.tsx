@@ -181,7 +181,10 @@ describe('校园客服工作台', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: '获取规则答复' }));
 
-    await waitFor(() => expect(screen.getByText('登录已失效，请重新登录。')).toBeVisible());
+    await waitFor(() => expect(screen.getByRole('heading', { name: '登录后查询本人进度' })).toBeVisible());
+    expect(screen.getByText('登录已失效，请重新登录。')).toBeVisible();
+    expect(screen.getByRole('textbox', { name: '问题' })).toHaveValue('');
+    expect(screen.queryByText(/已关联：/)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: '重试' })).not.toBeInTheDocument();
     expect(fetchMock.mock.calls.filter(([input]) => String(input).includes('/api/ai/support/answers'))).toHaveLength(1);
   });

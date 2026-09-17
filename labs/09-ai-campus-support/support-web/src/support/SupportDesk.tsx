@@ -22,6 +22,7 @@ export function SupportDesk() {
   const requestVersion = useRef(0);
   const activeToken = useRef(accessToken);
   const previousToken = useRef(accessToken);
+  const preserveUnauthorizedMessage = useRef(false);
   activeToken.current = accessToken;
 
   useEffect(() => {
@@ -33,13 +34,16 @@ export function SupportDesk() {
     setQuestion('');
     setSelectedResource(null);
     setResult(null);
-    setError(null);
     setLoading(false);
-    setReauthRequired(false);
+    if (!(preserveUnauthorizedMessage.current && accessToken === null)) {
+      setError(null);
+      setReauthRequired(false);
+    }
   }, [accessToken]);
 
   const handleUnauthorized = useCallback(() => {
     requestVersion.current += 1;
+    preserveUnauthorizedMessage.current = true;
     logout();
     setQuestion('');
     setSelectedResource(null);
@@ -51,6 +55,7 @@ export function SupportDesk() {
 
   const handleLogout = useCallback(() => {
     requestVersion.current += 1;
+    preserveUnauthorizedMessage.current = false;
     logout();
     setQuestion('');
     setSelectedResource(null);
