@@ -40,11 +40,15 @@ public final class SpringAiAnswerModel implements AnswerModel {
 
     @Autowired
     public SpringAiAnswerModel(ChatClient.Builder builder,
-                               @Value("${campus.market.ai.timeout:3s}") Duration timeout,
                                @Value("${campus.market.ai.max-concurrency:8}") int maxConcurrency,
                                @Value("${campus.market.ai.max-response-bytes:16384}")
                                int maxResponseBytes) {
-        this(builder.build(), timeout, maxConcurrency, maxResponseBytes);
+        this(builder.build(), DEFAULT_TIMEOUT, maxConcurrency, maxResponseBytes);
+    }
+
+    /** 生产模型使用固定三秒超时；直接注入客户端的重载便于 HTTP 替身测试。 */
+    public SpringAiAnswerModel(ChatClient client, int maxConcurrency, int maxResponseBytes) {
+        this(client, DEFAULT_TIMEOUT, maxConcurrency, maxResponseBytes);
     }
 
     /** 供单元测试注入受控 ChatClient。 */

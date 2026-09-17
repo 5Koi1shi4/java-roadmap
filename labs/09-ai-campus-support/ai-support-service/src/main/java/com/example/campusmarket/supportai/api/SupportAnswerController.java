@@ -53,18 +53,16 @@ public class SupportAnswerController {
         if (request.hasPrivateResource() && !isAuthenticated(authentication)) {
             return error(HttpStatus.UNAUTHORIZED, "UNAUTHENTICATED", "未认证");
         }
-        if (service == null) {
-            // 允许 Task 4 的协议边界测试在未配置外部 AI 依赖时启动应用上下文。
-            return ResponseEntity.ok().contentType(JSON_UTF8)
-                .body(new AnswerService.AnswerResponse("AI 支持服务已就绪。"));
+        if (service == null || rateLimiter == null) {
+            // 外部 AI 或 Redis 未完整装配时必须显式失败，不能绕过限流或伪造回答。
+            return error(HttpStatus.SERVICE_UNAVAILABLE, "DEPENDENCY_UNAVAILABLE",
+                "支持服务暂时不可用");
         }
 
         UUID privateUserId = request.hasPrivateResource()
             ? principalId(authentication) : null;
-        if (rateLimiter != null) {
-            rateLimiter.check(servletRequest == null ? null : servletRequest.getRemoteAddr(),
-                privateUserId);
-        }
+        rateLimiter.check(servletRequest == null ? null : servletRequest.getRemoteAddr(),
+            privateUserId);
         return ResponseEntity.ok().contentType(JSON_UTF8)
             .body(service.answer(request,
                 request.hasPrivateResource() ? bearerToken(authentication) : null));

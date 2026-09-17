@@ -68,10 +68,15 @@ public final class HttpTradeStatusReader implements TradeStatusReader {
             if (bearerToken != null && !bearerToken.isBlank()) {
                 request = request.header(HttpHeaders.AUTHORIZATION, "Bearer " + bearerToken);
             }
-            return request.retrieve().body(TradeStatusReader.StatusView.class);
+            TradeStatusReader.StatusView body = request.retrieve()
+                .body(TradeStatusReader.StatusView.class);
+            if (body == null) {
+                throw new AnswerService.DependencyUnavailableException("交易状态服务返回空响应");
+            }
+            return body;
         } catch (RestClientResponseException exception) {
             int status = exception.getStatusCode().value();
-            if (status == 404 || status == 401 || status == 403) {
+            if (status == 404) {
                 throw new AnswerService.ResourceNotFoundException();
             }
             throw new AnswerService.DependencyUnavailableException("交易状态服务暂时不可用");

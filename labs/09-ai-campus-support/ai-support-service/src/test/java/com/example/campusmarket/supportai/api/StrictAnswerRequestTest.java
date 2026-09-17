@@ -118,7 +118,7 @@ class StrictAnswerRequestTest {
                 .header(AUTHORIZATION, "Bearer " + validToken())
                 .contentType(JSON_UTF8)
                 .content(body))
-            .andExpect(status().isOk());
+            .andExpect(status().isServiceUnavailable());
 
         mvc.perform(post("/api/ai/support/answers")
                 .header(AUTHORIZATION, "Bearer invalid-token")

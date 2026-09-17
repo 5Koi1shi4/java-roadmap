@@ -10,6 +10,7 @@ spring:
     openai:
       base-url: ${CAMPUS_MARKET_AI_BASE_URL:https://api.openai.com}
       api-key: ${CAMPUS_MARKET_AI_API_KEY:}
+      timeout: 3s
       chat:
         options:
           model: ${CAMPUS_MARKET_AI_MODEL:gpt-4o-mini}
@@ -58,7 +59,6 @@ campus:
       audience: ${CAMPUS_MARKET_JWT_AUDIENCE:campus-market-api}
     ai:
       enabled: ${CAMPUS_MARKET_AI_ENABLED:true}
-      timeout: ${CAMPUS_MARKET_AI_TIMEOUT:3s}
       max-concurrency: ${CAMPUS_MARKET_AI_MAX_CONCURRENCY:8}
       max-response-bytes: ${CAMPUS_MARKET_AI_MAX_RESPONSE_BYTES:16384}
       policy-directory: ${CAMPUS_MARKET_AI_POLICY_DIRECTORY:policies}
