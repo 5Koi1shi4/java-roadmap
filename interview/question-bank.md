@@ -212,7 +212,7 @@
 
 ### 50. `/content` 与预签名 URL 的安全边界有什么不同？
 **参考回答：** `/content` 在流式传输前重查 ACL，可支持即时撤权；预签名 URL 在签发时授权，存储服务随后直接处理，撤权存在最多 TTL 的残余窗口。两者都不记录完整链接。
-**代码/测试证据：** `DownloadService`、`MinioObjectStorage`、`DownloadController`；下载相关集成测试。
+**代码/测试证据：** `DownloadService`、`MinioObjectStorage`、`DownloadController`；`MinioDownloadHttpIT`、`DownloadStreamingHttpIT`。
 
 ### 51. 租约、token 与 generation 如何保护清理和恢复？
 **参考回答：** 领取任务写入新的 owner、claim token 与 lease；状态推进、接管和完成同时匹配目标状态、token、对象 key 和 generation。迟到执行者影响行数为零，不能覆盖新一代 Blob。
@@ -220,7 +220,7 @@
 
 ### 52. 为什么物理删除需要幂等？
 **参考回答：** 对象存储删除可能已完成但确认丢失，重试时不存在应按删除成功处理。Blob 与清理任务的最终完成要在同一显式事务里以条件更新写入。
-**代码/测试证据：** `StorageCleanupService`、`ObjectStorage`；清理集成测试。
+**代码/测试证据：** `StorageCleanupService`、`ObjectStorage`；`CleanupLeaseIT`、`CleanupAtomicCompletionTest`。
 
 ### 53. 文件服务的可观测性怎样避免泄漏隐私？
 **参考回答：** 审计和指标只采用固定 action、result、phase 等低基数枚举，过滤 token、URL、路径、哈希、对象 key、异常文本和用户/文件 ID。内部 correlation ID 也不能由客户端覆盖。
@@ -228,7 +228,7 @@
 
 ### 54. MinIO 重复故障恢复应验证哪些不变量？
 **参考回答：** 每轮先观察失败或积压，恢复后检查会话和清理任务终态、临时对象清空，以及数据库 READY object key 与 bucket 已知 Blob 集合一致。该检查不等于宣称能枚举任意外部对象。
-**代码/测试证据：** `StagingRecoveryService`、`StorageCleanupService`；恢复演练集成测试。
+**代码/测试证据：** `StagingRecoveryService`、`StorageCleanupService`；`StorageRecoveryDrillIT`、`MinioFaultRecoveryIT`、`StagingRecoveryIT`。
 
 ## 实验七：校园二手交易平台
 
@@ -250,11 +250,11 @@
 
 ### 59. 部分退款为何先预留额度？
 **参考回答：** 并发退款前先预留，保证成功退款额与预留额之和不超过实付金额。预留、回调收敛和失败释放均必须由事务状态机处理。
-**代码/测试证据：** `RefundService`、退款持久化；支付/退款集成测试。
+**代码/测试证据：** `RefundService`、退款持久化；`RefundLimitTest`、`PaymentFlowIT`。
 
 ### 60. 截止时间竞争如何以数据库时间裁决？
 **参考回答：** 截止扫描只取候选，逐项事务按主键锁定后以当前状态、金额和数据库时间条件更新；到达截止时即过期。应用时钟和扫描列表只作提示，不能取代最终裁决。
-**代码/测试证据：** `DeadlineScheduler`、`OrderLifecycleService`；截止时间竞争测试。
+**代码/测试证据：** `DeadlineScheduler`、`OrderLifecycleService`；`DeadlineRaceIT`、`DeadlineSchedulerConditionTest`。
 
 ### 61. Outbox、Inbox、confirm 与 fencing 各自解决什么问题？
 **参考回答：** Outbox 将业务事实与待发事件同事务保存；Inbox 将消费去重与业务提交绑定；confirm 证明 broker 已接收；租约及 claim token 防止旧 owner 的迟到完成覆盖接管者。它们共同实现至少一次下的可恢复幂等。
@@ -262,15 +262,15 @@
 
 ### 62. 什么是可信退回证明？
 **参考回答：** 可接受卖家确认、已验签物流签收回调或管理员明确确认。单号、图片和视频仅是材料，不自动证明已退回；缺证或冲突在硬期限后进入 `ESCALATED` 并继续冻结资金。
-**代码/测试证据：** `ReturnResolutionService`、`DisputeService`；售后旅程测试。
+**代码/测试证据：** `ReturnResolutionService`、`DisputeService`；`PartialReturnRefundIT`、`DisputeDeadlineIT`、`ReturnResolutionTest`。
 
 ### 63. 部分退货为什么进入隔离库存？
 **参考回答：** 退款成功不等于商品已可再次销售。批准退回数量先隔离，卖家检查后显式重新上架或报损；仅退款不改变库存。
-**代码/测试证据：** `ReturnResolutionService`、`JdbcInventoryRepository`；售后库存测试。
+**代码/测试证据：** `ReturnResolutionService`、`JdbcInventoryRepository`；`PartialReturnRefundIT`。
 
 ### 64. 结算后的卖家质保为何独立于订单状态？
 **参考回答：** 已结算订单保持 `SETTLED`，长期质保由独立案件和卖家义务流转。义务逾期可限制发布/提现，未来结算按唯一业务键抵扣，不能回滚既有订单结算。
-**代码/测试证据：** `WarrantyService`、`SellerObligationService`；质保用例测试。
+**代码/测试证据：** `WarrantyService`、`SellerObligationService`；`WarrantyObligationIT`、`WarrantyPolicyTest`。
 
 ### 65. 证据 ACL 为什么不让管理员角色自动绕过？
 **参考回答：** 证据只对案件买卖双方及被分配管理员可见；角色本身不证明已获案件授权。打开 MinIO 对象前仍须复查逻辑 ACL，无权和不存在统一 404。
@@ -292,90 +292,90 @@
 
 ### 69. RS256 与 JWKS 带来什么密钥边界？
 **参考回答：** 身份服务独占私钥，验证服务只获取公钥；JWKS 以 `kid` 选择密钥，未知 kid 不能放行。轮换还需处理获取、缓存和冷启动失败语义。
-**代码/测试证据：** `identity-service` JWKS endpoint、`JwksKeyProvider`；JWKS 集成测试。
+**代码/测试证据：** `identity-service` 的 `JwksController`、`ResourceServerJwtDecoder`；`JwksIT`、`JwtJwksRefreshIT`。
 
 ### 70. 冷热 JWKS 缓存故障应如何处理？
 **参考回答：** 已缓存公钥且 token 未过期时可继续验签；冷启动没有可用密钥时必须拒绝。未知 kid 触发受控刷新，但刷新失败不能用旧错误密钥放行。
-**代码/测试证据：** JWKS 缓存组件；`CloudJourneyIT` 的身份停机、冷启动与刷新场景。
+**代码/测试证据：** `ResourceServerJwtDecoder`、`JwksReadinessHealthIndicator`；`JwtJwksRefreshIT`、`CloudFailureRecoveryIT`。
 
 ### 71. liveness 与 readiness 为什么不能混为一谈？
 **参考回答：** liveness 表示进程仍能响应；readiness 还检查可用 JWKS、注册中心和必需实例。短暂探测缓存只缓冲依赖波动，不证明所有首次验签或下游请求都能成功。
-**代码/测试证据：** 各服务 Actuator health contributor；Cloud 集成测试的 health/liveness/readiness 断言。
+**代码/测试证据：** `GatewayReadinessIT`、`ReadinessCacheExpiryTest`、`ProductReadinessIT`。
 
 ### 72. 为什么 Gateway 不自动重试写请求？
 **参考回答：** 断连不能说明下游事务未提交；自动重试注册、验证码或交易命令可能重复副作用。写命令由显式幂等键定义重放语义，Gateway 不猜测成功。
-**代码/测试证据：** `api-gateway` 路由/重试配置；`CloudJourneyIT`。
+**代码/测试证据：** `api-gateway/src/main/resources/application.yml`；`ExplicitRoutesTest`、`CloudJourneyIT`。
 
 ### 73. 数据库所有权怎样落到可验证约束？
 **参考回答：** identity、交易和商品读模型各有数据库、迁移账号与最小运行权限；模块通过公开接口和逻辑 ID 协作，不依赖跨库查询、跨库外键或对方领域模型。
-**代码/测试证据：** 三个模块的 Flyway 与 datasource 配置；数据库所有权集成测试。
+**代码/测试证据：** `identity-service/src/main/resources/db/migration/`、`legacy-market-service/src/main/resources/db/migration/`、`product-read-service/src/main/resources/db/migration/`；`DatabaseOwnershipIT`、`ProductDatabaseOwnershipIT`、`IdentitySchemaIT`、`MarketSchemaBoundaryIT`。
 
 ### 74. 截止调度与筹资为何可能死锁，如何规避？
 **参考回答：** 一个路径先锁二级索引、另一路先锁主键会形成反向等待。候选扫描不持锁，逐项事务统一按主键锁定并用当前状态和数据库截止时间条件更新。
-**代码/测试证据：** `DeadlineScheduler`、`SellerObligationService`；死锁回归测试。
+**代码/测试证据：** `DeadlineScheduler`、`SellerObligationService`；`DeadlineRaceIT`、`WarrantyDeadlineRaceIT`。
 
 ### 75. 为什么聚合旅程会触发 classpath/自动配置隔离问题？
 **参考回答：** 同一测试 JVM 中不同应用的依赖都可见，JDBC 或 servlet 自动配置可能被错误装入 Gateway 或 Discovery。每个应用需显式限定自动配置、web 类型、配置文件和注册名。
-**代码/测试证据：** 各应用启动类与自动配置排除；五应用 `CloudJourneyIT`。
+**代码/测试证据：** `GatewayStartupIsolationTest`、`CloudJourneyIT`；各应用的 `*Application.java` 启动类。
 
 ### 76. `.gitignore` 为什么不能代替 `.dockerignore`？
 **参考回答：** Git 与 Docker 构建上下文使用不同忽略规则。即使本地密钥未被 Git 跟踪，仍可能被发送到 Docker daemon；`.dockerignore` 要只放行构建所需内容并经实际构建验证。
-**代码/测试证据：** 根 `.dockerignore`、各模块 `Dockerfile`；隔离 Compose smoke 测试。
+**代码/测试证据：** `labs/08-spring-cloud-split/.dockerignore`、`labs/08-spring-cloud-split/docker/apps/Dockerfile`；`DockerfilePathGuardTest`。
 
 ### 77. 为什么商品投影的事实所有权留在交易服务？
 **参考回答：** 商品读服务是可重建投影，交易服务仍拥有商品、库存和订单事实。源端在交易事务内写不可变快照 Outbox，读侧不得把后来查询到的状态伪装为历史事件。
-**代码/测试证据：** `ProductSnapshotPublisherDispatcher`、`ProductEventConsumer`；商品读旅程测试。
+**代码/测试证据：** `ProductSnapshotPublisherDispatcher`、`ProductEventConsumer`；`ProductReadJourneyIT`、`ProductProjectionIT`。
 
 ### 78. Inbox 与 aggregate version 如何配合处理重复和乱序？
 **参考回答：** Inbox 以 event ID 去掉同一事件的重复投递；不同事件仍可能乱序，因此投影用 aggregate version 条件更新，拒绝旧版本覆盖新版本。索引 Outbox 继续将投影与 ES 同步解耦。
-**代码/测试证据：** `ProductEventConsumer`、投影仓储、索引 Outbox；商品读集成测试。
+**代码/测试证据：** `ProductEventConsumer`、投影仓储、索引 Outbox；`ProductRabbitConsumerIT`、`ProductProjectionIT`。
 
 ### 79. 在线重建 fencing 如何保护读模型切换？
 **参考回答：** 重建门禁保存 generation、owner、token 和 lease；旧 owner 不能在新任务接管后完成切换。快照、高水位补放、最终校验和 read/write alias 原子切换共同避免丢事件。
-**代码/测试证据：** `ProductSearchRebuildRecoveryService`、重建门禁仓储；在线重建恢复测试。
+**代码/测试证据：** `ProductSearchRebuildRecoveryService`、重建门禁仓储；`ProductRebuildIT`。
 
 ### 80. 零事件 replay 为什么仍需完成屏障？
 **参考回答：** 零事件不表示源端已回放完成。读侧要记录 replay ID 和高水位，等源端完成屏障、索引待办清空且人工失败队列为空后才 READY，否则搜索应返回 503。
-**代码/测试证据：** `ProductEventConsumer`、replay 状态组件；商品读恢复集成测试。
+**代码/测试证据：** `ProductEventConsumer`、replay 状态组件；`ProductReadinessIT`、`ProductReplayCompleteDecoderTest`。
 
 ## 实验九：AI 校园客服
 
 ### 81. 私人提问为何要最小化 prompt 与 token？
 **参考回答：** 模型供应商不是授权边界，也不需要用户 token。服务先在本地完成对象授权，将私人问题归一为固定安全模板，只发送最少公开问题/模板和已审阅规则片段。
-**代码/测试证据：** `ai-support-service` 的 `AnswerService`、`PolicyRetriever`；AI 支持集成测试。
+**代码/测试证据：** `ai-support-service` 的 `AnswerService`、`PolicyRetriever`；`AnswerServiceTest`、`AnswerHttpIT`。
 
 ### 82. 为什么 AI 服务必须只读？
 **参考回答：** 退款、裁决和订单修改会改变资金、库存和权利义务，必须通过既有授权、幂等、状态机和审计边界。生成文本只能解释规则，不能成为交易写命令。
-**代码/测试证据：** `AnswerService`、AI 服务路由定义；AI 支持服务测试。
+**代码/测试证据：** `AnswerService`、`SupportAnswerController`；`AnswerServiceTest`、`AnswerHttpIT`。
 
 ### 83. 如何同时防止越权枚举与模型幻觉？
 **参考回答：** 对象授权由交易服务完成，无权与不存在统一 404；AI 层不从错误差异推断资源存在。回答仅依据有版本来源的规则和结构化本人状态，缺依据时明确失败而不补写事实。
-**代码/测试证据：** `HttpTradeStatusReader`、`PolicyRetriever`、`AnswerService`；授权与回答边界测试。
+**代码/测试证据：** `HttpTradeStatusReader`、`PolicyRetriever`、`AnswerService`；`HttpTradeStatusReaderTest`、`AnswerHttpIT`。
 
 ### 84. 为什么交易状态、规则索引和模型需要三类失败语义？
 **参考回答：** 交易状态失败不能伪装成没有订单，规则索引失败意味着没有可引用依据，模型失败意味着不能生成文本。前端应显示脱敏且可诊断的重试提示，恢复后只重试读取。
-**代码/测试证据：** `HttpTradeStatusReader`、`PolicyRetriever`、模型客户端异常映射；AI 故障恢复测试。
+**代码/测试证据：** `HttpTradeStatusReader`、`PolicyRetriever`、`AnswerService`；`HttpTradeStatusReaderTest`、`PolicyIndexIT`、`AnswerServiceTest`、`AnswerHttpIT`。
 
 ### 85. 前端为什么只在内存保存 token？
 **参考回答：** 客服页面不要求跨刷新保持登录；内存会话缩小持久化暴露面，401 时清空并回登录态。token 不进入 URL、日志、localStorage、sessionStorage 或测试报告。
-**代码/测试证据：** `support-web` 会话状态实现；Playwright 会话清理测试。
+**代码/测试证据：** `support-web/src/auth/AuthProvider.tsx`；`support-web/src/auth/AuthProvider.test.tsx`、`support-web/e2e/support-journey.spec.ts`。
 
 ### 86. 版本化政策引用如何约束生成回答？
 **参考回答：** 检索结果必须携带已审阅规则片段和版本来源，回答引用这些受控事实而非模型常识。没有匹配规则或版本不可用时返回明确边界，不把猜测写成政策。
-**代码/测试证据：** `PolicyRetriever`、规则索引资源；AI 支持单元测试。
+**代码/测试证据：** `PolicyRetriever`、`ai-support-service/src/main/resources/policies/`；`PolicyIndexIT`、`PolicyCorpusTest`。
 
 ### 87. 提示注入的边界应放在哪里？
 **参考回答：** 用户文本是非可信输入，不能改变服务端固定模板、授权范围、规则选择或工具能力。AI 服务不外发 token 和完整交易对象，也不提供可写交易工具。
-**代码/测试证据：** `AnswerService` 的模板编排、模型请求 DTO；提示注入边界测试。
+**代码/测试证据：** `AnswerService` 的模板编排、模型请求 DTO；`AnswerServiceTest`、`StrictAnswerRequestTest`。
 
 ### 88. Redis 限流为什么是固定分钟桶且 fail-closed？
 **参考回答：** 实现按固定分钟键计数，到下一个分钟边界重置；不保留跨边界历史，也不维护补充额度。Redis 不可用时拒绝 AI 请求，避免故障时失去成本与滥用控制。
-**代码/测试证据：** AI 服务的 Redis rate limiter；限流与 Redis 故障测试。
+**代码/测试证据：** `SupportRateLimiter`；`SupportRateLimiterIT`、`AnswerHttpIT`。
 
 ### 89. 为什么要分离结构化事实与生成文本？
 **参考回答：** 本人订单等事实由受权的交易服务以结构化字段提供，生成文本只解释这些事实和公开政策。分离使前端能识别事实来源，也避免模型输出被误当作交易状态。
-**代码/测试证据：** `HttpTradeStatusReader`、`AnswerService` 响应模型；AI 支持集成测试。
+**代码/测试证据：** `HttpTradeStatusReader`、`AnswerService` 响应模型；`HttpTradeStatusReaderTest`、`AnswerHttpIT`。
 
 ### 90. 桌面和移动端全栈 E2E 应证明哪些边界？
 **参考回答：** E2E 要经同源入口验证登录、会话清理、授权后的本人状态、规则回答及模型/依赖失败恢复，并覆盖桌面与移动视口。它补足服务测试的浏览器状态与界面集成，而不替代后端外部依赖测试。
-**代码/测试证据：** `support-web/e2e` 的 Playwright 用例、`npm run test:e2e`；实验九验收记录。
+**代码/测试证据：** `labs/09-ai-campus-support/support-web/e2e/support-journey.spec.ts`、`labs/09-ai-campus-support/support-web/package.json` 的 `test:e2e`；`labs/09-ai-campus-support/docs/acceptance-20260918.md`。
