@@ -23,7 +23,7 @@
 | 6 | 安全文件服务与 MinIO | 已验收 | [learning/secure-file-service/labs/06-file-service](https://github.com/5Koi1shi4/java-roadmap/tree/learning/secure-file-service/labs/06-file-service) |
 | 7 | 校园交易与服务平台 | 已验收 | [learning/campus-market/labs/07-campus-market](https://github.com/5Koi1shi4/java-roadmap/tree/learning/campus-market/labs/07-campus-market) |
 | 8 | Spring Cloud 渐进拆分 | 已验收 | [learning/spring-cloud-split](https://github.com/5Koi1shi4/java-roadmap/tree/learning/spring-cloud-split/labs/08-spring-cloud-split)（8.1 身份、8.2 商品读服务已验收） |
-| 9 | Java AI 智能校园客服（客服全栈闭环） | 进行中 | 本地 `learning/ai-campus-support`（验收后补独立分支入口） |
+| 9 | Java AI 智能校园客服（客服全栈闭环） | 已验收 | 本地 `learning/ai-campus-support`（验收提交 `9edcaed`，待推送） |
 
 状态仅使用：`未开始`、`进行中`、`已验收`。
 
@@ -86,6 +86,15 @@
 - 入口：[learning/spring-cloud-split/labs/08-spring-cloud-split](https://github.com/5Koi1shi4/java-roadmap/tree/learning/spring-cloud-split/labs/08-spring-cloud-split)；8.2 实现与验收提交 `c72c7f1`，镜像路由证据提交 `177cd25`，均已推送。证据见分支中的 [8.2 验收记录](https://github.com/5Koi1shi4/java-roadmap/blob/learning/spring-cloud-split/labs/08-spring-cloud-split/docs/acceptance-20260916.md)。
 - 验证：JDK 17.0.12、Docker Desktop 29.7.2 下 fresh `mvnw.cmd clean test` 与 `mvnw.cmd clean verify` 均六模块 BUILD SUCCESS；Surefire 228 项、Failsafe/Testcontainers 357 项，共 585 项，全部 0 failures、0 errors、0 skipped。真实五应用商品旅程、Rabbit/读服务/ES 故障恢复与原实验七交易回归在同次运行；官方 `eclipse-temurin:17-jre` 隔离 Compose 确认五应用 health 和十个探针 UP、Eureka 4/4、Gateway RSA JWKS HTTP 200。
 - 边界：8.1/8.2 只支持全新环境，不支持生产不停机迁移；商品读服务不参与库存或订单金额决策。正式 CAS、真实支付和真实物流继续不在本阶段，7.1/7.2/7.3 扩展仍暂停。实验代码只保存在 `learning/spring-cloud-split`，不合并到 `main`；8.1 的 489 项是历史基线。
+
+### 实验九：AI 校园交易客服
+
+在实验八边界上新增只读 `ai-support-service` 和 React 客服站点。公开规则带来源版本并进入独立可重建索引；本人订单、争议和质保仍由交易服务按 JWT 用户做对象级授权，只把最小状态留在本地编排。模型不获得 Token、原始私人问题、完整交易对象或交易写工具，不能自动退款或裁决。
+
+- 入口：本地独立分支 `learning/ai-campus-support`，验收提交 `9edcaed`；分支尚未推送，实验代码不合并到 `main`。
+- 验证：Maven Wrapper JDK 17.0.12、Node 22.17.1、Docker Desktop 29.7.2 下 fresh `clean test` 与 `clean verify` 均通过。最终 157 份 XML 汇总 Surefire 255 项、Failsafe/Testcontainers 384 项，共 639 项，全部 0 failures、0 errors、0 skipped；Vitest 13 项、生产构建和 Playwright 桌面/移动 10 项通过。
+- 浏览器与故障：隔离 Compose 使用临时随机凭据、RSA 密钥和本地模型替身，覆盖 Mailpit 注册、登录、本人订单问答、401 清会话、交易资源故障和模型故障恢复；teardown 删除容器、网络、卷和临时密钥。
+- 边界：只支持全新实验环境；前端 Token 仅存内存，供应商请求最小化，无权与不存在资源保持同构 404。真实模型 API 只有在明确授权并提供服务端环境变量后才切换。
 
 ## 目录导航
 

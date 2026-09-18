@@ -182,3 +182,11 @@
 - Git：从实验八验收提交 `177cd25` 建立本地独立工作树 `learning/ai-campus-support`；实验八及其他已验收分支保持不变。实验九尚处于实现阶段，远端入口和验收计数待完整验证后填写。
 - 基线证据：在迁移代码前，JDK 17 下运行实验八基线 `mvnw.cmd test` 退出 0，七个 Reactor 项目 BUILD SUCCESS。此命令只验证单元测试，不作为实验九全栈或外部协作验收。
 - 平台调整：确认 Boot 3.5/Cloud 2025.0 已结束开源维护后，实验九改为在独立分支整体迁移至 Spring Boot 4.1.1、Spring Cloud 2025.1.3 和 Spring AI 2.0.1；先通过原实验八的完整交易回归，再开发 AI 能力。实验一至八的分支与验收版本保持不变。
+
+### 2026-09-18：实验九完整验收
+
+- AI 服务只解释已审阅公开规则，并将私人问题归一化为固定安全模板；本人订单、争议、质保由 legacy 做对象级授权后只返回最小状态。模型无交易写工具，前端 Token 只存内存，无权与不存在保持同构 404。
+- 首轮 `clean verify` 发现跨模块 Cloud 夹具漏注入游标签名密钥，修复后又由真实旅程发现路由集合断言漏掉 `ai-support-answer`。两处均以既有集成测试先红后绿关闭，未放松生产安全约束。
+- Maven Wrapper JDK 17.0.12、Node 22.17.1、Docker Engine 29.7.2；最终 Reactor 8 个项目 BUILD SUCCESS，157 份 fresh XML 为 Surefire 255、Failsafe/Testcontainers 384，共 639 项且全部 0 failures/errors/skipped。
+- 前端 Vitest 13 项、Vite 生产构建和 Playwright 桌面/移动 10 项通过；隔离 Compose 覆盖注册邮件、本人问答、401 清会话、交易资源与模型故障恢复，并已清理容器、网络、卷和临时密钥。
+- Git：实验分支提交 `af02e23` 保存验收回归修复，`9edcaed` 保存实验九验收文档；分支保持本地、尚未推送，`main` 只记录状态和学习结论。
