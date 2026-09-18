@@ -137,9 +137,9 @@
 ## 13. 内容哈希、引用计数与对象清理
 
 - **解决问题：** 实验六文件服务在数据库事实与对象存储 IO 非原子时恢复上传、清理共享内容，并避免删除仍被逻辑文件引用的 Blob。
-- **仓库示例：** 实验六迁移 `V1__file_schema.sql` 定义 `stored_blob(content_hash, reference_count, generation, ...)` 及内容哈希唯一约束；`JdbcBlobRepository`、`JdbcFileAccessRepository` 和 `JdbcCleanupTaskRepository` 维护引用、状态与清理。实验七/九市场媒体虽有随机 object key 和上传会话，但未实现共享 Blob 的内容哈希/引用计数模型。
-- **核心步骤：** `读取并验证内容 -> 计算 SHA-256 -> 以 content_hash 定位/创建 stored_blob -> 事务创建逻辑 stored_file 并增引用 -> 事务外写或删对象 -> 引用归零后由可领取清理任务收敛`。
-- **正确性不变量：** `reference_count` 不为负，只有引用归零且 generation、object key、清理 token/租约条件仍匹配时才可删除；数据库事务内不执行对象 IO；内容哈希不是对象访问路径。
+- **仓库示例：** 实验六迁移 `V1__file_schema.sql` 定义 `stored_blob(content_hash, reference_count, generation, ...)` 及内容哈希唯一约束；`UploadService`、`UploadTransactionService`、`JdbcBlobRepository`、`JdbcFileAccessRepository` 和 `JdbcCleanupTaskRepository` 分别编排上传、事务状态、引用与清理。实验七/九市场媒体虽有随机 object key 和上传会话，但未实现共享 Blob 的内容哈希/引用计数模型。
+- **核心步骤：** 新 Blob 路径为：事务 A `begin` 预留上传会话；临时对象写入并检验后，事务 B `reserve` 将会话标为已验证、按哈希预留/绑定 `STAGING` Blob；事务外 `storage.commit(tempKey, objectKey)` 物理提交；事务 C `finalizeUpload` 将 Blob 置 READY，并创建逻辑 `stored_file`、增加引用、完成会话。若物理提交后事务 C 失败，保留可恢复状态并由恢复扫描收敛。READY Blob 复用由 `reserve` 返回 `ReadyReuse`，直接在事务 `attachReadyBlob`/`finalizeUpload` 创建逻辑文件、增加引用并完成会话，不重复 `storage.commit`。删除是独立路径：仅引用归零且清理 claim 有效时，清理器执行物理删除并完成 Blob/任务。
+- **正确性不变量：** `reference_count` 不为负，且只有 READY Blob 才能增加引用；新 Blob 的逻辑文件/引用只在物理 `storage.commit` 后的事务 C 创建；只有引用归零且 generation、object key、清理 token/租约条件仍匹配时才可删除；内容哈希不是对象访问路径。
 - **运行代价：** 读取全文件计算哈希、元数据行、清理扫描及对象存储调用。
 - **优点：** 实验六支持去重/完整性比对和崩溃后清理；短事务不被网络 IO 拖住。
 - **缺点：** 引用计数竞态与存储最终状态都需补偿；大文件哈希有 CPU/IO 成本，且共享 Blob 生命周期比市场媒体会话模型更复杂。
