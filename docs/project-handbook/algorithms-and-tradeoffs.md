@@ -104,13 +104,13 @@
 ## 10. 租约、owner token、claim token 与 fencing
 
 - **解决问题：** 进程崩溃后工作可被接管，同时旧 owner 的迟到确认、完成或切换不能污染新 owner。
-- **仓库示例：** Outbox、Inbox、索引和重建门禁行均保存 owner、claim token、lease_until；完成/释放 SQL 需同时匹配这些字段，重建再加 generation fencing。
-- **核心步骤：** `条件 claim(空闲或过期) -> 写 owner+随机 token+lease`；`完成/续租/释放 WHERE owner AND token AND 未过期`；换代操作还校验 generation。
-- **正确性不变量：** 只有当前 token 的 owner 能推进记录；过期租约允许接管，但不能授权旧 owner 写回。
+- **仓库示例：** Outbox、Inbox、索引和重建门禁行均保存 owner、claim token、lease_until；Inbox 的完成/`releaseForRetry` 条件匹配 status、owner 和 claim token（释放还受 attempt 条件约束），不匹配 `lease_until`；重建另加 generation fencing。
+- **核心步骤：** `条件 claim(空闲或过期) -> 写 owner+随机 token+lease`；Inbox 的完成/释放按 `status AND owner AND token` 条件更新；接管者以新 token 替换旧 token，换代操作还校验 generation。
+- **正确性不变量：** 新 owner 接管并替换 token 后，旧 token 不能推进记录；仅租约过期但尚未接管时，Inbox 的旧 owner 仍可能完成或释放，因为该两条更新不检查 `lease_until`。
 - **运行代价：** 额外列、索引和条件更新；长工作需要续租与时钟/数据库时间协调。
-- **优点：** 崩溃恢复不靠人工解锁；迟到回调有明确拒绝条件。
-- **缺点：** 租约过短会重复执行，过长会拖慢接管；fencing 必须被所有下游写路径真正检查。
-- **常见误用：** 只保存 owner 不保存不可猜 token；不校验 token 即完成；把租约当作永久排他锁。
+- **优点：** 崩溃恢复不靠人工解锁；接管后的迟到回调有 token/generation 拒绝条件。
+- **缺点：** 租约过短会重复执行，过长会拖慢接管；租约到期本身不是立刻撤销旧 Inbox worker 的完成/释放权限，fencing 必须被所有下游写路径真正检查。
+- **常见误用：** 只保存 owner 不保存不可猜 token；声称 Inbox 完成/释放必验未过期租约；把租约当作永久排他锁。
 
 ## 11. Elasticsearch external version、tombstone 与稳定排序
 
@@ -170,13 +170,13 @@
 ## 16. RAG 检索、来源约束与结构化事实隔离
 
 - **解决问题：** AI 支持回答要基于当前公开规则，私有交易事实不能被任意模型提示或规则索引混淆。
-- **仓库示例：** `PolicyRetriever` 先检查索引 alias 与语料版本，再保留公开来源、同版本、分数至少 0.70 的最多 5 个片段；`AnswerService` 对私有问题先由交易服务按 Bearer 授权读取，再只向模型传安全模板和服务端来源。
-- **核心步骤：** `分类问题 -> 私有事实先授权读取 -> 检索(version, public source, score, limit) -> 无足够依据则固定回答 -> 模型仅见已审阅片段`。
+- **仓库示例：** 对非空问题，`PolicyRetriever` 先执行 `index.find(question, corpus.version())`，再比较 `aliasVersion` 与语料版本；不一致即抛出不可用异常，否则保留公开来源、同版本、分数至少 0.70 的最多 5 个片段。`AnswerService` 对私有问题先由交易服务按 Bearer 授权读取，再只向模型传安全模板和服务端来源。
+- **核心步骤：** `分类问题 -> 私有事实先授权读取 -> index.find(version) -> 比较 aliasVersion -> 过滤 public source/score/limit -> 无足够依据则固定回答 -> 模型仅见已审阅片段`。
 - **正确性不变量：** 来源由服务端决定；索引/语料版本不一致即不可用；结构化交易事实不以完整对象外发给模型。
-- **运行代价：** ES 检索、版本校验、授权 HTTP 调用和模型外部依赖；每次检索受 top-k 限制。
+- **运行代价：** ES 检索、版本校验、授权 HTTP 调用和模型外部依赖；版本不一致也已付出一次 `index.find` 的 ES 查询成本，但异常路径不会调用模型；每次检索受 top-k 限制。
 - **优点：** 可追溯规则出处，降低过期索引与提示注入扩大上下文的风险。
 - **缺点：** 检索不命中会降低回答覆盖率；模型仍非业务事实裁决器。
-- **常见误用：** 让模型自行挑来源；索引版本不一致仍回答；把 JWT、完整订单或私有对象键送入提示。
+- **常见误用：** 假定版本会在检索前预检而忽略其查询成本；索引版本不一致仍回答；把 JWT、完整订单或私有对象键送入提示。
 
 ## 17. 机制组合时的整体取舍
 
