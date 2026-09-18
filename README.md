@@ -23,7 +23,7 @@
 | 6 | 安全文件服务与 MinIO | 已验收 | [learning/secure-file-service/labs/06-file-service](https://github.com/5Koi1shi4/java-roadmap/tree/learning/secure-file-service/labs/06-file-service) |
 | 7 | 校园交易与服务平台 | 已验收 | [learning/campus-market/labs/07-campus-market](https://github.com/5Koi1shi4/java-roadmap/tree/learning/campus-market/labs/07-campus-market) |
 | 8 | Spring Cloud 渐进拆分 | 已验收 | [learning/spring-cloud-split](https://github.com/5Koi1shi4/java-roadmap/tree/learning/spring-cloud-split/labs/08-spring-cloud-split)（8.1 身份、8.2 商品读服务已验收） |
-| 9 | Java AI 智能校园客服（客服全栈闭环） | 已验收 | [`learning/ai-campus-support`](https://github.com/5Koi1shi4/java-roadmap/tree/learning/ai-campus-support)（验收提交 `9edcaed`） |
+| 9 | Java AI 智能校园客服（全栈实验：客服闭环） | 已验收 | [`learning/ai-campus-support`](https://github.com/5Koi1shi4/java-roadmap/tree/learning/ai-campus-support)（验收提交 `9edcaed`） |
 
 状态仅使用：`未开始`、`进行中`、`已验收`。
 
@@ -105,6 +105,7 @@
 | [`interview/`](interview/question-bank.md) | 从实验提炼的面试追问与知识点。 |
 | [`references/`](references/README.md) | 外部参考仓库及阅读记录。 |
 | [`compose/`](compose/README.md) | 共享容器与 Compose 使用说明。 |
+| [项目手册](docs/project-handbook/README.md) | 九个实验的能力地图、全链路边界与验证证据导航。 |
 
 ## 技术基线
 
