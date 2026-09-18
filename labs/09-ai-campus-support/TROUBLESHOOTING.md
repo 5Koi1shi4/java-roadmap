@@ -25,6 +25,16 @@ Compose 只表达启动依赖顺序，应用自身仍可能需要几秒注册 Eu
 
 PowerShell 7 的 `Invoke-WebRequest.Content` 对没有显式字符集的 Actuator/Eureka JSON 可能返回字节数组；README 脚本先按 UTF-8 解码，再匹配 `UP` 与服务名。若 HTTP 200 却被脚本误报缺失，应先检查响应体类型和解码结果，而不是延长 deadline 或绕过 readiness。
 
+## 实验九：规则索引、本人状态与模型故障
+
+AI 服务 readiness 异常时先检查 `/actuator/health/readiness`、Elasticsearch 连接和版本化规则目录。规则索引是可重建读模型；ES 停机期间不能用陈旧或未经审阅内容补答，恢复后应重新建立可检索状态。模型替身或真实供应商超时、并发已满、空响应和过大响应统一收敛为脱敏 503/429，不能回退为执行交易命令或绕过规则引用。
+
+本人状态查询只允许 `orders`、`disputes`、`warranties` 三种受控资源。先由 legacy 使用原始 Bearer Token 做对象级授权，再把最小的 `id/type/status/createdAt/deadline` 返回 AI 编排；不存在与无权访问都保持同构 404。若完整 `verify` 的 Cloud 集群报缺少 `campus.market.support.cursor-secret`，应给跨模块测试夹具注入测试专用密钥，不能让生产游标签名变为可选，也不能把密钥打印到日志。
+
+Compose 的 `local,demo-mail` 只把验证码送到本机 Mailpit。浏览器自动化通过 Mailpit 官方 API 获取测试邮件；页面、Playwright 报告和服务日志都不应保存验证码、JWT 或私钥。若注册旅程收不到邮件，先检查 Mailpit 8026 API、identity 的 SMTP 地址/Profile 和容器网络，不要新增公开验证码读取端点。
+
+浏览器 401 应清空仅存于内存的会话并回到登录态；刷新页面不得恢复 Token。交易服务或模型故障时页面显示中文可重试提示，恢复后重试同一只读问题。排障时检查浏览器网络请求是否始终走 `support-web` 同源 `/api/**`，不要让前端直连内部服务或持久化 Token。
+
 ## 实验八：三库初始化失败
 
 MySQL 的 `docker/mysql/01-split-databases.sh` 只在 `mysql-data` 空卷第一次初始化时执行。若日志显示数据库或账号不存在、Flyway 迁移未执行，先检查 MySQL 是否健康以及 `.env` 中五个数据库口令是否已经替换；已有卷不会自动重新运行脚本。确认只需丢弃本地实验数据后，才可执行 `docker compose --env-file .env down -v`，再重新 `up -d`。

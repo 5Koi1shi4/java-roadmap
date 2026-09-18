@@ -10,6 +10,8 @@
 
 8.2 独立商品读服务已验收：交易事实与订单快照仍在兼容单体，商品完整快照经确认式 Rabbit 发布，读侧拥有第三库和独立 SmartCN 索引。2026-09-16 在 JDK 17、Docker Desktop 29.7.2 下 fresh `clean test` 与 `clean verify` 均 BUILD SUCCESS；Surefire 228 项、Failsafe/Testcontainers 357 项，共 585 项，全部 0 failures、0 errors、0 skipped。真实五应用商品旅程、故障恢复、在线重建和官方 JRE 镜像的隔离 Compose smoke 均完成；Eureka 4/4、五应用十五个健康/探针结果 UP，Gateway JWKS HTTP 200。8.1 的 489 项仍是历史基线。详见 [商品读服务说明](docs/product-read-service.md)与 [8.2 验收记录](docs/acceptance-20260916.md)。
 
+实验九 AI 客服已验收：新增只读 `ai-support-service` 和 React 客服站点，只用已审阅公开规则回答，并在服务端完成本人订单、争议、质保的授权查询；模型不接收 Token、任意私人问题或交易写工具。2026-09-18 使用 Maven Wrapper 的 JDK 17.0.12、Node 22.17.1 与 Docker Desktop Engine 29.7.2 完成 fresh `clean test`、`clean verify`、前端单测/构建和桌面/移动浏览器旅程。最终 157 份 XML 为 Surefire 255 项、Failsafe/Testcontainers 384 项，共 639 项；Playwright 10 项，全部无失败、错误或跳过。详见 [实验九验收记录](docs/acceptance-20260918.md)。
+
 ## 边界与验收入口
 
 本实验只支持全新环境，不支持生产不停机迁移。请先阅读 [架构](docs/architecture.md)、[迁移边界](docs/migration-boundary.md)、[排障](TROUBLESHOOTING.md)、[学习日志](notes/learning-log.md) 与 [面试追问](interview/question-bank.md)。身份服务实际 JWKS 地址为 `/api/auth/.well-known/jwks.json`；客户端只访问 Gateway 的 `/api/auth/**` 与 `/api/**`，不使用服务实例地址。
@@ -18,12 +20,18 @@
 
 ```powershell
 docker info
-.\mvnw.cmd test
-.\mvnw.cmd verify
+.\mvnw.cmd clean test
+.\mvnw.cmd clean verify
 git diff --check
+
+Set-Location support-web
+npm ci
+npm test
+npm run build
+npm run test:e2e
 ```
 
-必须等 `docker info` 成功再执行完整验收；Docker 不可用或外部测试 skipped 均不算通过。2026-09-16 的 585 项结果来自 `clean verify` 清理旧报告后新产生的 XML；以下交易说明保留实验七业务范围，旧 8.1 验收数只说明历史基线。
+必须等 `docker info` 成功再执行完整验收；Docker 不可用或外部测试 skipped 均不算通过。当前验收基线是 2026-09-18 fresh `clean verify` 的 639 项；2026-09-16 的 585 项与旧 8.1 结果只作为迁入历史，不能替代实验九证据。
 
 ## 你将运行到的能力
 
@@ -35,12 +43,13 @@ git diff --check
 - 30/90/180/365 天卖家质保、厂家质保快照、结算后卖家义务、未来结算抵扣和发布/提现限制。
 - MySQL 事务 Outbox、RabbitMQ publisher confirm、Inbox 幂等、人工失败副本、租约接管和 claim-token fencing。
 - SmartCN Elasticsearch 搜索、外部版本、tombstone、在线重建和失败收敛。
+- AI 客服只解释版本化公开规则；本人订单、争议、质保状态先由交易服务授权读取，再以固定安全模板回答，不允许模型执行交易写操作。
 - MinIO 私有对象、真实类型与实际读取上限、案件 ACL、持久清理任务和故障恢复。
 - 审计字段过滤、低基数 Micrometer 指标、真实 HTTP 旅程与三轮故障演练。
 
 ## 模块和事实边界
 
-聚合根包含六个 Maven 模块：`discovery-server`、`identity-service`、`legacy-market-service`、`product-read-service`、`api-gateway` 是五个独立应用；`platform-test-support` 只提供 test scope 夹具。身份代码和身份表已迁入身份服务；商品读服务拥有独立投影库与索引，兼容单体继续拥有交易事实，不签发 Token，不查询身份库。
+Reactor 共八个项目：一个聚合根和七个 Maven 子模块。`discovery-server`、`identity-service`、`legacy-market-service`、`product-read-service`、`api-gateway`、`ai-support-service` 是六个独立应用；`platform-test-support` 只提供 test scope 夹具。身份代码和身份表已迁入身份服务；商品读服务拥有独立投影库与索引，兼容单体继续拥有交易事实；AI 服务只读公开规则和经授权的最小状态，不签发 Token、不直连交易库。
 
 ```text
 身份/邮箱 ──> 商品/库存 ──> 订单 ──> 支付/退款 ──> 交付与争议
@@ -62,6 +71,7 @@ git diff --check
 | `messaging` | Outbox/Inbox、RabbitMQ、人工失败 | `OutboxDispatcher`、`ReliableEventConsumer` |
 | `storage` | 私有对象、上传绑定、清理任务 | `ObjectUploadCoordinator`、`StorageCleanupScheduler` |
 | `observability` | 安全审计、指标与提交后计数 | `AuditRecorder`、`CampusMetrics` |
+| `ai-support` | 公开规则检索、本人状态编排、受控模型回答 | `AnswerService`、`PolicyRetriever`、`HttpTradeStatusReader` |
 
 MySQL 是订单、库存、金额、截止时间和在售集合的事实源。Redis 只用于验证码和限流，不能参与交易正确性证明；Elasticsearch 是可重建读模型；MinIO 只保存私有对象，逻辑授权仍由 MySQL 记录决定。模块之间通过公开服务和逻辑 ID 协作，不把其他模块的内部表当作公共 API。
 
@@ -87,7 +97,7 @@ openssl pkcs8 -topk8 -nocrypt -in (Join-Path $keyDir 'jwt-private-rsa.pem') -out
 openssl rsa -in (Join-Path $keyDir 'jwt-private-rsa.pem') -pubout -out (Join-Path $keyDir 'jwt-public-key.pem')
 ```
 
-在本目录构建并启动六个 JVM 应用、AI 客服服务及静态前端。第一次启动前必须先打包，Compose 只使用各模块的 `target` JAR；不再使用旧的单体 `spring-boot:run` 命令。下面是本地 Compose 的基础启动 smoke；完整浏览器验收使用 `support-web` 的 `npm run test:e2e`：
+在本目录构建并启动六个 JVM 应用（已包含 AI 客服服务）及静态前端。第一次启动前必须先打包，Compose 只使用各模块的 `target` JAR；不再使用旧的单体 `spring-boot:run` 命令。下面是本地 Compose 的基础启动 smoke；完整浏览器验收使用 `support-web` 的 `npm run test:e2e`：
 
 ```powershell
 docker info
@@ -219,6 +229,8 @@ Compose 的依赖顺序是 discovery（8761）先启动，identity（18081）、
 
 应用的关键环境变量已在 Compose 中显式配置：identity 使用 `SPRING_PROFILES_ACTIVE=local,demo-mail` 并连接 Mailpit；legacy、product、Gateway 保留实验八的数据库、消息、搜索、JWT 与 Eureka 边界；AI 使用 Redis、Elasticsearch、JWKS、模型地址和只读规则目录。静态站点只代理 Gateway，不接触内部服务密钥。所有口令和宿主机密钥路径只从 `.env` 读取。
 
+模型切换只改服务端环境变量。完整 `npm run test:e2e` 会自动启动 `support-web/e2e/model-stub.mjs`，Compose 默认通过 `http://host.docker.internal:18089/v1` 使用该 OpenAI 兼容替身；手动演示替身时须先在另一终端运行 `node support-web/e2e/model-stub.mjs`。连接获准的真实 OpenAI 兼容 API 时，在未提交的 `.env` 中显式设置 `CAMPUS_MARKET_AI_BASE_URL`、`CAMPUS_MARKET_AI_API_KEY` 和 `CAMPUS_MARKET_AI_MODEL` 后重建 AI 服务。无论使用哪种适配器，供应商请求都只包含公开问题或私人问题的固定安全模板，以及已审阅公开规则片段；Token 和完整交易对象不外发。
+
 应用间只使用 Compose 服务名：Eureka 为 `http://discovery-server:8761/eureka/`，identity 的固定 JWKS 为 `http://identity-service:8080/api/auth/.well-known/jwks.json`，legacy、product 和 Gateway 均通过该地址验签。客户端只访问 Gateway；例如先检查 Gateway 暴露的 JWKS：
 
 ```powershell
@@ -305,9 +317,15 @@ PENDING_PAYMENT -> AWAITING_HANDOFF -> AWAITING_RECEIPT
 必须在本目录、JDK 17 下执行：
 
 ```powershell
-.\mvnw.cmd test
-.\mvnw.cmd verify
+.\mvnw.cmd clean test
+.\mvnw.cmd clean verify
 git diff --check
+
+Set-Location support-web
+npm ci
+npm test
+npm run build
+npm run test:e2e
 ```
 
 需要定点复跑真实旅程或故障演练时：
@@ -319,9 +337,9 @@ git diff --check
 
 低内存主机必须串行执行，等待上一条命令完全结束且容器回收后再运行下一条。共享 Testcontainers 测试默认不自动启动 Rabbit listener、搜索调度器和各业务截止任务；验证调度的测试直接调用对应 `runOnce`，需要真实 Rabbit 投递的测试使用自己的监听器容器，避免已结束上下文污染后续 Outbox、队列和租约。
 
-截至 2026-09-11 的 Surefire 137 项、Failsafe/Testcontainers 251 项是实验七迁入基线的历史参考；8.1 的 196/293 项见独立历史记录。8.2 的同一次 fresh `clean verify` XML 为 Surefire 228、Failsafe/Testcontainers 357，共 585 项，全部 0 failures、0 errors、0 skipped；分模块为 support 6、discovery 4、identity 24+17、legacy 138+280、product 31+47、Gateway 25+13。完整验收包含实验七交易回归、五应用真实 HTTP/Rabbit/ES/MySQL 故障旅程与读索引恢复，不接受 Docker 不可用或外部测试跳过。
+截至 2026-09-11 的 137/251 项、8.1 的 196/293 项与 8.2 的 228/357 项都只是历史基线。实验九 2026-09-18 的同一次 fresh `clean verify` 生成 157 份 XML：Surefire 255 项、Failsafe/Testcontainers 384 项，共 639 项，全部 0 failures、0 errors、0 skipped。分模块为 support 8、discovery 4、identity 25+17、legacy 138+286、product 31+47、Gateway 25+15、AI 24+19。前端 Vitest 13 项、生产构建和 Playwright 桌面/移动 10 项同样通过；完整验收包含继承交易回归、真实外部依赖恢复、规则索引、本人状态 ACL、模型故障恢复和浏览器会话清理，不接受 Docker 不可用或外部测试跳过。
 
-模块测试数、官方镜像启动结果和人工文档清单见 [8.2 验收记录](docs/acceptance-20260916.md)；8.1 历史基线仍见 [8.1 验收记录](docs/acceptance-20260915.md)。
+实验九的模块计数、隔离 Compose 浏览器结果与安全边界见 [实验九验收记录](docs/acceptance-20260918.md)；8.2 历史基线见 [8.2 验收记录](docs/acceptance-20260916.md)。
 
 ## 已知边界和扩展决策
 

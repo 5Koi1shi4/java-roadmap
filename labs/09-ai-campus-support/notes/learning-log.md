@@ -1,4 +1,12 @@
-# 实验八学习日志
+# 实验九学习日志
+
+## 2026-09-18：AI 校园交易客服已验收
+
+- 独立 AI 服务只检索已审阅、带来源版本的公开规则；私人问题先归一化为固定安全模板，本人订单/争议/质保由 legacy 做对象级授权后只返回最小状态。模型没有交易写工具，也不接收 Token、任意私人描述或完整交易对象；他人资源与不存在资源保持同构 404。
+- Task 9 首轮 `clean verify` 暴露两个真实验收缺口：跨模块 Cloud 夹具显式加载生产 YAML，却漏掉新增的测试游标签名密钥；`CloudJourneyIT` 的精确路由集合仍停留在实验八。以既有真实旅程作红灯，分别给共享夹具补测试专用密钥、给断言补 `ai-support-answer`，定向 `CloudJourneyIT` 随后通过。
+- Maven Wrapper 使用 JDK 17.0.12（系统默认 `java` 为 25，因此验收以 Wrapper 输出为准），Node 22.17.1、npm 10.9.2、Docker Engine 29.7.2。fresh `clean test` 与最终 `clean verify` 均 BUILD SUCCESS；最终 157 份 XML 汇总 Surefire 255、Failsafe/Testcontainers 384，共 639 项，全部 0 failures/errors/skipped。
+- `npm ci` 安装 118 个锁定包且审计 0 漏洞；Vitest 4 文件 13 项通过，Vite 生产构建通过。隔离 Compose 由临时随机口令、RSA 密钥和本地模型替身启动，Playwright 桌面/移动共 10 项覆盖注册邮件、登录、本人的订单问答、401 清会话、交易资源故障和模型故障恢复，全部通过；teardown 删除容器、网络、卷和临时密钥。
+- 验收保留只读边界：AI 不自动退款、不裁决争议、不修改订单；前端不持久化 Token，供应商请求只含公开问题或私人问题的固定安全模板，以及公开规则片段。证据见 [实验九验收记录](../docs/acceptance-20260918.md)。
 
 ## 2026-09-16：8.2 商品读服务已验收
 
