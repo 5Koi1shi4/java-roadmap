@@ -82,7 +82,7 @@
 
 ### 19. 条件扣库存如何防止超卖？
 **参考回答：** 用 `stock > 0` 作为 UPDATE 条件并依据影响行数判断是否成功，避免先读库存再写的竞态。影响行数为零即表示已售罄或目标不满足扣减条件。
-**代码/测试证据：** `JdbcProductRepository` 的条件更新；`SeckillOrderHttpIT`。
+**代码/测试证据：** `JdbcSeckillRepository.decrementStockIfAvailable`、`SeckillOrderService.placeOrderInTransaction`；`SeckillOrderHttpIT`。
 
 ### 20. 扣库存与创建订单为何必须在同一事务？
 **参考回答：** 扣减成功后订单写入失败必须回滚扣减；反之订单不能脱离库存事实存在。单一事务将两个状态变化作为一个原子结果提交。
@@ -94,23 +94,23 @@
 
 ### 22. 幂等键为何还要绑定请求摘要？
 **参考回答：** 同一 key 的重试必须携带相同语义；保存请求摘要可拒绝同 key 不同参数，避免调用方复用 key 意外得到另一条命令的结果。
-**代码/测试证据：** `IdempotencyService`、`idempotency_record`；`SeckillOrderHttpIT`。
+**代码/测试证据：** `SeckillOrderService.requestHash`、`JdbcSeckillRepository.insertProcessing`、`V2__idempotency_record.sql`；`SeckillOrderHttpIT`。
 
 ### 23. 重试怎样重放原始响应？
-**参考回答：** 终态记录保存状态码、原始 UTF-8 JSON 与内容类型；相同 key 和摘要命中终态时原样返回，而不是重新执行业务或重新序列化不同响应。
-**代码/测试证据：** `JdbcIdempotencyRepository`；`SeckillOrderHttpIT` 的 UTF-8 重放测试。
+**参考回答：** 终态记录只保存状态码和原始 UTF-8 JSON 正文；相同 key 和摘要命中终态时原样返回，不重新执行业务或重新序列化。`Content-Type` 由控制器统一设置，不是幂等记录字段。
+**代码/测试证据：** `JdbcSeckillRepository.saveResponse`、`SeckillOrderController`；`SeckillOrderHttpIT.replaysExactlyTheSameUtf8JsonForConcurrentRequestsWithTheSameKey`、`SeckillOrderControllerTest.replaysSameHttpStatusAndJsonBodyForSameKey`。
 
 ### 24. 多实例下 PROCESSING 记录怎样领取和接管？
-**参考回答：** 实例竞争共享 MySQL 的唯一键，失败者读取并短暂轮询终态。仅处理超过超时窗口的记录可接管，窗口需要与最长业务耗时匹配，不能用进程内锁代替。
-**代码/测试证据：** `JdbcIdempotencyRepository`、`IdempotencyService`；`SeckillOrderHttpIT` 的双实例与首事务回滚场景。
+**参考回答：** 实例先竞争共享 MySQL 的唯一键，再以 `SELECT ... FOR UPDATE` 读取同一记录并协调终态；实现不靠短暂轮询。仅超过处理超时窗口的 `PROCESSING` 记录可由条件更新接管，窗口要覆盖最长业务耗时。
+**代码/测试证据：** `JdbcSeckillRepository.insertProcessing`、`findByKeyForUpdate`、`takeOverProcessingIfExpired`；`SeckillOrderHttpIT.replaysExactlyTheSameResponseAcrossTwoApplicationInstances`、`SeckillOrderHttpIT.removesIdempotencyRecordAfterSystemFailureSoTheSameKeyCanRetry`。
 
 ### 25. 为什么固定锁顺序能降低死锁？
 **参考回答：** 所有路径按幂等记录、商品库存、订单唯一索引的顺序取得数据库锁，避免两条路径互相等待对方先持有的锁。真实死锁或锁超时才映射可重试冲突。
-**代码/测试证据：** `SeckillOrderService`、`JdbcIdempotencyRepository`；`SeckillOrderHttpIT` 的锁冲突覆盖。
+**代码/测试证据：** `SeckillOrderService.placeOrder`、`placeOrderInTransaction`、`JdbcSeckillRepository.findByKeyForUpdate`；`SeckillOrderHttpIT`、`SeckillOrderServiceTest`。
 
 ### 26. 为什么需要真实 MySQL 并发测试？
 **参考回答：** 内存替身无法证明唯一索引、行锁、隔离级别和回滚行为。真实 HTTP 与 MySQL Testcontainers 可同时验证售罄、重复购买、并发扣减和跨实例重放。
-**代码/测试证据：** `SeckillOrderHttpIT`、`SeckillSchemaIT`。
+**代码/测试证据：** `SeckillOrderHttpIT`、`SeckillSchemaIT`、`JdbcSeckillRepositoryTest`。
 
 ## 实验四：订单状态机与 RabbitMQ 可靠消息
 
@@ -215,16 +215,16 @@
 **代码/测试证据：** `DownloadService`、`MinioObjectStorage`、`DownloadController`；`MinioDownloadHttpIT`、`DownloadStreamingHttpIT`。
 
 ### 51. 租约、token 与 generation 如何保护清理和恢复？
-**参考回答：** 领取任务写入新的 owner、claim token 与 lease；状态推进、接管和完成同时匹配目标状态、token、对象 key 和 generation。迟到执行者影响行数为零，不能覆盖新一代 Blob。
-**代码/测试证据：** `StorageCleanupService`、`StagingRecoveryService`、`CleanupTaskRepository`。
+**参考回答：** 普通 cleanup task 领取时写 owner、claim token 和 lease；完成、重试、失败按 task ID、状态和 claim token 条件更新。Blob 路径另行以 blob ID、generation、object key 与 Blob token 领取，并通过 Blob 与 task 的原子完成写入防止旧代次删除覆盖新对象；不能把两类条件混为同一保证。
+**代码/测试证据：** `StorageCleanupService.deleteAndComplete`、`markRetry`、`markFailure`、`cleanBlob`；`JdbcCleanupTaskRepository`、`CleanupLeaseIT`、`CleanupRaceIT`、`CleanupAtomicCompletionTest`。
 
 ### 52. 为什么物理删除需要幂等？
 **参考回答：** 对象存储删除可能已完成但确认丢失，重试时不存在应按删除成功处理。Blob 与清理任务的最终完成要在同一显式事务里以条件更新写入。
 **代码/测试证据：** `StorageCleanupService`、`ObjectStorage`；`CleanupLeaseIT`、`CleanupAtomicCompletionTest`。
 
 ### 53. 文件服务的可观测性怎样避免泄漏隐私？
-**参考回答：** 审计和指标只采用固定 action、result、phase 等低基数枚举，过滤 token、URL、路径、哈希、对象 key、异常文本和用户/文件 ID。内部 correlation ID 也不能由客户端覆盖。
-**代码/测试证据：** `JdbcAuditRecorder`、`AuditSanitizerTest`、`FileMetrics`。
+**参考回答：** `JdbcAuditRecorder` 在清洗后持久化 actor_id、file_id、target_user_id 等审计关联字段；token、签名 URL、路径、哈希、object key、异常文本等敏感内容必须清洗。禁止用户或文件 ID 的是 Micrometer 指标标签：指标只使用固定的低基数枚举；内部 correlation ID 也不能由客户端覆盖。
+**代码/测试证据：** `JdbcAuditRecorder`、`AuditSanitizerTest`、`FileServiceMetrics`、`MicrometerFileServiceMetricsTest`、`AuditRecorderPersistenceIT`。
 
 ### 54. MinIO 重复故障恢复应验证哪些不变量？
 **参考回答：** 每轮先观察失败或积压，恢复后检查会话和清理任务终态、临时对象清空，以及数据库 READY object key 与 bucket 已知 Blob 集合一致。该检查不等于宣称能枚举任意外部对象。
@@ -282,6 +282,8 @@
 
 ## 实验八：Spring Cloud 渐进拆分
 
+#### 8.1 身份服务拆分
+
 ### 67. 为什么要 identity-first 拆分？
 **参考回答：** 身份验证、密码校验和 token 签发有清晰边界，可先独立部署；库存、订单和退款仍保留在交易事务边界内，避免同时引入分布式资金事务。
 **代码/测试证据：** `identity-service` 的 `AuthController`、`EmailVerificationService`；`CloudJourneyIT`。
@@ -321,6 +323,8 @@
 ### 76. `.gitignore` 为什么不能代替 `.dockerignore`？
 **参考回答：** Git 与 Docker 构建上下文使用不同忽略规则。即使本地密钥未被 Git 跟踪，仍可能被发送到 Docker daemon；`.dockerignore` 要只放行构建所需内容并经实际构建验证。
 **代码/测试证据：** `labs/08-spring-cloud-split/.dockerignore`、`labs/08-spring-cloud-split/docker/apps/Dockerfile`；`DockerfilePathGuardTest`。
+
+#### 8.2 商品读模型拆分
 
 ### 77. 为什么商品投影的事实所有权留在交易服务？
 **参考回答：** 商品读服务是可重建投影，交易服务仍拥有商品、库存和订单事实。源端在交易事务内写不可变快照 Outbox，读侧不得把后来查询到的状态伪装为历史事件。
@@ -373,7 +377,7 @@
 **代码/测试证据：** `SupportRateLimiter`；`SupportRateLimiterIT`、`AnswerHttpIT`。
 
 ### 89. 为什么要分离结构化事实与生成文本？
-**参考回答：** 本人订单等事实由受权的交易服务以结构化字段提供，生成文本只解释这些事实和公开政策。分离使前端能识别事实来源，也避免模型输出被误当作交易状态。
+**参考回答：** 私人资源先由服务端读取并单独返回结构化状态；模型 `explain` 只接收分类器产生的安全模板和已审阅规则片段，不能接收或解释该结构化状态。分离使前端识别事实来源，也避免模型输出被误当作交易状态。
 **代码/测试证据：** `HttpTradeStatusReader`、`AnswerService` 响应模型；`HttpTradeStatusReaderTest`、`AnswerHttpIT`。
 
 ### 90. 桌面和移动端全栈 E2E 应证明哪些边界？
