@@ -537,6 +537,8 @@ public final class CloudApplicationCluster implements AutoCloseable {
         });
         properties.put("spring.flyway.locations", filesystemLocation(legacyMigrations));
         properties.put("spring.security.oauth2.resourceserver.jwt.jwk-set-uri", identityJwks);
+        properties.put("campus.market.support.cursor-secret",
+            "test-only-support-cursor-secret-32-bytes-minimum");
         properties.put("spring.rabbitmq.host", rabbit.getHost());
         properties.put("spring.rabbitmq.port", rabbit.getMappedPort(5672));
         properties.put("spring.rabbitmq.username", rabbit.getAdminUsername());
