@@ -45,6 +45,9 @@
 ## 手册导航
 
 - [根目录路线与已验收实验](../../README.md)
+- [设计过程与演进](design-process.md)
+- [技术栈与取舍](technology-stack.md)
+- [算法与机制取舍](algorithms-and-tradeoffs.md)
 - [学习日志](../../notes/learning-log.md)
 - [面试题库](../../interview/question-bank.md)
 - [参考仓库阅读记录](../../references/README.md)
