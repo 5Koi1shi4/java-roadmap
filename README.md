@@ -11,6 +11,17 @@
 3. 实验的排障复盘：了解真实环境问题及其边界。
 4. [学习日志](notes/learning-log.md)、[面试题库](interview/question-bank.md) 与 [参考仓库阅读记录](references/README.md)：沉淀学习过程与延伸问题。
 
+## 目录导航
+
+| 目录 | 用途 |
+|---|---|
+| `labs/` | 实验代码保留在本地工作区，并通过独立分支入口访问。 |
+| [`notes/`](notes/learning-log.md) | 每日目标、测试证据、问题复盘与技术取舍。 |
+| [`interview/`](interview/question-bank.md) | 从实验提炼的面试追问与知识点。 |
+| [`references/`](references/README.md) | 外部参考仓库及阅读记录。 |
+| [`compose/`](compose/README.md) | 共享容器与 Compose 使用说明。 |
+| [项目手册](docs/project-handbook/README.md) | 九个实验的能力地图、全链路边界与验证证据导航。 |
+
 ## 学习路线
 
 | 阶段 | 项目 | 状态 | 独立分支入口 |
@@ -96,16 +107,7 @@
 - 浏览器与故障：隔离 Compose 使用临时随机凭据、RSA 密钥和本地模型替身，覆盖 Mailpit 注册、登录、本人订单问答、401 清会话、交易资源故障和模型故障恢复；teardown 删除容器、网络、卷和临时密钥。
 - 边界：只支持全新实验环境；前端 Token 仅存内存，供应商请求最小化，无权与不存在资源保持同构 404。真实模型 API 只有在明确授权并提供服务端环境变量后才切换。
 
-## 目录导航
 
-| 目录 | 用途 |
-|---|---|
-| `labs/` | 实验代码保留在本地工作区，并通过独立分支入口访问。 |
-| [`notes/`](notes/learning-log.md) | 每日目标、测试证据、问题复盘与技术取舍。 |
-| [`interview/`](interview/question-bank.md) | 从实验提炼的面试追问与知识点。 |
-| [`references/`](references/README.md) | 外部参考仓库及阅读记录。 |
-| [`compose/`](compose/README.md) | 共享容器与 Compose 使用说明。 |
-| [项目手册](docs/project-handbook/README.md) | 九个实验的能力地图、全链路边界与验证证据导航。 |
 
 ## 技术基线
 
