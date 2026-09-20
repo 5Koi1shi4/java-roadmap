@@ -36,7 +36,7 @@
 
 ## 分支与目录模型
 
-`main` 是文档中心，根目录 [学习路线](../../README.md#学习路线)提供每个实验的独立分支入口。`labs/` 中的实验代码仍由独立分支维护，不并入 `main`；`notes/`、`interview/`、`references/` 与 `compose/` 分别保留学习过程、面试追问、参考阅读和共享容器说明。本手册作为稳定入口，后续专题文档应从这里继续导航。
+`main` 是文档中心，根目录 [学习路线](../../README.md#学习路线)提供每个实验的独立分支入口。`labs/` 中的实验代码仍由独立分支维护，不并入 `main`；`notes/`、`references/` 与 `compose/` 分别保留学习过程、参考阅读和共享容器说明。本手册作为稳定入口，后续专题文档应从这里继续导航。
 
 ## 验证证据
 
@@ -49,6 +49,5 @@
 - [技术栈与取舍](technology-stack.md)
 - [算法与机制取舍](algorithms-and-tradeoffs.md)
 - [学习日志](../../notes/learning-log.md)
-- [面试题库](../../interview/question-bank.md)
 - [参考仓库阅读记录](../../references/README.md)
 - [共享 Compose 说明](../../compose/README.md)

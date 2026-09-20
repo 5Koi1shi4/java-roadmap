@@ -9,7 +9,7 @@
 1. 本页：了解路线、当前进度和目录职责。
 2. 已验收实验的 README：理解目标、运行方式和验收范围。
 3. 实验的排障复盘：了解真实环境问题及其边界。
-4. [学习日志](notes/learning-log.md)、[面试题库](interview/question-bank.md) 与 [参考仓库阅读记录](references/README.md)：沉淀学习过程与延伸问题。
+4. [学习日志](notes/learning-log.md) 与 [参考仓库阅读记录](references/README.md)：沉淀学习过程与延伸问题。
 
 ## 目录导航
 
@@ -17,7 +17,6 @@
 |---|---|
 | `labs/` | 实验代码保留在本地工作区，并通过独立分支入口访问。 |
 | [`notes/`](notes/learning-log.md) | 每日目标、测试证据、问题复盘与技术取舍。 |
-| [`interview/`](interview/question-bank.md) | 从实验提炼的面试追问与知识点。 |
 | [`references/`](references/README.md) | 外部参考仓库及阅读记录。 |
 | [`compose/`](compose/README.md) | 共享容器与 Compose 使用说明。 |
 | [项目手册](docs/project-handbook/README.md) | 九个实验的能力地图、全链路边界与验证证据导航。 |
@@ -108,7 +107,6 @@
 - 边界：只支持全新实验环境；前端 Token 仅存内存，供应商请求最小化，无权与不存在资源保持同构 404。真实模型 API 只有在明确授权并提供服务端环境变量后才切换。
 
 
-
 ## 技术基线
 
 - JDK 17、Maven Wrapper 3.9.x、Spring Boot 3.x
@@ -121,7 +119,7 @@
 1. 先写能失败的测试，明确行为边界。
 2. 实现最小功能并让测试通过。
 3. 用 Testcontainers 或真实 HTTP 流程验证外部协作。
-4. 补充 README、排障记录、学习日志和面试追问。
+4. 补充 README、排障记录、学习日志和参考阅读记录。
 5. 通过验收后更新本页状态，再进入下一阶段。
 
 ## 协作与安全约定
